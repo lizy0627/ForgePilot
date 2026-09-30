@@ -1,0 +1,1094 @@
+{
+  "version": 1,
+  "name": "ForgePilot Benchmark v1",
+  "tasks": [
+    {
+      "id": "cpp-compile-01",
+      "category": "C++ 编译错误",
+      "title": "补齐返回语句分号",
+      "fixture": "fixtures/cpp-compile-01",
+      "request": "修复 add 的 C++ 编译错误，保持整数相加语义和现有测试。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "补齐返回语句分号"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-compile-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 add 的 C++ 编译错误，保持整数相加语义和现有测试。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cpp-compile-02",
+      "category": "C++ 编译错误",
+      "title": "修复未声明标识符",
+      "fixture": "fixtures/cpp-compile-02",
+      "request": "修复 square 的未声明变量错误，函数应返回参数平方。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "修复未声明标识符"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-compile-02.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 square 的未声明变量错误，函数应返回参数平方。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cpp-compile-03",
+      "category": "C++ 编译错误",
+      "title": "统一命名空间定义",
+      "fixture": "fixtures/cpp-compile-03",
+      "request": "修复 math::twice 声明和定义不一致引发的链接错误；保持公共头文件接口。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "统一命名空间定义"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-compile-03.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 math::twice 声明和定义不一致引发的链接错误；保持公共头文件接口。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cpp-logic-01",
+      "category": "C++ 逻辑 Bug",
+      "title": "闭区间截断",
+      "fixture": "fixtures/cpp-logic-01",
+      "request": "修复 clamp_level，应截断到闭区间 [0,10]，10 和大于 10 的输入都返回 10。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "闭区间截断"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-logic-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 clamp_level，应截断到闭区间 [0,10]，10 和大于 10 的输入都返回 10。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cpp-logic-02",
+      "category": "C++ 逻辑 Bug",
+      "title": "保留负数最大值",
+      "fixture": "fixtures/cpp-logic-02",
+      "request": "修复 max_of_three 对全负数的错误结果，返回三个参数中最大值。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "保留负数最大值"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-logic-02.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 max_of_three 对全负数的错误结果，返回三个参数中最大值。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cpp-logic-03",
+      "category": "C++ 逻辑 Bug",
+      "title": "整数折扣计算次序",
+      "fixture": "fixtures/cpp-logic-03",
+      "request": "修复整数金额折扣：先乘剩余百分比，再整除100向下取整。输入 cents 0..10000，percent 0..100。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "整数折扣计算次序"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cpp-logic-03.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复整数金额折扣：先乘剩余百分比，再整除100向下取整。输入 cents 0..10000，percent 0..100。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "qt-signal-01",
+      "category": "Qt Signal/Slot",
+      "title": "恢复缺失的连接",
+      "fixture": "fixtures/qt-signal-01",
+      "request": "修复 Counter 点击后数值不更新的问题。每次 click 应让 value 增加1并且只发出一次 changed(int)，保留 Qt signal/slot 机制。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "恢复缺失的连接"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": true,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/qt-signal-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 Counter 点击后数值不更新的问题。每次 click 应让 value 增加1并且只发出一次 changed(int)，保留 Qt signal/slot 机制。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "qt-signal-02",
+      "category": "Qt Signal/Slot",
+      "title": "避免重复连接触发两次",
+      "fixture": "fixtures/qt-signal-02",
+      "request": "修复 Counter 每次 click 触发两次更新的 Signal/Slot 问题。两次连续点击应得到 value=2、两次 changed，保留正常信号参数。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "避免重复连接触发两次"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": true,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/qt-signal-02.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 Counter 每次 click 触发两次更新的 Signal/Slot 问题。两次连续点击应得到 value=2、两次 changed，保留正常信号参数。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cmake-01",
+      "category": "CMake",
+      "title": "补齐库的实现源文件",
+      "fixture": "fixtures/cmake-01",
+      "request": "修复 CMake subject 静态库遗漏实现文件引起的链接错误。只修改 cmake/Subject.cmake，保持源码和测试。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "补齐库的实现源文件"
+      },
+      "allowed_files": [
+        "cmake/Subject.cmake"
+      ],
+      "preauthorized_files": [
+        "cmake/Subject.cmake"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cmake-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 CMake subject 静态库遗漏实现文件引起的链接错误。只修改 cmake/Subject.cmake，保持源码和测试。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "cmake-02",
+      "category": "CMake",
+      "title": "传播公共 include 目录",
+      "fixture": "fixtures/cmake-02",
+      "request": "修复 subject 库消费者找不到 subject.h 的 CMake 使用要求，include 目录应公开传播。只修改 cmake/Subject.cmake。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "传播公共 include 目录"
+      },
+      "allowed_files": [
+        "cmake/Subject.cmake"
+      ],
+      "preauthorized_files": [
+        "cmake/Subject.cmake"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cmake-02.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 subject 库消费者找不到 subject.h 的 CMake 使用要求，include 目录应公开传播。只修改 cmake/Subject.cmake。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "unit-test-01",
+      "category": "Unit Test",
+      "title": "通过字符串计数单元测试",
+      "fixture": "fixtures/unit-test-01",
+      "request": "修复 parse_count 使已有单元测试通过。只接受完整的非空十进制数字字符串，返回非负 int；空串、符号、空格、后缀或溢出返回 -1。不能修改测试。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "通过字符串计数单元测试"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/unit-test-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "修复 parse_count 使已有单元测试通过。只接受完整的非空十进制数字字符串，返回非负 int；空串、符号、空格、后缀或溢出返回 -1。不能修改测试。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "unit-test-02",
+      "category": "Unit Test",
+      "title": "通过闰年边界单元测试",
+      "fixture": "fixtures/unit-test-02",
+      "request": "按公历规则修复 leap_year，使闰年和世纪边界单元测试通过，年份范围 1600..2400。不能改写测试。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "通过闰年边界单元测试"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/unit-test-02.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "按公历规则修复 leap_year，使闰年和世纪边界单元测试通过，年份范围 1600..2400。不能改写测试。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "analysis-01",
+      "category": "调用链分析",
+      "title": "说明点击到状态更新的关系",
+      "fixture": "fixtures/analysis-01",
+      "request": "只读分析从 main 到计数更新的调用链，不修改文件。最终仅输出 JSON，字段为 files（相关相对路径数组）、symbols（相关完全限定符号数组）、relations（直接调用边数组，每项 caller 和 callee）。包含 main、UI入口、Controller 和 Counter；不要把注释或旁路辅助函数当成调用边。",
+      "initial_state": {
+        "expected": "read_only",
+        "description": "说明点击到状态更新的关系"
+      },
+      "allowed_files": [],
+      "preauthorized_files": [],
+      "qt": false,
+      "success": {
+        "kind": "analysis_relations",
+        "oracle": null,
+        "required_changed": [],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "只读分析从 main 到计数更新的调用链，不修改文件。最终仅输出 JSON，字段为 files（相关相对路径数组）、symbols（相关完全限定符号数组）、relations（直接调用边数组，每项 caller 和 callee）。包含 main、UI入口、Controller 和 Counter；不要把注释或旁路辅助函数当成调用边。",
+        "expected": {
+          "files": [
+            "src/main.cpp",
+            "src/controller.h",
+            "src/controller.cpp",
+            "src/ui.cpp",
+            "src/counter.h",
+            "src/counter.cpp"
+          ],
+          "symbols": [
+            "main",
+            "onClicked",
+            "Controller::increment",
+            "Counter::increment"
+          ],
+          "relations": [
+            {
+              "caller": "main",
+              "callee": "onClicked"
+            },
+            {
+              "caller": "onClicked",
+              "callee": "Controller::increment"
+            },
+            {
+              "caller": "Controller::increment",
+              "callee": "Counter::increment"
+            }
+          ]
+        }
+      },
+      "validation_commands": [
+        [
+          "python",
+          "eval/check_analysis.py",
+          "<analysis-01/agent-result.json>"
+        ]
+      ]
+    },
+    {
+      "id": "cross-file-01",
+      "category": "跨文件修改",
+      "title": "为总价 API 增加数量参数",
+      "fixture": "fixtures/cross-file-01",
+      "request": "跨文件将 subtotal API 改为接受 unit 和 quantity 两参数，计算乘积，并更新 order_total 调用方。同步修改头文件、定义和调用处，数量0应返回0。",
+      "initial_state": {
+        "expected": "test_failed",
+        "description": "为总价 API 增加数量参数"
+      },
+      "allowed_files": [
+        "src/subject.h",
+        "src/subject.cpp",
+        "src/app.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.h",
+        "src/subject.cpp",
+        "src/app.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/cross-file-01.cpp",
+        "required_changed": [
+          "src/subject.h",
+          "src/subject.cpp",
+          "src/app.cpp"
+        ],
+        "minimum_repair_rounds": 0,
+        "expected_behavior": "跨文件将 subtotal API 改为接受 unit 和 quantity 两参数，计算乘积，并更新 order_total 调用方。同步修改头文件、定义和调用处，数量0应返回0。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    },
+    {
+      "id": "repair-01",
+      "category": "Repair",
+      "title": "编译后根据失败测试修复边界",
+      "fixture": "fixtures/repair-01",
+      "request": "分两阶段修复 positive_part：首轮只修复语法以便编译，保留现有计算表达式并结束本轮修改，让 Runtime 实际运行测试；然后依据失败日志在自动 Repair 中修复负数边界（负数返回0，非负数保持原值）。必须保留测试。",
+      "initial_state": {
+        "expected": "build_failed",
+        "description": "编译后根据失败测试修复边界"
+      },
+      "allowed_files": [
+        "src/subject.cpp"
+      ],
+      "preauthorized_files": [
+        "src/subject.cpp"
+      ],
+      "qt": false,
+      "success": {
+        "kind": "executable_oracle",
+        "oracle": "oracles/repair-01.cpp",
+        "required_changed": [],
+        "minimum_repair_rounds": 1,
+        "expected_behavior": "分两阶段修复 positive_part：首轮只修复语法以便编译，保留现有计算表达式并结束本轮修改，让 Runtime 实际运行测试；然后依据失败日志在自动 Repair 中修复负数边界（负数返回0，非负数保持原值）。必须保留测试。"
+      },
+      "validation_commands": [
+        [
+          "cmake",
+          "--preset",
+          "eval"
+        ],
+        [
+          "cmake",
+          "--build",
+          "--preset",
+          "eval-build"
+        ],
+        [
+          "ctest",
+          "--preset",
+          "eval-test",
+          "--no-tests=error"
+        ],
+        [
+          "cmake",
+          "-S",
+          "<protected-grader>",
+          "-B",
+          "<fresh-grader-build>",
+          "-DCANDIDATE=<candidate>"
+        ],
+        [
+          "cmake",
+          "--build",
+          "<fresh-grader-build>",
+          "--config",
+          "Debug",
+          "--target",
+          "forgepilot_oracle"
+        ],
+        [
+          "ctest",
+          "--test-dir",
+          "<fresh-grader-build>",
+          "-C",
+          "Debug",
+          "-R",
+          "^forgepilot_oracle$",
+          "--no-tests=error",
+          "--output-junit",
+          "<fresh-report.xml>"
+        ]
+      ]
+    }
+  ]
+}

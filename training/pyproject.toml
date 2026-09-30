@@ -1,0 +1,33 @@
+[project]
+name = "forgepilot-training"
+version = "0.1.0"
+description = "Independent local environment for ForgePilot model research and serving"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.13.0+cu126",
+    "numpy==2.5.3",
+    "tokenizers==0.23.2",
+    "safetensors==0.8.0",
+    "pyyaml==6.0.3",
+    "tqdm==4.70.1",
+    "fastapi==0.141.1",
+    "uvicorn==0.54.0",
+    "tensorboard==2.21.0",
+    "pypdf==6.19.0",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.uv]
+package = false
+python-downloads = "never"
+environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }

@@ -1,0 +1,250 @@
+"""Thin FastAPI adapter for the existing task service and ordered session events."""
+
+from contextlib import asynccontextmanager
+import asyncio
+import sqlite3
+from time import monotonic
+from urllib.parse import urlsplit
+
+from fastapi import Body, FastAPI, Header, Request, Query
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.exceptions import HTTPException
+
+from .api_models import ApproveTask, CancelTask, CreateTask, PlanFeedback, ErrorResponse, TaskList, TaskResponse, TracePage, TraceDetail
+from .errors import ForgePilotError
+from .task_host import TaskHost
+from .conversation_host import ConversationHost
+from .api_models import CreateConversation, UpdateConversation, ConversationRequest
+from .api_models import ConversationDetail, ConversationList, ConversationRequestState, ConversationMCPTools
+from .api_models import ConversationDeleted
+from .api_models import MemoryCreate,MemoryUpdate,MemoryRecord,MemoryList,MemoryDeleted,SummaryUpdate,SummaryState
+from .mcp_api import MCPRequestGuard, register_mcp_routes
+
+ERROR_STATUS = {
+    "step_limit": 409,
+    "unknown_task": 404, "repository_busy": 409, "task_busy": 409, "invalid_state": 409,
+    "stale_plan": 409, "already_approved": 409, "plan_changed": 409,
+    "invalid_event_id": 400, "event_cursor_ahead": 409,
+    "task_capacity": 503, "server_stopping": 503, "llm_config": 503, "build_config": 503,
+    "task_internal": 500,
+    "unknown_trace": 404, "invalid_page": 400, "storage_busy": 503, "storage_unavailable": 503,
+    "unknown_conversation": 404, "unknown_request": 404, "conversation_busy": 409, "request_conflict": 409,
+    "conversation_deleting": 409,
+    "unknown_memory":404,"memory_conflict":409,"summary_conflict":409,"memory_capacity":409,
+    "unknown_mcp_server": 404, "mcp_catalog_changed": 409, "mcp_config_conflict": 409,
+    "mcp_capacity": 429, "mcp_timeout": 504, "mcp_disabled": 403, "mcp_storage": 503,
+    "mcp_cancelled": 499,
+}
+
+
+def error_response(code, message, status, *, details=None, task_id=None):
+    return JSONResponse(status_code=status, content={"error": {
+        "code": code, "message": message, "details": details or [], "task_id": task_id,
+    }})
+
+
+def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=15.0, chat_factory=None, mcp_disabled=False, legacy_mcp_config=None):
+    host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled, legacy_mcp_config=legacy_mcp_config)
+    conversations = ConversationHost(host,chat_factory)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await host.start()
+        try:
+            yield
+        finally:
+            await conversations.close()
+            await host.close()
+
+    app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
+                  docs_url=None, redoc_url=None)
+    app.state.task_host = host
+    app.state.conversation_host = conversations
+    app.add_middleware(MCPRequestGuard, error=error_response)
+
+    @app.middleware("http")
+    async def local_origin(request, call_next):
+        authority = request.headers.get("host", "")
+        try:
+            parsed = urlsplit("http://" + authority)
+            valid = (len(request.headers.getlist("host")) == 1 and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                     and not parsed.username and not parsed.password and not parsed.path and not parsed.query and not parsed.fragment
+                     and (parsed.port is None or 1 <= parsed.port <= 65535))
+        except ValueError:
+            valid = False
+        if not valid:
+            return error_response("host_not_allowed", "Use the local loopback host", 400)
+        origin = request.headers.get("origin")
+        if origin and origin != f"{request.url.scheme}://{authority}":
+            return error_response("origin_not_allowed", "Cross-origin access is not enabled", 403)
+        return await call_next(request)
+
+    @app.exception_handler(ForgePilotError)
+    async def service_error(request, exc):
+        return error_response(exc.code, exc.message, ERROR_STATUS.get(exc.code, 422),
+                              task_id=getattr(exc, "task_id", None))
+
+    @app.exception_handler(sqlite3.Error)
+    async def storage_error(request, exc):
+        return error_response("storage_unavailable", "Task database is unavailable", 503)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # Never echo invalid input, request bodies, credentials, or raw validation contexts.
+        if request.url.path.startswith("/api/v1/mcp/"):
+            # Even field names/loc entries may be an attacker-supplied secret.
+            return error_response("invalid_request", "Request does not match the MCP management schema", 422)
+        return error_response("invalid_request", "Request does not match the v1 schema", 422,
+            details=[{"field": ".".join(map(str, e["loc"])), "type": e["type"]} for e in exc.errors()])
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request, exc):
+        return error_response("route_not_found" if exc.status_code == 404 else "http_error",
+                              "HTTP request could not be handled", exc.status_code)
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request, exc):
+        return error_response("api_internal", "Request failed unexpectedly; inspect task status", 500)
+
+    errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
+    register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
+
+    @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)
+    async def create_task(body: CreateTask):
+        return await host.create(body.repository_path, body.prompt)
+
+    @app.get("/api/v1/tasks", response_model=TaskList, responses=errors)
+    def list_tasks(limit: int = Query(default=20,ge=1,le=100), before: str | None = Query(default=None,max_length=512),
+                   conversation_id: str | None = Query(default=None,max_length=36)):
+        return host.store.list_page(limit,before,conversation_id)
+
+    @app.post('/api/v1/conversations',status_code=201,response_model=ConversationDetail,responses=errors)
+    def new_conversation(body: CreateConversation):
+        return host.store.create_conversation(body.title,body.repository_path)
+
+    @app.get('/api/v1/conversations',response_model=ConversationList,responses=errors)
+    def conversation_list(limit: int = Query(default=20,ge=1,le=100), before: str | None = Query(default=None,max_length=512)):
+        return host.store.conversation_page(limit,before)
+
+    @app.get('/api/v1/conversations/{conversation_id}',response_model=ConversationDetail,responses=errors)
+    def conversation_detail(conversation_id: str, before: int | None = Query(default=None,ge=1), limit: int = Query(default=100,ge=1,le=100)):
+        return host.store.conversation_detail(conversation_id,before,limit)
+
+    @app.patch('/api/v1/conversations/{conversation_id}',response_model=ConversationDetail,responses=errors)
+    def edit_conversation(conversation_id: str, body: UpdateConversation):
+        return host.store.update_conversation(conversation_id,body.model_dump(exclude_unset=True))
+
+    @app.delete('/api/v1/conversations/{conversation_id}',response_model=ConversationDeleted,responses=errors)
+    async def delete_conversation(conversation_id: str, stop_active: bool = False):
+        return await conversations.delete(conversation_id,stop_active)
+
+    @app.post('/api/v1/conversations/{conversation_id}/requests',status_code=202,response_model=ConversationRequestState,responses=errors)
+    async def conversation_request(conversation_id: str, body: ConversationRequest):
+        return await conversations.submit(conversation_id,body.request_id,body.mode,body.prompt)
+
+    @app.get('/api/v1/memories',response_model=MemoryList,responses=errors)
+    def memory_list(repository_path: str | None = Query(default=None,max_length=4096)):
+        return host.store.memory_list(repository_path)
+
+    @app.post('/api/v1/memories',status_code=201,response_model=MemoryRecord,responses=errors)
+    async def add_memory(body:MemoryCreate):
+        return await conversations.save_memory(body.model_dump())
+
+    @app.patch('/api/v1/memories/{memory_id}',response_model=MemoryRecord,responses=errors)
+    async def edit_memory(memory_id:str,body:MemoryUpdate):
+        return await conversations.save_memory(body.model_dump(),memory_id)
+
+    @app.delete('/api/v1/memories/{memory_id}',response_model=MemoryDeleted,responses=errors)
+    def delete_memory(memory_id:str):
+        return host.store.delete_memory(memory_id)
+
+    @app.get('/api/v1/conversations/{conversation_id}/context',response_model=SummaryState,responses=errors)
+    def get_summary(conversation_id:str):
+        return host.store.summary_state(conversation_id)
+
+    @app.patch('/api/v1/conversations/{conversation_id}/context',response_model=SummaryState,responses=errors)
+    async def edit_summary(conversation_id:str,body:SummaryUpdate):
+        return await conversations.edit_summary(conversation_id,**body.model_dump())
+
+    @app.delete('/api/v1/conversations/{conversation_id}/context',response_model=SummaryState,responses=errors)
+    async def delete_summary(conversation_id:str,revision:int=Query(ge=0)):
+        return await conversations.edit_summary(conversation_id,revision,delete=True)
+
+    @app.get('/api/v1/conversations/{conversation_id}/requests/{request_id}',response_model=ConversationRequestState,responses=errors)
+    def request_detail(conversation_id: str,request_id: str):
+        return host.store.conversation_request(conversation_id,request_id)
+
+    @app.get('/api/v1/conversations/{conversation_id}/requests/{request_id}/mcp-tools',response_model=ConversationMCPTools,responses=errors)
+    def request_mcp_tools(conversation_id: str,request_id: str):
+        return host.store.conversation_mcp_tools(conversation_id,request_id)
+
+    @app.post('/api/v1/conversations/{conversation_id}/requests/{request_id}/stop',response_model=ConversationRequestState,responses=errors)
+    async def stop_answer(conversation_id: str, request_id: str):
+        return await conversations.stop(conversation_id,request_id)
+
+    @app.get("/api/v1/tasks/{task_id}", response_model=TaskResponse, responses=errors)
+    def get_task(task_id: str):
+        return host.store.get(task_id)
+
+    @app.get("/api/v1/tasks/{task_id}/trace", response_model=TracePage, responses=errors)
+    def trace_page(task_id: str, after: int = Query(default=0,ge=0), limit: int = Query(default=50,ge=1,le=100)):
+        return host.store.trace_page(task_id,after,limit)
+
+    @app.get("/api/v1/tasks/{task_id}/trace/{sequence}", response_model=TraceDetail, responses=errors)
+    def trace_detail(task_id: str, sequence: int):
+        return host.store.trace_detail(task_id,sequence)
+
+    @app.post("/api/v1/tasks/{task_id}/approve", response_model=TaskResponse, status_code=202, responses=errors)
+    async def approve(task_id: str, body: ApproveTask):
+        return await host.approve(task_id, body.plan_version)
+
+    @app.post("/api/v1/tasks/{task_id}/feedback", response_model=TaskResponse, status_code=202, responses=errors)
+    async def feedback(task_id: str, body: PlanFeedback):
+        return await host.feedback(task_id, body.plan_version, body.feedback)
+
+    @app.post("/api/v1/tasks/{task_id}/cancel", response_model=TaskResponse, responses=errors)
+    async def cancel(task_id: str, body: CancelTask = Body(default=CancelTask())):
+        return await host.cancel(task_id, reason=body.reason, plan_version=body.plan_version)
+
+    @app.get("/api/v1/tasks/{task_id}/events", responses={**errors,
+        200: {"description": "Ordered SSE stream; JSON EventPayload in data, task-scoped sequence in id",
+              "content": {"text/event-stream": {"schema": {"type": "string"}}}},
+        204: {"description": "Terminal stream already fully acknowledged"}})
+    async def events(task_id: str, request: Request, last_event_id: str | None = Header(default=None)):
+        cursor = await asyncio.to_thread(host.store.cursor,task_id,last_event_id)
+        available, closed = await asyncio.to_thread(host.store.read,task_id,cursor)
+        if closed and not available:
+            return Response(status_code=204)
+
+        async def stream():
+            nonlocal cursor
+            heartbeat_at = monotonic()
+            yield "retry: 1000\n\n"
+            while True:
+                try:
+                    batch, closed = await asyncio.to_thread(host.store.read,task_id,cursor)
+                except ForgePilotError as exc:
+                    if exc.code in {'unknown_task', 'storage_unavailable'}: return
+                    raise
+                for event in batch:
+                    yield event.frame()
+                    cursor = event.sequence
+                if batch:
+                    continue  # Drain all chunks, including when the terminal stream has >64 events.
+                if closed or await request.is_disconnected():
+                    return
+                if monotonic() - heartbeat_at >= heartbeat_seconds:
+                    yield ": heartbeat\n\n"
+                    heartbeat_at = monotonic()
+                try:
+                    await host.store.wait(task_id, cursor, heartbeat_seconds)
+                except ForgePilotError as exc:
+                    if exc.code in {'unknown_task', 'storage_unavailable'}: return
+                    raise
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
+
+    return app

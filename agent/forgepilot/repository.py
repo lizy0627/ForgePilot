@@ -1,0 +1,290 @@
+"""Bounded, read-only access to an explicitly selected Git repository."""
+
+import asyncio
+import codecs
+import fnmatch
+import hashlib
+import json
+import os
+from pathlib import Path, PureWindowsPath
+import stat
+
+from .errors import ForgePilotError
+from .process import run_process
+
+MAX_FILE_BYTES = 262_144
+MAX_SCAN_ENTRIES = 20_000
+MAX_FILES = 2_000
+MAX_SEARCH_FILES = 200
+MAX_SEARCH_BYTES = 8_388_608
+MAX_OUTPUT_CHARS = 12_000
+EXCLUDED = (
+    ".git", ".hg", ".svn", ".forgepilot", ".venv", "*.venv", "venv", "env",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".uv-cache",
+    "build", "build-*", "cmake-build-*", "cmakefiles", "out", "bin", "obj", "dist",
+    "node_modules", ".vs", ".idea", ".ssh", ".aws", ".azure", "logs",
+    ".env*", "*secret*", "*credential*", "*.pem", "*.key", "*.p12", "*.pfx",
+    "id_rsa*", "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "config.local.*",
+    "cmakeuserpresets.json", "local-env.cmd", "*.exe", "*.dll", "*.obj", "*.pdb",
+    "*.lib", "*.a", "*.o", "*.db", "*.sqlite*",
+)
+
+
+def excluded(name: str) -> bool:
+    return any(fnmatch.fnmatchcase(name.casefold(), pattern) for pattern in EXCLUDED)
+
+
+def is_link(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def opened_path(fd: int) -> Path | None:
+    """On Windows validate the opened handle, not just the pre-open path."""
+    if os.name != "nt":
+        proc = Path(f"/proc/self/fd/{fd}")
+        return proc.resolve() if proc.exists() else None
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    api.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    api.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32_768)
+    size = api(msvcrt.get_osfhandle(fd), buffer, len(buffer), 0)
+    if not size or size >= len(buffer):
+        raise ForgePilotError("repository_boundary", "Cannot verify opened file location")
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value)
+
+
+class Repository:
+    def __init__(self, root: Path, rg_executable: str) -> None:
+        self.root = root
+        self.rg_executable = rg_executable
+        info = root.stat()
+        self._root_identity = (info.st_dev, info.st_ino)
+        self._read_versions: dict[str, str] = {}
+
+    @classmethod
+    async def open(cls, path: str, *, rg_executable: str, git_executable: str):
+        try:
+            root = Path(path).resolve(strict=True)
+            if not root.is_dir():
+                raise OSError()
+        except (OSError, ValueError, RuntimeError):
+            raise ForgePilotError("repository_invalid", "Repository directory does not exist") from None
+        result = await run_process(
+            [git_executable, "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root),
+             "rev-parse", "--show-toplevel"], root, output_limit=16_384,
+        )
+        try:
+            valid = (result.returncode == 0 and not result.truncated and
+                     Path(result.stdout.decode("utf-8").strip()).resolve() == root)
+        except (ValueError, OSError, UnicodeError):
+            valid = False
+        if not valid:
+            raise ForgePilotError("repository_not_git_root", "Select the root of a local Git working repository")
+        return cls(root, rg_executable)
+
+    def _path(self, value: str, *, allow_missing: bool = False) -> Path:
+        if (len(value) > 1_024 or not value or any(ord(c) < 32 for c in value)
+                or ":" in value or PureWindowsPath(value).drive or value.startswith(("/", "\\"))):
+            raise ForgePilotError("repository_boundary", "Use a relative repository path")
+        parts = value.replace("\\", "/").split("/")
+        if ".." in parts or any(p and p != "." and (
+                p.endswith((" ", ".")) or excluded(p) or PureWindowsPath(p).is_reserved()
+                or any(c in p for c in '<>"|?*')) for p in parts):
+            raise ForgePilotError("repository_denied", "Path is excluded or contains parent traversal")
+        path = self.root
+        try:
+            root_info = self.root.stat()
+            if self.root.resolve(strict=True) != self.root or (root_info.st_dev, root_info.st_ino) != self._root_identity:
+                raise ForgePilotError("repository_boundary", "Repository root changed")
+            for part in parts:
+                if part in ("", "."):
+                    continue
+                path /= part
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    if allow_missing:
+                        continue
+                    raise
+                if is_link(info):
+                    raise ForgePilotError("repository_boundary", "Links and reparse points are excluded")
+            resolved = path.resolve(strict=not allow_missing)
+            if not resolved.is_relative_to(self.root):
+                raise ForgePilotError("repository_boundary", "Path is outside the repository")
+            if any(excluded(part) for part in resolved.relative_to(self.root).parts):
+                raise ForgePilotError("repository_denied", "Canonical path is excluded")
+            return path
+        except (OSError, ValueError, RuntimeError):
+            raise ForgePilotError("repository_path", "Path does not exist or is inaccessible") from None
+
+    def normalize_plan_path(self, value: str) -> str:
+        """Validate proposed existing/new files without creating files or directories."""
+        path = self._path(value, allow_missing=True)
+        try:
+            if path.exists() and not path.is_file():
+                raise ForgePilotError("repository_path", "Plan must name a file, not a directory")
+            return path.resolve(strict=False).relative_to(self.root).as_posix()
+        except (OSError, ValueError, RuntimeError):
+            raise ForgePilotError("repository_boundary", "Cannot normalize proposed file location") from None
+
+    async def _files(self, path: str) -> tuple[list[str], bool]:
+        directory = self._path(path)
+        if not directory.is_dir():
+            raise ForgePilotError("repository_path", "Expected a directory")
+        pending = [directory]
+        files = []
+        scanned = 0
+        while pending:
+            current = self._path(pending.pop().relative_to(self.root).as_posix())
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        scanned += 1
+                        if scanned > MAX_SCAN_ENTRIES or len(files) >= MAX_FILES:
+                            return sorted(files), True
+                        if scanned % 64 == 0:
+                            await asyncio.sleep(0)
+                        if excluded(entry.name):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if is_link(info):
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(Path(entry.path))
+                        elif stat.S_ISREG(info.st_mode):
+                            files.append(Path(entry.path).relative_to(self.root).as_posix())
+            except OSError:
+                raise ForgePilotError("repository_read", "Cannot enumerate repository directory") from None
+        return sorted(files), False
+
+    def _read(self, path: str) -> tuple[str, bool]:
+        text, truncated, _ = self._read_snapshot(path)
+        return text, truncated
+
+    def _read_snapshot(self, path: str) -> tuple[str, bool, str | None]:
+        candidate = self._path(path)
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(candidate, flags), "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ForgePilotError("repository_path", "Expected a regular file")
+                actual = opened_path(stream.fileno())
+                if actual is not None and (not actual.is_relative_to(self.root) or actual != candidate):
+                    raise ForgePilotError("repository_boundary", "Opened file location changed")
+                self._path(path)  # Reject a changed link/parent before reading the handle.
+                data = stream.read(MAX_FILE_BYTES + 1)
+            truncated = len(data) > MAX_FILE_BYTES
+            version = None if truncated else hashlib.sha256(data).hexdigest()
+            data = data[:MAX_FILE_BYTES]
+            if b"\x00" in data:
+                raise ForgePilotError("repository_binary", "Binary files are not supported")
+            text = codecs.getincrementaldecoder("utf-8-sig")().decode(data, final=not truncated)
+            return text, truncated, version
+        except UnicodeError:
+            raise ForgePilotError("repository_encoding", "Only UTF-8 text is supported in Phase 1") from None
+        except (OSError, ValueError):
+            raise ForgePilotError("repository_read", "Cannot read repository file") from None
+
+    async def list_files(self, path: str = ".", limit: int = 200) -> str:
+        files, truncated = await self._files(path)
+        selected = []
+        size = 0
+        for file in files:
+            size += len(json.dumps(file, ensure_ascii=False)) + 2
+            if len(selected) >= limit or size > MAX_OUTPUT_CHARS:
+                truncated = True
+                break
+            selected.append(file)
+        return json.dumps({"files": selected, "truncated": truncated,
+                           "note": "Policy-excluded paths and links are omitted; listing is bounded"}, ensure_ascii=False)
+
+    async def read_file(self, path: str, start_line: int = 1, end_line: int = 200) -> str:
+        return await self._read_file(path, start_line, end_line, record_version=True)
+
+    async def _read_file(self, path: str, start_line: int = 1, end_line: int = 200, *, record_version=False) -> str:
+        if end_line < start_line:
+            raise ForgePilotError("invalid_arguments", "end_line must be >= start_line")
+        await asyncio.sleep(0)
+        key = self.normalize_plan_path(path).casefold() if record_version else None
+        text, limited, version = self._read_snapshot(path)
+        # Only explicit reads establish a baseline; internal _read callers do not.
+        if record_version:
+            if version is None:
+                self._read_versions.pop(key, None)
+            else:
+                self._read_versions[key] = version
+        lines = text.splitlines()
+        selected = "\n".join(f"{i}: {line}" for i, line in
+                             enumerate(lines, 1) if start_line <= i <= end_line)
+        reasons = []
+        if limited:
+            reasons.append("file_byte_limit")
+        if start_line > 1 or end_line < len(lines):
+            reasons.append("line_range")
+        if len(selected) > MAX_OUTPUT_CHARS:
+            selected = selected[:MAX_OUTPUT_CHARS]
+            reasons.append("output_limit")
+        # Keep structured JSON valid even when code contains many tabs/quotes.
+        while len(json.dumps(selected, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
+            selected = selected[:len(selected) * 3 // 4]
+            if "output_limit" not in reasons:
+                reasons.append("output_limit")
+        return json.dumps({"path": path, "content": selected, "truncated": bool(reasons),
+                           "limits": reasons}, ensure_ascii=False)
+
+    async def search_code(self, query: str, path: str = ".", max_results: int = 50, *, file_suffixes=None) -> str:
+        target = self._path(path)
+        files, listing_limited = await self._files(path) if target.is_dir() else ([path], False)
+        if file_suffixes is not None:
+            files = [file for file in files if Path(file).suffix.casefold() in file_suffixes]
+        reasons = {"file_scan_limit"} if listing_limited or len(files) > MAX_SEARCH_FILES else set()
+        matches = []
+        scanned_bytes = 0
+        output_chars = 0
+        skipped = 0
+        for file in files[:MAX_SEARCH_FILES]:
+            await asyncio.sleep(0)
+            try:
+                text, limited = self._read(file)
+            except ForgePilotError as exc:
+                if exc.code in {"repository_binary", "repository_encoding"}:
+                    skipped += 1
+                    continue
+                raise
+            data = text.encode("utf-8")
+            if scanned_bytes + len(data) > MAX_SEARCH_BYTES:
+                reasons.add("search_byte_limit")
+                break
+            scanned_bytes += len(data)
+            if limited:
+                reasons.add("file_byte_limit")
+            # Search only the bounded, verified snapshot. LF defines source lines;
+            # Unicode paragraph separators remain part of the source text.
+            for number, content in enumerate(text.split("\n"), 1):
+                if number % 256 == 0:
+                    await asyncio.sleep(0)
+                if content.endswith("\r"):
+                    content = content[:-1]
+                if query not in content:
+                    continue
+                match = {"path": file, "line": number, "text": content}
+                cost = len(json.dumps(match, ensure_ascii=False)) + 2
+                if len(matches) >= max_results or output_chars + cost > MAX_OUTPUT_CHARS:
+                    reasons.add("match_or_output_limit")
+                    return json.dumps({"matches": matches, "truncated": True, "limits": sorted(reasons),
+                                       "skipped_non_utf8_or_binary": skipped}, ensure_ascii=False)
+                output_chars += cost
+                matches.append(match)
+        return json.dumps({"matches": matches, "truncated": bool(reasons), "limits": sorted(reasons),
+                           "skipped_non_utf8_or_binary": skipped}, ensure_ascii=False)
