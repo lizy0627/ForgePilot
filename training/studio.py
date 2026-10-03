@@ -28,13 +28,23 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 import uvicorn
 from studio_data import parse_files,demo_files
 from studio_io import read_json,write_json
+from deletion import (atomic_move_within_storage,delete_transaction,read_receipt,read_transaction,
+    read_lineage_snapshot,receipt_run_ids,safe_error,target_locations,transaction_ids,
+    validate_target,write_lineage_snapshot,write_receipt,write_transaction)
 
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_STORAGE=ROOT/'logs/model-training/studio'
 ACTIVE={'preparing','running','pausing'}
+CLEANUP_MAX_ATTEMPTS=3
+CLEANUP_RETRY_DELAYS=(1.0,5.0)
+CLEANUP_CLOSE_TIMEOUT=2.0
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
+
+
+class DeletionLocked(ValueError):
+    pass
 
 
 class ProcessOwner:
@@ -102,8 +112,12 @@ class ProcessOwner:
 class Studio:
     def __init__(self,storage):
         self.root=Path(storage).resolve(); self.root.mkdir(parents=True,exist_ok=True)
-        for folder in ('datasets','runs','requests','imports'): (self.root/folder).mkdir(exist_ok=True)
-        self.lock=threading.RLock(); self.process=None; self.active_id=None; self.inference=None
+        for folder in ('datasets','runs','requests','imports','deletion-journal','trash'):
+            (self.root/folder).mkdir(exist_ok=True)
+        (self.root/'deletion-journal/receipts').mkdir(exist_ok=True)
+        self.lock=threading.RLock(); self.process=None; self.active_id=None; self.inference=None; self.inference_id=None
+        self.cleanup_tasks_lock=threading.Lock(); self.cleanup_tasks={}; self.cleanup_stop=threading.Event()
+        self.deletion_fault=lambda _point:None
         self.owner=ProcessOwner(); self.csrf=secrets.token_urlsafe(32); self.instance=uuid4().hex
         self.import_owner=ProcessOwner(memory_limit=768*1024*1024); self.import_process=None
         key_path=self.root/'api-key.json'
@@ -124,6 +138,7 @@ class Studio:
             self.process=None; self.active_id=None
 
     def recover(self):
+        self.recover_deletions()
         for path in (self.root/'imports').glob('*/state.json'):
             state=read_json(path)
             if state['status']=='processing':
@@ -135,19 +150,41 @@ class Studio:
 
     def snapshot(self):
         with self.lock:
-            self.reconcile(); datasets=[]; runs=[]
+            self.reconcile(); datasets=[]; runs=[]; states={}; corrupt_run_ids=set()
             for path in (self.root/'datasets').glob('*/data.json'):
                 item=read_json(path); datasets.append({k:v for k,v in item.items() if k!='documents'})
             for path in (self.root/'runs').glob('*/state.json'):
-                item=read_json(path); artifact=path.parent/'model/model.safetensors'
+                try:
+                    if self._dependent_is_logically_deleted(path.parent.name): continue
+                except (OSError,ValueError,json.JSONDecodeError): pass
+                try: item=self._validated_run_state(read_json(path),path.parent.name)
+                except (OSError,ValueError,json.JSONDecodeError,TypeError,KeyError):
+                    corrupt_run_ids.add(path.parent.name); continue
+                states[item['id']]=(path,item)
+            for identity,(path,item) in states.items():
+                item=dict(item); artifact=path.parent/'model/model.safetensors'
                 item['has_model']=artifact.exists(); item['can_resume']=(path.parent/'checkpoint.pt').exists() and item['step']<item['total_steps']
                 if item['id']==self.active_id:
                     control=read_json(path.parent/'control.json').get('action')
                     if control in ('pause','stop'): item['pending_action']=control
+                base_run=item.get('base_run')
+                if base_run:
+                    item.update(base_run_deleted=False,base_run_snapshot=None,deleted_at=None,base_run_status='present')
+                    if base_run not in states:
+                        item.update(base_run_deleted=None,base_run_status='unknown')
+                        if base_run not in corrupt_run_ids:
+                            try: lineage=read_lineage_snapshot(path.parent/'lineage.json')
+                            except (OSError,ValueError,json.JSONDecodeError): pass
+                            else:
+                                if lineage['base_run']==base_run:
+                                    item.update(base_run_deleted=True,base_run_snapshot=lineage['base_run_snapshot'],
+                                        deleted_at=lineage['deleted_at'],base_run_status='deleted')
+                else: item['base_run_status']='none'
                 runs.append(item)
             return {'datasets':sorted(datasets,key=lambda x:x['created'],reverse=True),
                 'runs':sorted(runs,key=lambda x:x['created'],reverse=True),'active_run':self.active_id,
-                'inference_busy':self.inference is not None,'storage':str(self.root)}
+                'inference_busy':self.inference is not None,'storage':str(self.root),
+                'deletions':self.deletion_summaries()}
 
     def add_dataset(self,payload):
         dataset=parse_files(payload.get('files')); identity=uuid4().hex[:16]
@@ -271,6 +308,371 @@ class Studio:
                 return {'ok':True}
             raise ValueError('无效操作。')
 
+    @staticmethod
+    def _validated_run_state(value,expected_id):
+        if (not isinstance(expected_id,str) or not re.fullmatch('[a-f0-9]{16}',expected_id)
+                or not isinstance(value,dict) or value.get('id')!=expected_id
+                or not isinstance(value.get('status'),str) or not value['status']):
+            raise ValueError('训练记录状态无效。')
+        dataset_id=value.get('dataset_id')
+        if not isinstance(dataset_id,str) or not re.fullmatch('[a-f0-9]{16}',dataset_id):
+            raise ValueError('训练记录资料编号无效。')
+        base_run=value.get('base_run')
+        if base_run is not None and (not isinstance(base_run,str) or not re.fullmatch('[a-f0-9]{16}',base_run)):
+            raise ValueError('训练记录依赖编号无效。')
+        return value
+
+    def _matching_deletion(self,run_id):
+        try: return True,read_receipt(self.root,run_id)
+        except FileNotFoundError: pass
+        journals=[]
+        for transaction_id in transaction_ids(self.root):
+            transaction=read_transaction(self.root,transaction_id)
+            if transaction['transaction_id']!=transaction_id:
+                raise ValueError('删除事务日志编号不匹配。')
+            if transaction['run_id']==run_id: journals.append(transaction)
+        if len(journals)>1: raise ValueError('同一训练记录存在多个删除事务，需要人工处理。')
+        return (False,journals[0]) if journals else (False,None)
+
+    def plan_run_deletion(self,identity):
+        """Build a read-only deletion plan while holding the Studio lock."""
+        with self.lock:
+            self.reconcile()
+            self.path('runs',identity)
+            if self.active_id==identity: raise DeletionLocked('请先暂停或停止这项训练，再删除模型。')
+            if self.inference and self.inference_id in (None,identity):
+                raise DeletionLocked('模型正在试用，请等待本次生成完成后再删除。')
+            receipt,existing=self._matching_deletion(identity)
+            if existing is not None:
+                return {'existing':existing,'receipt':receipt}
+            directory=self.path('runs',identity)
+            state=self._validated_run_state(read_json(directory/'state.json'),identity)
+            dataset_id=state['dataset_id']; dataset_shared=False; uncertain=False; dependent=[]
+            for path in (self.root/'runs').glob('*/state.json'):
+                if path.parent==directory: continue
+                other_id=path.parent.name
+                try:
+                    if self._dependent_is_logically_deleted(other_id): continue
+                    other=self._validated_run_state(read_json(path),other_id)
+                except (OSError,ValueError,json.JSONDecodeError,TypeError,KeyError):
+                    uncertain=True; continue
+                if other['dataset_id']==dataset_id: dataset_shared=True
+                if other.get('base_run')==identity: dependent.append(other_id)
+            dataset_shared=dataset_shared or uncertain
+            targets=[{'kind':'run','id':identity}]
+            if not dataset_shared:
+                targets.append({'kind':'dataset','id':dataset_id})
+                if self.path('imports',dataset_id).exists(): targets.append({'kind':'import','id':dataset_id})
+            for request_dir in (self.root/'requests').iterdir():
+                if not request_dir.is_dir(): continue
+                try: request=read_json(request_dir/'input.json')
+                except (OSError,json.JSONDecodeError): continue
+                if request.get('model_id')==identity:
+                    target={'kind':'request','id':request_dir.name}; validate_target(target); targets.append(target)
+            return {'run_id':identity,'dataset_id':dataset_id,'dataset_shared':dataset_shared,
+                'dependent_run_ids':sorted(dependent),'targets':targets}
+
+    def prepare_deletion(self,plan):
+        with self.lock:
+            if plan.get('existing') is not None: return plan['existing']
+            for _ in range(10):
+                transaction_id=uuid4().hex; trash=self.root/'trash'/transaction_id
+                try: trash.mkdir()
+                except FileExistsError: continue
+                break
+            else: raise OSError('无法创建唯一删除事务目录。')
+            transaction={'version':1,'transaction_id':transaction_id,'run_id':plan['run_id'],
+                'dataset_id':plan['dataset_id'],'status':'prepared','created_at':now(),'committed_at':None,
+                'dataset_shared':plan['dataset_shared'],'dependent_run_ids':plan['dependent_run_ids'],
+                'targets':plan['targets'],'moved':[],'cleanup_attempts':0,'last_error':None}
+            write_transaction(self.root,transaction)
+            self.deletion_fault('after_prepared')
+            return transaction
+
+    def _mark_deletion_manual(self,transaction,message):
+        transaction={**transaction,'status':'manual_intervention_required','last_error':message}
+        write_transaction(self.root,transaction)
+        return transaction
+
+    def _move_deletion_target(self,transaction,target,fault_point=None):
+        source,destination=target_locations(self.root,transaction['transaction_id'],target)
+        source_exists=os.path.lexists(source); destination_exists=os.path.lexists(destination)
+        if source_exists and destination_exists:
+            return self._mark_deletion_manual(transaction,'source and trash target both exist')
+        if not source_exists and not destination_exists:
+            return self._mark_deletion_manual(transaction,'source and trash target are both missing')
+        if source_exists:
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            atomic_move_within_storage(self.root,source,destination)
+            if fault_point: self.deletion_fault(fault_point)
+        if target not in transaction['moved']:
+            transaction={**transaction,'moved':[*transaction['moved'],target],'last_error':None}
+            write_transaction(self.root,transaction)
+        return transaction
+
+    def _dependent_is_logically_deleted(self,identity):
+        receipt,transaction=self._matching_deletion(identity)
+        if transaction is None: return False
+        if receipt or transaction['status'] in ('committed','staged','cleanup_pending','cleaned'):
+            return True
+        if transaction['status']=='prepared':
+            source,destination=target_locations(self.root,transaction['transaction_id'],
+                {'kind':'run','id':identity})
+            return not os.path.lexists(source) and os.path.lexists(destination)
+        return False
+
+    def _prepare_dependent_lineage(self,transaction):
+        """Durably snapshot known live child lineage before the parent commit point."""
+        run_target={'kind':'run','id':transaction['run_id']}
+        source,destination=target_locations(self.root,transaction['transaction_id'],run_target)
+        source_exists=os.path.lexists(source); destination_exists=os.path.lexists(destination)
+        if source_exists==destination_exists: return transaction,None
+        parent_directory=source if source_exists else destination
+        parent=self._validated_run_state(read_json(parent_directory/'state.json'),transaction['run_id'])
+        parent_name=str(parent.get('name') or transaction['run_id'])[:80]
+        live_dependents=[]
+        for identity in transaction['dependent_run_ids']:
+            directory=self.path('runs',identity)
+            if not directory.exists():
+                if self._dependent_is_logically_deleted(identity): continue
+                raise ValueError('派生模型状态不确定，父模型删除未提交。')
+            child=self._validated_run_state(read_json(directory/'state.json'),identity)
+            if child.get('base_run')!=transaction['run_id']:
+                raise ValueError('派生模型谱系不一致，父模型删除未提交。')
+            live_dependents.append(identity)
+        if live_dependents!=transaction['dependent_run_ids']:
+            transaction={**transaction,'dependent_run_ids':live_dependents}
+            write_transaction(self.root,transaction)
+        if not source_exists:
+            deleted_at=None
+            for identity in live_dependents:
+                try: lineage=read_lineage_snapshot(self.path('runs',identity)/'lineage.json')
+                except (OSError,ValueError,json.JSONDecodeError):
+                    return self._mark_deletion_manual(transaction,'dependent lineage snapshot is missing'),None
+                if (lineage['transaction_id']!=transaction['transaction_id']
+                        or lineage['base_run']!=transaction['run_id']):
+                    return self._mark_deletion_manual(transaction,'dependent lineage snapshot does not match'),None
+                if deleted_at is not None and lineage['deleted_at']!=deleted_at:
+                    return self._mark_deletion_manual(transaction,'dependent lineage timestamps do not match'),None
+                deleted_at=lineage['deleted_at']
+            return transaction,deleted_at or now()
+        deleted_at=now()
+        lineage={'version':1,'transaction_id':transaction['transaction_id'],
+            'base_run':transaction['run_id'],'base_run_deleted':True,
+            'base_run_snapshot':{'name':parent_name},'deleted_at':deleted_at}
+        for identity in live_dependents:
+            write_lineage_snapshot(self.path('runs',identity)/'lineage.json',lineage)
+        for identity in live_dependents:
+            if read_lineage_snapshot(self.path('runs',identity)/'lineage.json')!=lineage:
+                raise OSError('谱系快照校验失败。')
+        self.deletion_fault('after_lineage_snapshots')
+        return transaction,deleted_at
+
+    def commit_deletion(self,transaction):
+        with self.lock:
+            if transaction['status']!='prepared': return transaction
+            run_target={'kind':'run','id':transaction['run_id']}
+            try:
+                transaction,deleted_at=self._prepare_dependent_lineage(transaction)
+                if transaction['status']=='manual_intervention_required': return transaction
+                transaction=self._move_deletion_target(transaction,run_target,'after_run_move')
+            except Exception as error:
+                transaction={**transaction,'last_error':safe_error(error)}
+                write_transaction(self.root,transaction); raise
+            if transaction['status']=='manual_intervention_required': return transaction
+            transaction={**transaction,'status':'committed','committed_at':deleted_at or now(),'last_error':None}
+            write_transaction(self.root,transaction)
+            self.deletion_fault('after_committed')
+            return transaction
+
+    def stage_deletion_targets(self,transaction):
+        with self.lock:
+            if transaction['status']!='committed': return transaction
+            first_request=True
+            for target in transaction['targets']:
+                if target['kind']=='run': continue
+                point={'dataset':'after_dataset_move','import':'after_import_move'}.get(target['kind'])
+                if target['kind']=='request' and first_request:
+                    point='after_first_request_move'; first_request=False
+                try: transaction=self._move_deletion_target(transaction,target,point)
+                except Exception as error:
+                    transaction={**transaction,'last_error':safe_error(error)}
+                    write_transaction(self.root,transaction); return transaction
+                if transaction['status']=='manual_intervention_required': return transaction
+            transaction={**transaction,'status':'staged','last_error':None}
+            write_transaction(self.root,transaction)
+            self.deletion_fault('after_staged')
+            return transaction
+
+    @staticmethod
+    def _receipt_from_transaction(transaction):
+        return {'version':1,'transaction_id':transaction['transaction_id'],'run_id':transaction['run_id'],
+            'status':'cleaned','dataset_shared':transaction['dataset_shared'],
+            'deleted_dataset':any(target['kind']=='dataset' for target in transaction['moved']),
+            'deleted_requests':sum(target['kind']=='request' for target in transaction['moved']),
+            'dependent_runs':len(transaction['dependent_run_ids']),
+            'committed_at':transaction['committed_at'],'cleaned_at':now()}
+
+    def _finalize_cleaned(self,transaction):
+        transaction={**transaction,'status':'cleaned','last_error':None}
+        write_transaction(self.root,transaction)
+        write_receipt(self.root,self._receipt_from_transaction(transaction))
+        delete_transaction(self.root,transaction['transaction_id'])
+
+    def _cleanup_deletion_once(self,transaction_id):
+        """Perform one physical attempt; rmtree always runs without Studio.lock."""
+        with self.lock:
+            try: transaction=read_transaction(self.root,transaction_id)
+            except FileNotFoundError:
+                return True
+            if transaction['status']=='cleaned':
+                self._finalize_cleaned(transaction); return True
+            if transaction['status'] not in ('staged','cleanup_pending'): return True
+            transaction={**transaction,'status':'cleanup_pending',
+                'cleanup_attempts':transaction['cleanup_attempts']+1,'last_error':None}
+            write_transaction(self.root,transaction)
+        try: shutil.rmtree(self.root/'trash'/transaction_id)
+        except FileNotFoundError: pass
+        except OSError as error:
+            with self.lock:
+                transaction=read_transaction(self.root,transaction_id)
+                transaction={**transaction,'status':'cleanup_pending','last_error':safe_error(error)}
+                write_transaction(self.root,transaction)
+            return False
+        with self.lock:
+            transaction=read_transaction(self.root,transaction_id)
+            self._finalize_cleaned(transaction)
+        return True
+
+    def _cleanup_worker(self,transaction_id,auto_retry):
+        task_attempts=0
+        try:
+            while True:
+                task_attempts+=1
+                try: complete=self._cleanup_deletion_once(transaction_id)
+                except (OSError,ValueError,json.JSONDecodeError): complete=False
+                if complete or not auto_retry or self.cleanup_stop.is_set(): return
+                with self.lock:
+                    try: transaction=read_transaction(self.root,transaction_id)
+                    except (OSError,ValueError,json.JSONDecodeError): return
+                    attempts=transaction['cleanup_attempts']
+                if attempts>=CLEANUP_MAX_ATTEMPTS or task_attempts>=CLEANUP_MAX_ATTEMPTS: return
+                delay=CLEANUP_RETRY_DELAYS[min(task_attempts-1,len(CLEANUP_RETRY_DELAYS)-1)]
+                if self.cleanup_stop.wait(delay): return
+        finally:
+            with self.cleanup_tasks_lock:
+                if self.cleanup_tasks.get(transaction_id) is threading.current_thread():
+                    self.cleanup_tasks.pop(transaction_id,None)
+
+    def _schedule_cleanup(self,transaction_id,auto_retry=True):
+        with self.cleanup_tasks_lock:
+            current=self.cleanup_tasks.get(transaction_id)
+            if current and current.is_alive(): return False
+            if self.cleanup_stop.is_set(): return False
+            thread=threading.Thread(target=self._cleanup_worker,args=(transaction_id,auto_retry),
+                name='training-cleanup-'+transaction_id[:8],daemon=True)
+            self.cleanup_tasks[transaction_id]=thread; thread.start(); return True
+
+    def retry_deletion_cleanup(self,transaction_id):
+        """Explicitly request one cleanup attempt, including after automatic retries are exhausted."""
+        with self.lock:
+            transaction=read_transaction(self.root,transaction_id)
+            if transaction['status'] not in ('staged','cleanup_pending','cleaned'):
+                raise ValueError('删除事务尚未完成转移，不能清理。')
+        return self._schedule_cleanup(transaction_id,auto_retry=False)
+
+    def wait_for_deletion_cleanup(self,transaction_id,timeout=5):
+        with self.cleanup_tasks_lock: thread=self.cleanup_tasks.get(transaction_id)
+        if thread: thread.join(timeout=max(0,timeout))
+        return not thread or not thread.is_alive()
+
+    def recover_deletions(self):
+        cleanup=[]
+        with self.lock:
+            try: identities=transaction_ids(self.root)
+            except ValueError: identities=[]
+            for transaction_id in identities:
+                try: transaction=read_transaction(self.root,transaction_id)
+                except (OSError,ValueError,json.JSONDecodeError):
+                    continue
+                if transaction['status']=='manual_intervention_required': continue
+                try:
+                    if transaction['status']=='prepared': transaction=self.commit_deletion(transaction)
+                    if transaction['status']=='committed': transaction=self.stage_deletion_targets(transaction)
+                    if transaction['status'] in ('staged','cleanup_pending'): cleanup.append(transaction_id)
+                    if transaction['status']=='cleaned': self._finalize_cleaned(transaction)
+                except (OSError,ValueError,json.JSONDecodeError):
+                    continue
+        for transaction_id in cleanup: self._schedule_cleanup(transaction_id,auto_retry=False)
+
+    def deletion_status(self,transaction_id):
+        with self.lock:
+            receipt=None
+            for run_id in receipt_run_ids(self.root):
+                candidate=read_receipt(self.root,run_id)
+                if candidate['transaction_id']==transaction_id:
+                    receipt=candidate; break
+            if receipt is not None:
+                return {'ok':True,'transaction_id':transaction_id,'status':'cleaned',
+                    'deleted_run':receipt['run_id'],'deleted_dataset':receipt['deleted_dataset'],
+                    'dataset_shared':receipt['dataset_shared'],'deleted_requests':receipt['deleted_requests'],
+                    'dependent_runs':receipt['dependent_runs'],'cleanup_pending':False,'last_error':None}
+            transaction=read_transaction(self.root,transaction_id)
+            requests=sum(target['kind']=='request' for target in transaction['moved'])
+            dataset=any(target['kind']=='dataset' for target in transaction['moved'])
+            return {'ok':transaction['status'] not in ('manual_intervention_required',),
+                'transaction_id':transaction_id,'status':transaction['status'],
+                'deleted_run':transaction['run_id'],'deleted_dataset':dataset,
+                'dataset_shared':transaction['dataset_shared'],'deleted_requests':requests,
+                'dependent_runs':len(transaction['dependent_run_ids']),
+                'logical_deleted':any(target['kind']=='run' for target in transaction['moved']),
+                'cleanup_pending':transaction['status']=='cleanup_pending',
+                'last_error':transaction['last_error']}
+
+    @staticmethod
+    def _public_deletion_status(value):
+        cleaned=value['status']=='cleaned'
+        logical_deleted=cleaned or value.get('logical_deleted',False)
+        cleanup_status=('cleaned' if cleaned else
+            'manual_intervention_required' if value['status']=='manual_intervention_required' else 'pending')
+        return {'deletion_id':value['transaction_id'],'run_id':value['deleted_run'],
+            'logical_status':'deleted' if logical_deleted else 'not_deleted',
+            'cleanup_status':cleanup_status,'dataset_shared':value['dataset_shared'],
+            'deleted_dataset':value['deleted_dataset'],'deleted_requests':value['deleted_requests'],
+            'dependent_runs':value['dependent_runs']}
+
+    def deletion_api_status(self,transaction_id):
+        if not isinstance(transaction_id,str) or not re.fullmatch('[a-f0-9]{32}',transaction_id):
+            raise ValueError('删除事务编号无效。')
+        return self._public_deletion_status(self.deletion_status(transaction_id))
+
+    def deletion_summaries(self):
+        values={}
+        try: identities=transaction_ids(self.root)
+        except ValueError: identities=[]
+        for transaction_id in identities:
+            try: values[transaction_id]=self.deletion_api_status(transaction_id)
+            except (OSError,ValueError,json.JSONDecodeError): continue
+        try: run_ids=receipt_run_ids(self.root)
+        except ValueError: run_ids=[]
+        for run_id in run_ids:
+            try:
+                receipt=read_receipt(self.root,run_id)
+                values[receipt['transaction_id']]=self.deletion_api_status(receipt['transaction_id'])
+            except (OSError,ValueError,json.JSONDecodeError): continue
+        return list(values.values())
+
+    def delete_run(self,identity):
+        with self.lock:
+            plan=self.plan_run_deletion(identity)
+            if plan.get('receipt'): return self.deletion_status(plan['existing']['transaction_id'])
+            transaction=self.prepare_deletion(plan)
+            transaction=self.commit_deletion(transaction)
+            transaction=self.stage_deletion_targets(transaction)
+            transaction_id=transaction['transaction_id']; should_cleanup=transaction['status'] in ('staged','cleanup_pending')
+        if should_cleanup: self._schedule_cleanup(transaction_id)
+        return self.deletion_status(transaction_id)
+
     def generate(self,identity,payload):
         with self.lock:
             self.reconcile()
@@ -285,9 +687,9 @@ class Studio:
             maximum=payload.get('max_tokens',80)
             if type(maximum)!=int or not 1<=maximum<=256: raise ValueError('输出长度应为 1–256。')
             request_id=uuid4().hex; folder=self.root/'requests'/request_id; folder.mkdir()
-            write_json(folder/'input.json',{'messages':messages,'max_tokens':maximum})
+            write_json(folder/'input.json',{'model_id':identity,'messages':messages,'max_tokens':maximum})
             process=self.spawn(['generate',str(model),'--request',str(folder/'input.json'),'--result',str(folder/'output.json')],folder/'worker.log')
-            self.inference=process
+            self.inference=process; self.inference_id=identity
         try:
             try: process.wait(timeout=180)
             except subprocess.TimeoutExpired: process.kill(); process.wait(); raise ValueError('试用超时，进程已停止。请缩短输入再试。') from None
@@ -296,9 +698,16 @@ class Studio:
             if 'error' in result: raise ValueError(result['error'])
             return result
         finally:
-            with self.lock: self.inference=None
+            with self.lock: self.inference=None; self.inference_id=None
 
     def close(self):
+        self.cleanup_stop.set()
+        deadline=time.monotonic()+CLEANUP_CLOSE_TIMEOUT
+        with self.cleanup_tasks_lock: cleanup_threads=list(self.cleanup_tasks.values())
+        for thread in cleanup_threads:
+            remaining=deadline-time.monotonic()
+            if remaining<=0: break
+            thread.join(remaining)
         with self.lock:
             if self.process and self.process.poll() is None:
                 write_json(self.path('runs',self.active_id)/'control.json',{'action':'pause'})
@@ -354,6 +763,8 @@ def create_app(studio):
     def index(): return Path(__file__).with_name('studio.html').read_text(encoding='utf-8').replace('__SESSION_TOKEN__',studio.csrf)
     @app.get('/studio.js')
     def javascript(): return FileResponse(Path(__file__).with_name('studio.js'),media_type='text/javascript')
+    @app.get('/deletion_ui.js')
+    def deletion_javascript(): return FileResponse(Path(__file__).with_name('deletion_ui.js'),media_type='text/javascript')
     @app.get('/health')
     def health(): return {'application':'forgepilot-training-studio','instance':studio.instance}
     @app.get('/api/state')
@@ -385,8 +796,53 @@ def create_app(studio):
     def template(): return JSONResponse({'question':'Qt 的信号和槽是什么？','answer':'信号用于通知事件发生，槽用于接收并处理事件。'})
     @app.post('/api/runs')
     async def run(request:Request): return studio.start(await payload(request))
-    @app.post('/api/runs/{identity}/{action}')
-    def control(identity:str,action:str): return studio.control(identity,action)
+    @app.post('/api/runs/{identity}/pause')
+    def pause_run(identity:str): return studio.control(identity,'pause')
+    @app.post('/api/runs/{identity}/stop')
+    def stop_run(identity:str): return studio.control(identity,'stop')
+    @app.post('/api/runs/{identity}/resume')
+    def resume_run(identity:str): return studio.control(identity,'resume')
+    def deletion_response(value):
+        status=200 if value['cleanup_status']=='cleaned' else 202
+        if value['logical_status']=='not_deleted':
+            return JSONResponse({**value,'detail':'删除未提交，模型仍然保留；该事务需要人工检查。'},status_code=409)
+        return JSONResponse(value,status_code=status)
+    @app.delete('/api/runs/{identity}')
+    def delete_run(identity:str):
+        try:
+            result=studio.delete_run(identity)
+            return deletion_response(studio.deletion_api_status(result['transaction_id']))
+        except DeletionLocked as error:
+            raise HTTPException(423,str(error)) from None
+        except ValueError:
+            raise HTTPException(409,'删除前检查发现状态冲突，训练记录保持不变。') from None
+        except OSError:
+            raise HTTPException(503,'本机存储暂时无法完成删除准备，请稍后重试。') from None
+    @app.get('/api/deletions/{transaction_id}')
+    def deletion_status(transaction_id:str):
+        if not re.fullmatch('[a-f0-9]{32}',transaction_id):
+            raise HTTPException(400,'删除事务编号无效。')
+        try: return studio.deletion_api_status(transaction_id)
+        except FileNotFoundError: raise
+        except (ValueError,json.JSONDecodeError):
+            raise HTTPException(409,'删除事务状态无法安全读取，需要人工检查。') from None
+        except OSError:
+            raise HTTPException(503,'本机存储暂时无法读取删除状态。') from None
+    @app.post('/api/deletions/{transaction_id}/retry')
+    def retry_deletion(transaction_id:str):
+        if not re.fullmatch('[a-f0-9]{32}',transaction_id):
+            raise HTTPException(400,'删除事务编号无效。')
+        try: value=studio.deletion_api_status(transaction_id)
+        except FileNotFoundError: raise
+        except (ValueError,json.JSONDecodeError):
+            raise HTTPException(409,'删除事务状态无法安全读取，需要人工检查。') from None
+        except OSError:
+            raise HTTPException(503,'本机存储暂时无法读取删除状态。') from None
+        if value['cleanup_status']=='cleaned': return deletion_response(value)
+        if value['cleanup_status']=='manual_intervention_required' or value['logical_status']!='deleted':
+            return JSONResponse({**value,'detail':'该删除事务需要人工检查，未自动重试。'},status_code=409)
+        studio.retry_deletion_cleanup(transaction_id)
+        return deletion_response(studio.deletion_api_status(transaction_id))
     @app.post('/api/generate/{identity}')
     async def generate(identity:str,request:Request):
         from starlette.concurrency import run_in_threadpool
