@@ -16,7 +16,7 @@ MCP 主链扩展（数据库 v5）：受理问答/工作请求时按模式固定
 
 协议仍为 v1；`tool_activity` 是向后兼容的可空增量，Task SSE 事件类型不变。工作沿用原工具事件/Trace，问答在可用时使用独立 SSE，否则保持原请求轮询。OpenAPI 包含会话 SSE 路由，`events.schema.json` 保持原 Task 事件契约，`conversation-events.schema.json` 单独定义回答事件；`python -m forgepilot.export_protocol` 统一生成三者。数据库 v5 升级保留迁移备份，旧请求的 MCP 记录默认为空，运行中断记录不会重放。
 
-第二个可注入 ModelClient 已通过同一工具往返测试；不代表自训练模型质量验收。A01–A20 及未执行的公网验证见 [验收报告](../docs/mcp-visual-management-acceptance.md)。预设精确匹配 `tavily-search` / `tavily-extract`，远端目录不匹配时返回 `mcp_preset_mismatch`，不模糊匹配或增加授权。
+第二个可注入 ModelClient 已通过同一工具往返测试。A01–A20 及未执行的公网验证见 [验收报告](../docs/mcp-visual-management-acceptance.md)。预设精确匹配 `tavily-search` / `tavily-extract`，远端目录不匹配时返回 `mcp_preset_mismatch`，不模糊匹配或增加授权。
 
 ## 启动
 

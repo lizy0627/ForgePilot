@@ -18,8 +18,6 @@ ForgePilot 是一个面向本地 CMake / C++ / Qt 项目的桌面研发助手。
 - 接入经过选择的 MCP 只读工具，例如搜索和网页正文提取
 - 使用 clangd 查找定义和引用；不可用时退回文本搜索
 
-仓库里还带有一个独立的模型训练实验环境，位于 `training/`。它和 ForgePilot 主程序使用不同的虚拟环境，适合做小模型结构、训练流程和本地推理实验，不会替换主程序当前使用的模型服务。
-
 ## 工作方式
 
 ForgePilot 把问答和代码执行分开处理：
@@ -40,7 +38,6 @@ ForgePilot 把问答和代码执行分开处理：
 | `agent/` | Python 后端、任务运行时、HTTP/SSE 服务和测试 |
 | `protocol/` | OpenAPI、事件 Schema 与接口示例 |
 | `eval/` | 固定评测任务、隔离样例和判分逻辑 |
-| `training/` | 独立的本地模型训练与实验工作室 |
 | `scripts/` | 构建、启动、测试和 Demo 脚本 |
 | `docs/` | 架构、使用方法和开发记录 |
 
@@ -114,7 +111,7 @@ $env:FORGEPILOT_API_KEY = [System.Net.NetworkCredential]::new(
 - `.env` 和 `scripts/local-env.cmd`
 - Python 虚拟环境
 - Qt 用户预设与构建目录
-- 日志、SQLite 数据库和模型训练产物
+- 日志和 SQLite 数据库
 - 生成的测试结果与请求快照
 
 如果密钥曾经进入 Git 历史，仅删除文件是不够的，应立即在服务商后台撤销并重新生成。
@@ -141,18 +138,6 @@ $env:FORGEPILOT_API_KEY = [System.Net.NetworkCredential]::new(
 ```
 
 离线测试使用受控模型和临时仓库，适合检查流程是否正确，但不能代表真实模型的修复能力。评测口径见 [docs/benchmark.md](docs/benchmark.md)。
-
-## 训练实验环境
-
-模型训练工作室使用 `training/.venv`，与主后端环境互不影响：
-
-```powershell
-.\scripts\Setup-Training.cmd
-.\scripts\Check-Training.cmd
-.\Start-Training-Studio.cmd
-```
-
-工作室默认只监听本机端口，数据集、检查点、导出权重和训练日志都保存在被忽略的 `logs/` 目录。具体说明见 [training/README.md](training/README.md)。
 
 ## 当前限制
 
