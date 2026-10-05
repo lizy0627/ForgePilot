@@ -169,6 +169,18 @@ class ConversationStore:
                 raise ForgePilotError('unknown_request', '请求不存在。')
             return self._request_state(row)
 
+    def conversation_stream_state(self, cid, rid):
+        """Return durable request and assistant state under one read lock."""
+        with self._lock:
+            row = self._db.execute('SELECT * FROM conversation_requests WHERE request_id=? AND conversation_id=?',
+                                   (rid,cid)).fetchone()
+            if row is None:
+                raise ForgePilotError('unknown_request', '请求不存在。')
+            request = self._request_state(row)
+            message = self._db.execute("SELECT message_id,content FROM conversation_messages WHERE request_id=? AND role='assistant'",
+                                       (rid,)).fetchone()
+            return request,dict(message) if message else None
+
     def request_retry(self, cid, rid, mode, prompt):
         with self._lock:
             row = self._db.execute('SELECT * FROM conversation_requests WHERE request_id=?', (rid,)).fetchone()
@@ -227,7 +239,7 @@ class ConversationStore:
             after=summary['through_message_id'] if summary else 0
             # Read a bounded number of complete turns. Never load tool logs into model context.
             turns = self._db.execute("""SELECT r.request_id FROM conversation_requests r JOIN conversation_messages m ON m.request_id=r.request_id
-                WHERE r.conversation_id=? AND r.status!='running' AND m.message_id>? GROUP BY r.request_id
+                WHERE r.conversation_id=? AND r.status IN ('completed','failed','cancelled','interrupted') AND m.message_id>? GROUP BY r.request_id
                 ORDER BY MAX(m.message_id) DESC LIMIT ?""", (cid,after,HISTORY_MESSAGES//2+1)).fetchall()
             pairs, used = [], 0
             for turn in turns:
@@ -236,7 +248,7 @@ class ConversationStore:
                 if len(pairs)>=HISTORY_MESSAGES//2 or used+size>HISTORY_CHARS:
                     break
                 pairs.append([dict(r) for r in pair]); used+=size
-            count = self._db.execute("SELECT COUNT(DISTINCT r.request_id) FROM conversation_requests r JOIN conversation_messages m ON m.request_id=r.request_id WHERE r.conversation_id=? AND r.status!='running' AND m.message_id>?", (cid,after)).fetchone()[0]
+            count = self._db.execute("SELECT COUNT(DISTINCT r.request_id) FROM conversation_requests r JOIN conversation_messages m ON m.request_id=r.request_id WHERE r.conversation_id=? AND r.status IN ('completed','failed','cancelled','interrupted') AND m.message_id>?", (cid,after)).fetchone()[0]
             notice=('较早内容使用摘要（覆盖至消息 #'+str(after)+'），保留最近轮次原文；原始消息仍可查看。') if summary else ''
             if len(pairs)<count: notice+=' '+CONTEXT_NOTICE
             return [m for pair in reversed(pairs) for m in pair],notice.strip()
@@ -265,16 +277,27 @@ class ConversationStore:
 
     def _finish_conversation_request(self, rid, status, content, error=None):
         row = self._db.execute('SELECT * FROM conversation_requests WHERE request_id=?', (rid,)).fetchone()
-        if not row or row['status']!='running':
-            return
+        if not row:
+            return None
+        if row['status']!='running':
+            message=self._db.execute("SELECT message_id FROM conversation_messages WHERE request_id=? AND role='assistant'",(rid,)).fetchone()
+            return {'request':self._request_state(row),'message_id':message['message_id'] if message else None,
+                    'changed':False}
         now=stamp()
-        self._db.execute('UPDATE conversation_requests SET status=?,error=?,updated_at=? WHERE request_id=?', (status,error,now,rid))
-        self._insert_message(row['conversation_id'],rid,'assistant',content,now)
+        changed=self._db.execute("UPDATE conversation_requests SET status=?,error=?,updated_at=? WHERE request_id=? AND status='running'",
+                                 (status,error,now,rid)).rowcount
+        if changed!=1:
+            raise ForgePilotError('request_conflict','回答终态提交发生冲突。')
+        inserted=self._db.execute('INSERT INTO conversation_messages(conversation_id,request_id,role,content,created_at) VALUES(?,?,?,?,?)',
+                                  (row['conversation_id'],rid,'assistant',self.redactor.text(content),now))
         self._db.execute('UPDATE conversations SET updated_at=? WHERE conversation_id=?', (now,row['conversation_id']))
+        updated=self._db.execute('SELECT * FROM conversation_requests WHERE request_id=?',(rid,)).fetchone()
+        return {'request':self._request_state(updated),'message_id':inserted.lastrowid,'changed':True}
 
     def finish_conversation_request(self, rid, status, content, error=None):
         with self._transaction():
-            self._finish_conversation_request(rid,status,self.redactor.text(content),self.redactor.text(error) if error else None)
+            return self._finish_conversation_request(rid,status,self.redactor.text(content),
+                                                     self.redactor.text(error) if error else None)
 
     def _sync_conversation_task(self, snapshot):
         row = self._db.execute('SELECT request_id FROM conversation_requests WHERE task_id=?', (snapshot['task_id'],)).fetchone()

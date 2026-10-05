@@ -93,6 +93,11 @@ Item {
                         id: body; width: parent.width - (row.fromUser ? 36 : 8)
                         x: row.fromUser ? 18 : 4; y: row.fromUser ? 12 : 4; spacing: 8
                         Label { visible: !row.fromUser; text: "ForgePilot"; color: Theme.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+                        Label {
+                            visible: !row.fromUser && !!row.record.streaming && !!root.conversations.answerStatus
+                            text: root.conversations.answerStatus
+                            textFormat: Text.PlainText; color: Theme.secondary; font.pixelSize: 12
+                        }
                         TextEdit {
                             width: parent.width; text: row.record.content || ""; textFormat: TextEdit.PlainText
                             readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text
@@ -116,7 +121,7 @@ Item {
         RowLayout {
             visible: root.conversations.active || root.conversations.busy || root.conversations.retryPending
             Layout.preferredWidth: root.columnWidth; Layout.maximumWidth: root.columnWidth; Layout.minimumWidth: 0; Layout.alignment: Qt.AlignHCenter; Layout.fillHeight: false
-            Label { text: root.conversations.active ? (root.conversations.activeMode === "chat" ? "正在思考…" : "正在处理工作…") : root.conversations.retryPending ? "发送状态待确认" : "正在发送…"; color: Theme.secondary; Layout.fillWidth: true }
+            Label { text: root.conversations.active ? (root.conversations.activeMode === "chat" ? root.conversations.answerStatus : "正在处理工作…") : root.conversations.retryPending ? "发送状态待确认" : "正在发送…"; color: Theme.secondary; Layout.fillWidth: true; textFormat: Text.PlainText }
             ActionButton { text: root.controller.canApprove ? "查看并确认方案" : "查看进度"; flat: true; visible: root.conversations.activeMode === "task"; onClicked: root.openWorkDetails() }
             ActionButton { objectName: "retryMessageButton"; text: "重试"; visible: root.conversations.retryPending; enabled: !root.conversations.busy; onClicked: root.conversations.retrySend() }
         }

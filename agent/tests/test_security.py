@@ -9,7 +9,7 @@ from urllib.parse import quote
 import pytest
 
 from forgepilot.recording import now, project_events
-from forgepilot.security import Redactor
+from forgepilot.security import Redactor,StreamingRedactor
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.trace import TraceEvent
 from test_persistence import task
@@ -227,3 +227,93 @@ def test_hot_cached_large_logs_never_persist_keys_or_cache_in_sqlite(tmp_path):
     finally:
         store.close()
     assert secret.encode() not in path.read_bytes()
+
+
+STREAM_SECRET = 'fixture"key\\多+?/'
+STREAM_VARIANTS = [STREAM_SECRET, quote(STREAM_SECRET, safe='')]
+_encoded = STREAM_SECRET
+for _ in range(3):
+    _encoded = json.dumps(_encoded, ensure_ascii=True)[1:-1]
+    STREAM_VARIANTS.append(_encoded)
+
+
+STREAM_CASES = [
+    pytest.param(Redactor((STREAM_SECRET,)), f'前 {value} 后', (value,), id=f'known-{index}')
+    for index,value in enumerate(STREAM_VARIANTS)
+] + [
+    pytest.param(Redactor(), '前 Bearer opaque-bearer-token 后', ('opaque-bearer-token',), id='bearer'),
+    pytest.param(Redactor(), 'Authorization: Basic basic-credential\n后', ('basic-credential',), id='basic'),
+    pytest.param(Redactor(), 'Proxy-Authorization = Digest digest credential\n后', ('digest credential',), id='digest'),
+    pytest.param(Redactor(), 'password="password-value" 后', ('password-value',), id='password'),
+    pytest.param(Redactor(), "api_key='api-value' 后", ('api-value',), id='api-key'),
+    pytest.param(Redactor(), 'access_token=access-value 后', ('access-value',), id='access-token'),
+    pytest.param(Redactor(), '中文 密钥：唯一凭证 后', ('唯一凭证',), id='chinese-key'),
+    pytest.param(Redactor(), '中文 密码是 不可发布 后', ('不可发布',), id='chinese-password'),
+    pytest.param(Redactor(), 'sk-proj-123456789abcdefghijkl 后', ('sk-proj-123456789abcdefghijkl',), id='sk-proj'),
+    pytest.param(Redactor(), 'ghp_1234567890abcdefghij 后', ('ghp_1234567890abcdefghij',), id='github-short'),
+    pytest.param(Redactor(), 'github_pat_1234567890abcdefghij 后', ('github_pat_1234567890abcdefghij',), id='github-pat'),
+    pytest.param(Redactor(), '前\n-----BEGIN PRIVATE KEY-----\nPEM-PRIVATE-PAYLOAD\n-----END PRIVATE KEY-----\n后',
+                 ('PEM-PRIVATE-PAYLOAD',), id='pem'),
+    pytest.param(Redactor(), '控制\x00字符\x1f已清理\n', ('\x00','\x1f'), id='controls'),
+    pytest.param(Redactor(), '普通 Unicode 文本 😀🌿 完整保留', (), id='unicode'),
+    pytest.param(Redactor(), 'Bearerish api_ke sk-proj-short -----BEGIN not-a-secret 😀', (), id='false-prefixes'),
+]
+
+
+def assert_safe_prefix(parts, forbidden):
+    value=''.join(parts)
+    for secret in forbidden:
+        assert secret not in value
+
+
+@pytest.mark.parametrize('redactor,value,forbidden',STREAM_CASES)
+def test_streaming_redactor_every_split_and_character_is_safe_and_batch_equivalent(redactor,value,forbidden):
+    expected=redactor.text(value)
+    for split in range(len(value)+1):
+        stream=StreamingRedactor(redactor); parts=[]
+        for chunk in (value[:split],value[split:]):
+            parts.extend(stream.feed(chunk)); assert_safe_prefix(parts,forbidden)
+        parts.extend(stream.finish()); assert_safe_prefix(parts,forbidden)
+        assert ''.join(parts)==expected
+
+    stream=redactor.streaming(); parts=[]
+    for character in value:
+        parts.extend(stream.feed(character)); assert_safe_prefix(parts,forbidden)
+    parts.extend(stream.finish()); assert_safe_prefix(parts,forbidden)
+    assert ''.join(parts)==expected
+
+
+def test_streaming_redactor_pem_never_releases_block_before_complete_end_marker():
+    redactor=Redactor(); stream=redactor.streaming(); parts=[]
+    prefix='safe\n-----BEGIN PRIVATE KEY-----\nPRIVATE-LINE\n-----END PRIVATE '
+    for character in prefix:
+        parts.extend(stream.feed(character))
+        assert 'PRIVATE-LINE' not in ''.join(parts)
+    parts.extend(stream.feed('KEY-----\nafter'))
+    parts.extend(stream.finish())
+    assert ''.join(parts)==redactor.text(prefix+'KEY-----\nafter')
+
+
+def test_streaming_redactor_discard_drops_tail_and_input_and_buffer_are_bounded():
+    redactor=Redactor(('known-private-value',))
+    stream=redactor.streaming(); published=stream.feed('safe known-private-')
+    assert 'known-private-' not in ''.join(published)
+    stream.discard()
+    assert stream.finish()==[] and all(not stage.buffer for stage in stream._stages)
+    with pytest.raises(RuntimeError): stream.feed('value')
+
+    exact=redactor.streaming(); parts=exact.feed('x'*32_768); parts.extend(exact.finish())
+    assert ''.join(parts)=='x'*32_768
+    oversized=redactor.streaming();
+    with pytest.raises(ValueError,match='32768'): oversized.feed('x'*32_769)
+
+
+def test_streaming_redactor_instances_do_not_share_mutable_tail_state():
+    secret='independent-private-value'; redactor=Redactor((secret,))
+    left,right=redactor.streaming(),redactor.streaming()
+    left_parts=left.feed('left '+secret[:-5])
+    right_parts=right.feed('right '+secret); right_parts.extend(right.finish())
+    left_parts.extend(left.feed(secret[-5:])); left_parts.extend(left.finish())
+    assert ''.join(left_parts)=='left [REDACTED]'
+    assert ''.join(right_parts)=='right [REDACTED]'
+    assert left._stages is not right._stages

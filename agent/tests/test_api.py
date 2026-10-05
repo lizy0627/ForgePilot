@@ -514,9 +514,12 @@ async def test_conflict_with_existing_cli_service(cpp_repo, rg_exe, git_exe):
 
 def test_wire_schemas_match_exported_contract():
     from pathlib import Path
+    from pydantic import TypeAdapter
+    from forgepilot.api_models import ConversationEvent
     root = Path(__file__).parents[2] / "protocol"
     assert json.loads((root / "openapi.json").read_text(encoding="utf-8")) == create_app(lambda trace: None).openapi()
     assert json.loads((root / "events.schema.json").read_text(encoding="utf-8")) == EventPayload.model_json_schema()
+    assert json.loads((root / "conversation-events.schema.json").read_text(encoding="utf-8")) == TypeAdapter(ConversationEvent).json_schema()
 
 
 @pytest.mark.asyncio
@@ -564,7 +567,9 @@ async def test_terminal_sse_drains_more_than_one_storage_batch():
 
 def test_protocol_examples_validate():
     from pathlib import Path
-    from forgepilot.api_models import CreateTask, ApproveTask, PlanFeedback, CancelTask, TaskList, TaskResponse, ErrorResponse, TracePage, TraceDetail
+    from pydantic import TypeAdapter
+    from forgepilot.api_models import (CreateTask, ApproveTask, PlanFeedback, CancelTask,
+        TaskList, TaskResponse, ErrorResponse, TracePage, TraceDetail, ConversationEvent)
     examples = json.loads((Path(__file__).parents[2] / "protocol/examples.json").read_text(encoding="utf-8"))
     for name, model in [("create_request", CreateTask), ("approve_request", ApproveTask), ("feedback_request", PlanFeedback), ("cancel_request", CancelTask),
         ("feedback_step_limit_error", ErrorResponse), ("feedback_busy_error", ErrorResponse), ("feedback_invalid_request_error", ErrorResponse),
@@ -573,6 +578,11 @@ def test_protocol_examples_validate():
         ("stale_plan_error", ErrorResponse), ("invalid_request_error", ErrorResponse), ("repository_busy_error", ErrorResponse),
         ("trace_page_response", TracePage), ("trace_detail_response", TraceDetail), ("interrupted_event", EventPayload)]:
         model.model_validate(examples[name])
+    event_adapter=TypeAdapter(ConversationEvent)
+    for name in ("conversation_answer_delta", "conversation_answer_snapshot", "conversation_answer_completed"):
+        event_adapter.validate_python(examples[name],strict=True)
+    for name in ("conversation_stream_cursor_error", "conversation_stream_unavailable_error"):
+        ErrorResponse.model_validate(examples[name])
 
 
 @pytest.mark.asyncio

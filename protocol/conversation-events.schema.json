@@ -1,0 +1,659 @@
+{
+  "$defs": {
+    "AnswerCancelled": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "released": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Released"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Segment Id"
+        },
+        "type": {
+          "const": "answer_cancelled",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id"
+      ],
+      "title": "AnswerCancelled",
+      "type": "object"
+    },
+    "AnswerCompleted": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "released": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Released"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Segment Id"
+        },
+        "type": {
+          "const": "answer_completed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id"
+      ],
+      "title": "AnswerCompleted",
+      "type": "object"
+    },
+    "AnswerDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "previous_revision": {
+          "minimum": 0,
+          "title": "Previous Revision",
+          "type": "integer"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "answer_delta",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id",
+        "previous_revision",
+        "text"
+      ],
+      "title": "AnswerDelta",
+      "type": "object"
+    },
+    "AnswerFailed": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "error_code": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Error Code",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "persisted": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Persisted"
+        },
+        "released": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Released"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Segment Id"
+        },
+        "type": {
+          "const": "answer_failed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id",
+        "error_code"
+      ],
+      "title": "AnswerFailed",
+      "type": "object"
+    },
+    "AnswerSegmentCommitted": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 32768,
+          "title": "Content",
+          "type": "string"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "answer_segment_committed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id",
+        "content"
+      ],
+      "title": "AnswerSegmentCommitted",
+      "type": "object"
+    },
+    "AnswerSegmentDiscarded": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "answer_segment_discarded",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id"
+      ],
+      "title": "AnswerSegmentDiscarded",
+      "type": "object"
+    },
+    "AnswerSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 32768,
+          "title": "Content",
+          "type": "string"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Segment Id"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "streaming",
+            "working",
+            "committed",
+            "stopping",
+            "completed",
+            "cancelled",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "terminal": {
+          "title": "Terminal",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "answer_snapshot",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id",
+        "content",
+        "status",
+        "terminal"
+      ],
+      "title": "AnswerSnapshot",
+      "type": "object"
+    },
+    "AnswerStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "answer_started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id"
+      ],
+      "title": "AnswerStarted",
+      "type": "object"
+    },
+    "ToolActivityEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "enum": [
+            "started",
+            "finished"
+          ],
+          "title": "Activity",
+          "type": "string"
+        },
+        "conversation_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "segment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "success": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Success"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tool Call Id"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tool Name"
+        },
+        "type": {
+          "const": "tool_activity",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "conversation_id",
+        "request_id",
+        "revision",
+        "segment_id",
+        "activity",
+        "tool_call_id",
+        "tool_name"
+      ],
+      "title": "ToolActivityEvent",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "answer_cancelled": "#/$defs/AnswerCancelled",
+      "answer_completed": "#/$defs/AnswerCompleted",
+      "answer_delta": "#/$defs/AnswerDelta",
+      "answer_failed": "#/$defs/AnswerFailed",
+      "answer_segment_committed": "#/$defs/AnswerSegmentCommitted",
+      "answer_segment_discarded": "#/$defs/AnswerSegmentDiscarded",
+      "answer_snapshot": "#/$defs/AnswerSnapshot",
+      "answer_started": "#/$defs/AnswerStarted",
+      "tool_activity": "#/$defs/ToolActivityEvent"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AnswerStarted"
+    },
+    {
+      "$ref": "#/$defs/AnswerDelta"
+    },
+    {
+      "$ref": "#/$defs/AnswerSnapshot"
+    },
+    {
+      "$ref": "#/$defs/AnswerSegmentDiscarded"
+    },
+    {
+      "$ref": "#/$defs/AnswerSegmentCommitted"
+    },
+    {
+      "$ref": "#/$defs/ToolActivityEvent"
+    },
+    {
+      "$ref": "#/$defs/AnswerCompleted"
+    },
+    {
+      "$ref": "#/$defs/AnswerCancelled"
+    },
+    {
+      "$ref": "#/$defs/AnswerFailed"
+    }
+  ]
+}

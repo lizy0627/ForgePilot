@@ -319,6 +319,92 @@ class EventPayload(BaseModel):
     data: dict
 
 
+ConversationEventType = Literal[
+    "answer_started", "answer_delta", "answer_snapshot",
+    "answer_segment_discarded", "answer_segment_committed", "tool_activity",
+    "answer_completed", "answer_cancelled", "answer_failed",
+]
+ConversationId = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
+SegmentId = Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class ConversationEventBase(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: ConversationEventType
+    conversation_id: ConversationId
+    request_id: ConversationId
+    revision: int = Field(ge=1)
+    segment_id: SegmentId | None
+
+
+class AnswerStarted(ConversationEventBase):
+    type: Literal["answer_started"]
+    segment_id: SegmentId
+
+
+class AnswerDelta(ConversationEventBase):
+    type: Literal["answer_delta"]
+    segment_id: SegmentId
+    previous_revision: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=32_768)
+
+
+class AnswerSnapshot(ConversationEventBase):
+    type: Literal["answer_snapshot"]
+    content: str = Field(max_length=32_768)
+    status: Literal["running", "streaming", "working", "committed", "stopping",
+                    "completed", "cancelled", "failed"]
+    terminal: bool
+
+
+class AnswerSegmentDiscarded(ConversationEventBase):
+    type: Literal["answer_segment_discarded"]
+    segment_id: SegmentId
+
+
+class AnswerSegmentCommitted(ConversationEventBase):
+    type: Literal["answer_segment_committed"]
+    segment_id: SegmentId
+    content: str = Field(max_length=32_768)
+
+
+class ToolActivityEvent(ConversationEventBase):
+    type: Literal["tool_activity"]
+    segment_id: SegmentId
+    activity: Literal["started", "finished"]
+    tool_call_id: str | None = Field(max_length=128)
+    tool_name: str | None = Field(max_length=64)
+    success: bool | None = None
+
+
+class _AnswerTerminal(ConversationEventBase):
+    content: str | None = Field(default=None, max_length=32_768)
+    message_id: int | None = Field(default=None, ge=1)
+    released: bool | None = None
+
+
+class AnswerCompleted(_AnswerTerminal):
+    type: Literal["answer_completed"]
+
+
+class AnswerCancelled(_AnswerTerminal):
+    type: Literal["answer_cancelled"]
+
+
+class AnswerFailed(_AnswerTerminal):
+    type: Literal["answer_failed"]
+    error_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    persisted: bool | None = None
+
+
+ConversationEvent = Annotated[
+    AnswerStarted | AnswerDelta | AnswerSnapshot | AnswerSegmentDiscarded |
+    AnswerSegmentCommitted | ToolActivityEvent | AnswerCompleted |
+    AnswerCancelled | AnswerFailed,
+    Field(discriminator="type"),
+]
+
+
 # MCP management has fixed wire models; secrets are write-only request fields.
 MCPServerID = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")]
 MCPCatalogHash = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]

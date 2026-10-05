@@ -1,14 +1,26 @@
 """Serialize admission on the existing worker loop; responses are durable and idempotent."""
 import asyncio
 import sqlite3
+from time import monotonic
 from .errors import ForgePilotError
+from .conversation_stream import ConversationStreamBroker
+from .stream_metrics import StreamMetrics
+
+STOP_SUFFIX='\n\n[回答已由用户停止]'
+FAILURE_SUFFIX='\n\n[回答因错误未完成，请稍后重试]'
+MAX_FINAL_ANSWER=32_768
 
 
 class ConversationHost:
-    def __init__(self, tasks, chat_factory):
+    def __init__(self, tasks, chat_factory, *, stream_retention_seconds=60.0,
+                 stream_max_subscribers=8):
         self.tasks, self.store, self.chat_factory=tasks,tasks.store,chat_factory
         self._answers={}
         self._deletions={}
+        self._streams={}
+        self._stream_releases={}
+        self._stream_retention_seconds=stream_retention_seconds
+        self._stream_max_subscribers=stream_max_subscribers
         tasks.extra_active=lambda:len(self._answers)
 
     async def submit(self,cid,rid,mode,prompt):
@@ -44,13 +56,19 @@ class ConversationHost:
             return self.store.conversation_request(cid,rid)
         started=asyncio.Event()
         snapshots=() if self.tasks.mcp_disabled else self.tasks.mcp_service.snapshots('chat')
+        metrics=StreamMetrics()
+        broker=ConversationStreamBroker(cid,rid,max_subscribers=self._stream_max_subscribers,
+                                        metrics=metrics)
+        self._streams[rid]=broker
         self._answers[rid]=asyncio.create_task(self._answer(request,started,snapshots))
         await started.wait()
         return self.store.conversation_request(cid,rid)
 
     async def _answer(self,request,started,snapshots):
         rid=request['request_id']; service=None
-        status,content,error='failed','回答失败，请检查后端。',None
+        broker=self._streams[rid]
+        status,content,error='failed','回答未完成，请稍后重试。','chat_internal'
+        error_code='chat_internal'
         started.set()
         try:
             service=self.chat_factory()
@@ -59,16 +77,18 @@ class ConversationHost:
                     on_tool_event=lambda record:self.store.record_mcp_call(request['conversation_id'],rid,record))
             history,notice=await self._prepare_context(request,service)
             content=await service.answer(history,request['prompt'],request['repository_path'],notice,
-                background=lambda:self.store.memory_background(request['conversation_id'],request['repository_path']))
+                background=lambda:self.store.memory_background(request['conversation_id'],request['repository_path']),
+                on_event=broker.publish,diagnostics=broker.metrics)
             status='completed'
         except asyncio.CancelledError:
-            status,content='cancelled','已停止回答，可以继续提问。'
+            status='cancelled'
         except ForgePilotError as exc:
-            redactor=getattr(service,'redactor',self.store.redactor)
-            error=redactor.text(str(exc)); content='回答未完成。\n'+error
+            error_code=exc.code
+            error=error_code
         except Exception:
-            error='chat_internal'; content='回答发生内部错误，请稍后重试。'
+            error=error_code
         finally:
+            cleanup_failed=False
             try:
                 if service:
                     # A stop arriving after the model reply must not interrupt resource cleanup.
@@ -77,14 +97,91 @@ class ConversationHost:
                         await asyncio.shield(cleanup)
                     except asyncio.CancelledError:
                         await asyncio.shield(cleanup)
+                    except Exception:
+                        cleanup_failed=True
             finally:
+                if broker.stop_requested:
+                    status,error,error_code='cancelled',None,'cancelled'
+                elif cleanup_failed:
+                    status,error,error_code='failed','chat_internal','chat_internal'
+                redactor=getattr(service,'redactor',self.store.redactor)
+                if status=='completed':
+                    content=redactor.text(content)
+                    try:
+                        broker.validate_completion(content)
+                    except ForgePilotError:
+                        status,error,error_code='failed','conversation_stream_state','conversation_stream_state'
+                if status=='cancelled':
+                    content=self._partial_content(broker.draft,STOP_SUFFIX,'已停止回答，可以继续提问。')
+                elif status=='failed':
+                    content=self._partial_content(broker.draft,FAILURE_SUFFIX,'回答未完成，请稍后重试。')
+                content=redactor.text(content)
+                persist_started=monotonic()
                 try:
-                    redactor=getattr(service,'redactor',self.store.redactor)
-                    self.store.finish_conversation_request(rid,status,redactor.text(content),redactor.text(error) if error else None)
+                    committed=self.store.finish_conversation_request(rid,status,content,error)
                 except (sqlite3.Error, ForgePilotError):
+                    broker.metrics.set_error('storage_unavailable')
                     self.store.mark_request_unavailable(rid)
+                    try:
+                        broker.finish('failed',error_code='storage_unavailable',persisted=False)
+                    except ForgePilotError:
+                        broker.shutdown()
+                else:
+                    message_id=committed['message_id'] if committed else None
+                    persisted_status=committed['request']['status'] if committed else status
+                    try:
+                        if persisted_status=='completed':
+                            broker.finish('completed',content=content,message_id=message_id)
+                        elif persisted_status=='cancelled':
+                            broker.finish('cancelled',content=content,message_id=message_id)
+                        else:
+                            broker.finish('failed',content=content,message_id=message_id,error_code=error_code)
+                    except ForgePilotError:
+                        broker.metrics.set_error('conversation_stream_state')
+                        # The durable result remains authoritative; never emit a
+                        # contradictory terminal event after it commits.
+                        broker.shutdown()
                 finally:
+                    broker.metrics.persist_finished(persist_started)
+                    if status!='completed' and broker.metrics.snapshot()['stream_error_code']=='none':
+                        broker.metrics.set_error(error_code)
+                    broker.metrics.emit()
                     self._answers.pop(rid,None)
+                    self._schedule_stream_release(rid,broker)
+
+    @staticmethod
+    def _partial_content(draft,suffix,empty):
+        if not draft:
+            return empty
+        return draft[:MAX_FINAL_ANSWER-len(suffix)]+suffix
+
+    def _schedule_stream_release(self,rid,broker):
+        async def release():
+            try:
+                await asyncio.sleep(self._stream_retention_seconds)
+                if self._streams.get(rid) is broker:
+                    self._streams.pop(rid,None)
+                    broker.shutdown()
+            finally:
+                if self._stream_releases.get(rid) is asyncio.current_task():
+                    self._stream_releases.pop(rid,None)
+        previous=self._stream_releases.pop(rid,None)
+        if previous is not None:
+            previous.cancel()
+        self._stream_releases[rid]=asyncio.create_task(release())
+
+    def conversation_stream(self,cid,rid,last_event_id=None):
+        request,message=self.store.conversation_stream_state(cid,rid)
+        if request['mode']!='chat':
+            raise ForgePilotError('invalid_state','执行任务没有回答流。')
+        broker=self._streams.get(rid)
+        if broker is None:
+            if request['status']=='running':
+                raise ForgePilotError('conversation_stream_unavailable','回答流当前不可用。')
+            broker=ConversationStreamBroker.released_terminal(cid,rid,request['status'],
+                content=message['content'] if message else None,
+                message_id=message['message_id'] if message else None)
+        return broker.subscribe(last_event_id)
 
     async def _prepare_context(self,request,service):
         cid,rid=request['conversation_id'],request['request_id']; warning=''
@@ -139,6 +236,8 @@ class ConversationHost:
             raise ForgePilotError('invalid_state','执行任务请使用“停止任务”，不能通过“停止回答”取消。')
         task=self._answers.get(rid)
         if task and not task.done():
+            broker=self._streams.get(rid)
+            if broker: broker.stop()
             if not task.cancelling(): task.cancel()
             await asyncio.shield(task)
         return self.store.conversation_request(cid,rid)
@@ -148,9 +247,20 @@ class ConversationHost:
             self.tasks._stopping=True
             await asyncio.gather(*list(self._deletions.values()),return_exceptions=True)
             pending=list(self._answers.values())
+            for rid in tuple(self._answers):
+                broker=self._streams.get(rid)
+                if broker: broker.stop()
             for task in pending:
                 if not task.cancelling(): task.cancel()
             await asyncio.gather(*pending,return_exceptions=True)
+            releases=list(self._stream_releases.values())
+            for task in releases:
+                task.cancel()
+            await asyncio.gather(*releases,return_exceptions=True)
+            self._stream_releases.clear()
+            for broker in self._streams.values():
+                broker.shutdown()
+            self._streams.clear()
         await self.tasks._submit(stop_all())
 
     async def delete(self,cid,stop_active=False):
@@ -181,6 +291,15 @@ class ConversationHost:
                 await self.tasks.stop_for_deletion(r['task_id'])
             answer=self._answers.get(r['request_id'])
             if answer is not None:
+                broker=self._streams.get(r['request_id'])
+                if broker: broker.stop()
                 if not answer.done() and not answer.cancelling(): answer.cancel()
                 await asyncio.shield(answer)
-        return self.store.delete_conversation(cid)
+        result=self.store.delete_conversation(cid)
+        for r in requests:
+            rid=r['request_id']
+            release=self._stream_releases.pop(rid,None)
+            if release: release.cancel()
+            broker=self._streams.pop(rid,None)
+            if broker: broker.shutdown()
+        return result

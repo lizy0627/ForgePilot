@@ -13,6 +13,7 @@ public:
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int,QByteArray> roleNames() const override { return {{Qt::UserRole+1,"record"}}; }
     void upsert(const QString &key, const QVariantMap &record);
+    bool remove(const QString &key);
     void clear();
     Q_INVOKABLE QVariantMap get(int row) const;
 signals:

@@ -544,5 +544,49 @@
       "env:PYTHONUNBUFFERED": "1",
       "env:SERVICE_TOKEN": "example-placeholder-only"
     }
+  },
+  "conversation_answer_delta": {
+    "type": "answer_delta",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 2,
+    "segment_id": "segment-1",
+    "previous_revision": 1,
+    "text": "这是已经增量脱敏的回答。"
+  },
+  "conversation_answer_snapshot": {
+    "type": "answer_snapshot",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 17,
+    "segment_id": "segment-2",
+    "content": "这是当前完整、安全的临时回答。",
+    "status": "streaming",
+    "terminal": false
+  },
+  "conversation_answer_completed": {
+    "type": "answer_completed",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 19,
+    "segment_id": "segment-2",
+    "content": "这是最终持久化回答。",
+    "message_id": 42
+  },
+  "conversation_stream_cursor_error": {
+    "error": {
+      "code": "event_cursor_ahead",
+      "message": "Conversation event cursor is ahead of the current revision",
+      "details": [],
+      "task_id": null
+    }
+  },
+  "conversation_stream_unavailable_error": {
+    "error": {
+      "code": "conversation_stream_unavailable",
+      "message": "Conversation stream is unavailable; query request state",
+      "details": [],
+      "task_id": null
+    }
   }
 }

@@ -17,6 +17,7 @@ add_library(ForgePilotCommunication STATIC
     src/AgentApiClient.h src/AgentApiClient.cpp
     src/SseParser.h src/SseParser.cpp
     src/SseClient.h src/SseClient.cpp
+    src/ConversationStreamClient.h src/ConversationStreamClient.cpp
     src/TaskController.h src/TaskController.cpp src/TaskPresentation.cpp
     src/ConversationController.h src/ConversationController.cpp
     src/MemoryController.h src/MemoryController.cpp
@@ -55,7 +56,10 @@ if(BUILD_TESTING)
     qt_add_executable(ForgePilotClientTests tests/tst_communication.cpp)
     target_link_libraries(ForgePilotClientTests PRIVATE ForgePilotCommunication Qt6::Test Qt6::Quick Qt6::Qml)
     add_test(NAME client_communication COMMAND ForgePilotClientTests -o "${CMAKE_CURRENT_BINARY_DIR}/communication-results.txt,txt")
-    set_tests_properties(client_communication PROPERTIES TIMEOUT 60)
+    # The communication executable intentionally contains the complete network,
+    # controller, and streaming regression suite.  It exceeds one minute on
+    # Windows debug/CI hosts even when every individual case is healthy.
+    set_tests_properties(client_communication PROPERTIES TIMEOUT 120)
     set_target_properties(ForgePilotClientTests PROPERTIES WIN32_EXECUTABLE FALSE)
     function(forgepilot_backend_test target source)
         qt_add_executable(${target} ${source})

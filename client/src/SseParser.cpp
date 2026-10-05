@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <utility>
 
-void SseParser::reset() { *this = SseParser{}; }
+void SseParser::reset() { *this = SseParser{m_maxEventBytes}; }
 QVector<SseFrame> SseParser::feed(const QByteArray &bytes)
 {
     QVector<SseFrame> frames;
@@ -12,7 +12,7 @@ QVector<SseFrame> SseParser::feed(const QByteArray &bytes)
         if (c == '\r' || c == '\n') { line(frames); m_skipLf = c == '\r'; }
         else {
             m_line += c;
-            if (m_line.size() + m_eventBytes > 32 * 1024 * 1024) m_error = "单个事件超过 32 MiB 上限。";
+            if (m_line.size() + m_eventBytes > m_maxEventBytes) m_error = "单个事件超过安全上限。";
         }
     }
     return frames;

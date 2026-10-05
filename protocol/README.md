@@ -1,6 +1,6 @@
 # ForgePilot v1 本机 HTTP 与 SSE 协议
 
-Phase 6–8，协议版本 1.0.0。Phase 8 兼容增加分页、read_only、diff_summary、duration_complete 及只读 Trace 查询。请求/响应以 [openapi.json](openapi.json) 为机器可读定义；事件 payload 见 [events.schema.json](events.schema.json)，示例见 [examples.json](examples.json)。Schema 由代码生成并由测试检查一致性。
+Phase 6–8，协议版本 1.0.0。Phase 8 兼容增加分页、read_only、diff_summary、duration_complete 及只读 Trace 查询。请求/响应以 [openapi.json](openapi.json) 为机器可读定义；Task 事件见 [events.schema.json](events.schema.json)，会话回答事件见 [conversation-events.schema.json](conversation-events.schema.json)，示例见 [examples.json](examples.json)。两类 SSE 事件不共享权限或终态语义。Schema 由代码生成并由测试检查一致性。
 
 服务入口为 `python -m forgepilot.server`，默认 `http://127.0.0.1:8765`，可选择 `--host ::1`。v1 使用本机 SQLite，仍为单写进程，没有远程账号、多用户或跨进程执行恢复。Host 仅接受回环 IP/localhost，禁止跨 Origin 浏览器访问，不开启 CORS。模型 API Key 只属于后端启动配置，不接受在任务 JSON 中传入；MCP 凭证仅通过下述专用管理接口提交，不写请求日志或 Trace。
 
@@ -8,13 +8,13 @@ Phase 6–8，协议版本 1.0.0。Phase 8 兼容增加分页、read_only、diff
 
 MCP 主链扩展（数据库 v5）：受理问答/工作请求时按模式固定配置快照和工具白名单；普通问答不需要项目。模型只收到统一 `ToolSpec(name, description, input_schema)`，由 `ModelClient.chat(messages, tools) -> ChatReply` 和 `aclose()` 负责模型适配，OpenAI 工具编码不进入 Registry。
 
-请求状态的可空 `tool_activity` 表示本轮当前/最后一次 MCP 调用；沿用现有对话轮询。`GET /api/v1/conversations/{conversation_id}/requests/{request_id}/mcp-tools` 返回 `{conversation_id, request_id, items}`，旧历史返回空 `items`。问答记录保存在请求行，工作记录投影自原 Trace；该接口只读，模型不可调用。状态为 `running/succeeded/failed/cancelled/interrupted`，来源是独立的标题/HTTP(S) URL。每请求最多 8 条记录、10 个来源，参数/结果摘录上限分别为 1024/2048 字符；问答入库字段与该 GET 的工作 Trace 投影合计最多 64 KiB，不将原工作 Trace 总大小声称为 64 KiB。删除对话同步删除记录。字段和示例以 OpenAPI 及 `conversation_mcp_tools` 示例为准。
+请求状态的可空 `tool_activity` 表示本轮当前/最后一次 MCP 调用；新客户端主要从会话 SSE 获取活动，旧服务则回退状态轮询。`GET /api/v1/conversations/{conversation_id}/requests/{request_id}/mcp-tools` 返回 `{conversation_id, request_id, items}`，旧历史返回空 `items`。问答记录保存在请求行，工作记录投影自原 Trace；该接口只读，模型不可调用。状态为 `running/succeeded/failed/cancelled/interrupted`，来源是独立的标题/HTTP(S) URL。每请求最多 8 条记录、10 个来源，参数/结果摘录上限分别为 1024/2048 字符；问答入库字段与该 GET 的工作 Trace 投影合计最多 64 KiB，不将原工作 Trace 总大小声称为 64 KiB。删除对话同步删除记录。字段和示例以 OpenAPI 及 `conversation_mcp_tools` 示例为准。
 
 配置变更只影响未来请求；等待 Plan 审批时关闭连接，恢复时沿用原快照和剩余预算、重新核对已选工具定义。启动参数 `--mcp-config` 在后台执行一次导入并记录完成标记，后续删除不会复活；失败不阻断问答。`--disable-mcp` 同时禁止导入、连接和 Schema 暴露。
 
 ## 验收与兼容
 
-协议仍为 v1；`tool_activity` 是向后兼容的可空增量，未增加 MCP SSE 事件类型。工作沿用原工具事件/Trace，问答沿用请求轮询。OpenAPI 包含管理请求和记录响应 Schema，`events.schema.json` 保持原事件契约；`python -m forgepilot.export_protocol` 统一生成两者。数据库 v5 升级保留迁移备份，旧请求的 MCP 记录默认为空，运行中断记录不会重放。
+协议仍为 v1；`tool_activity` 是向后兼容的可空增量，Task SSE 事件类型不变。工作沿用原工具事件/Trace，问答在可用时使用独立 SSE，否则保持原请求轮询。OpenAPI 包含会话 SSE 路由，`events.schema.json` 保持原 Task 事件契约，`conversation-events.schema.json` 单独定义回答事件；`python -m forgepilot.export_protocol` 统一生成三者。数据库 v5 升级保留迁移备份，旧请求的 MCP 记录默认为空，运行中断记录不会重放。
 
 第二个可注入 ModelClient 已通过同一工具往返测试；不代表自训练模型质量验收。A01–A20 及未执行的公网验证见 [验收报告](../docs/mcp-visual-management-acceptance.md)。预设精确匹配 `tavily-search` / `tavily-extract`，远端目录不匹配时返回 `mcp_preset_mismatch`，不模糊匹配或增加授权。
 
@@ -181,6 +181,16 @@ id 为 `<task_id>:<连续序号>`，从 1 开始，只对应公开事件；不�
 
 取消没有额外 task_cancelled 事件，也不伪造 task_failed。`task_state_changed` 的 cancelled 即取消终态。Configure 与 Build 各产生一对 build 事件，以 phase 区分；三轮 Repair 沿用同一任务事件序列，repair_round 区分验证轮。
 
+## 会话回答 SSE
+
+`GET /api/v1/conversations/{conversation_id}/requests/{request_id}/events` 只用于 `mode=chat`，必须接受 `text/event-stream`。每个 JSON 都必含 `type`、`conversation_id`、`request_id`、严格单调的 `revision` 和当前 `segment_id`；SSE id 固定为 `<request_id>:<revision>`。客户端只在成功应用事件后更新游标，重连通过 `Last-Event-ID` 发送该完整 id。请求 ID 不匹配或非规范数字返回 400 `invalid_event_id`，超前返回 409 `event_cursor_ahead`，请求不属于对话返回 404 `unknown_request`。
+
+事件类型为 `answer_started`、`answer_delta`、`answer_snapshot`、`answer_segment_discarded`、`answer_segment_committed`、`tool_activity`、`answer_completed`、`answer_cancelled`、`answer_failed`。`answer_delta` 额外含 `previous_revision` 和仅新增的已脱敏 `text`。工具轮的 provisional segment 会先 `discarded`，后续新 segment 不得拼接旧文本；`tool_activity` 不包含参数或输出。`committed` 表示模型段已确认，但客户端仍等待 terminal 后从会话详情取得真实 `message_id`。
+
+每请求最多缓存 256 个事件和 1 MiB SSE 帧，安全草稿最多 32,768 字符，最多 8 个订阅者。当游标早于环形缓冲区时，服务端发送一个 `answer_snapshot`：`content` 是当前完整安全草稿，`revision` 直接跳到最新值，`terminal` 指明是否已终止。应用 snapshot 后不得再应用旧 delta。终态为 `answer_completed/cancelled/failed`；已确认全部终态事件时可返回 204。终态内存流默认保留 60 秒，释放后可由已持久化 request/message 重建只读终态。
+
+空闲期间每 15 秒可发送 `: heartbeat`，建议 `retry: 1000`；心跳不带 id 且不改变 revision。断线不取消模型，客户端保留游标并指数退避重连；revision 不连续时重连以获得 replay/snapshot。404 表示旧服务不支持此可选端点，客户端应回退 request/detail 轮询；401/403/409、Content-Type 错误、非法 JSON、身份或 revision 错误不得无限重连，应保留游标并 GET 真实状态。容量超限为 409 `conversation_stream_capacity`，流已丢失为 503 `conversation_stream_unavailable`，服务端内部状态/大小错误为 `conversation_stream_state` / `conversation_stream_limit`。
+
 ## 错误结构和状态码
 
 ```json
@@ -191,14 +201,15 @@ id 为 `<task_id>:<连续序号>`，从 1 开始，只对应公开事件；不�
 | --- | --- | --- |
 | 400 | invalid_event_id、invalid_page、host_not_allowed | 非法事件/历史游标或本机 Host |
 | 403 | origin_not_allowed | 禁止跨 Origin |
-| 404 | unknown_task、unknown_trace、route_not_found | 数据库无任务/事件或不存在接口 |
+| 404 | unknown_task、unknown_trace、unknown_request、route_not_found | 数据库无任务/事件/会话请求或不存在接口 |
 | 409 | repository_busy、task_busy | 仓库/任务正在占用 |
 | 409 | stale_plan、already_approved、plan_changed、invalid_state、step_limit | 版本/授权/状态冲突或重规划预算耗尽 |
 | 409 | event_cursor_ahead | 游标超过已存事件 |
+| 409 | conversation_stream_capacity | 会话回答流订阅者达到上限 |
 | 422 | invalid_request | JSON/schema 错误；details 仅给字段位置与类型，不回显输入 |
 | 422 | repository_*、git_*、invalid_prompt 等原服务错误 | 创建准入失败；具体安全错误码由 TaskService 给出 |
-| 503 | task_capacity、server_stopping、llm_config、build_config、storage_busy、storage_unavailable | 会话容量/停止/启动配置或存储问题 |
-| 500 | task_internal、api_internal | 未预期内部错误；不返回原始 traceback |
+| 503 | task_capacity、server_stopping、llm_config、build_config、storage_busy、storage_unavailable、conversation_stream_unavailable | 会话容量/停止/启动配置、存储或回答流不可用 |
+| 500 | task_internal、api_internal、conversation_stream_limit、conversation_stream_state | 未预期内部错误或回答流安全上限/状态错误；不返回原始 traceback |
 
 任务获准创建后的 LLM/Build/Test/Repair 失败属于任务结果，查询仍为 200，state=failed、error_code/failure_kind 给具体原因；不把一次模型 401 映射为查询接口的 HTTP 401。
 

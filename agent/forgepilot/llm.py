@@ -1,8 +1,11 @@
 """One OpenAI-compatible Chat Completions client, with injectable transport."""
 
 import asyncio
+import codecs
 import json
 import math
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 import httpx
@@ -10,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .errors import ForgePilotError
 from .security import Redactor
+from .stream_metrics import StreamMetrics
 
 
 class FunctionCall(BaseModel):
@@ -37,6 +41,28 @@ class ChatReply(BaseModel):
     usage: dict | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ContentDelta:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallDelta:
+    index: int
+    call_id: str | None
+    name: str | None
+    arguments: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamFinished:
+    finish_reason: Literal["stop", "tool_calls"]
+    usage: dict | None
+
+
+ChatStreamEvent = ContentDelta | ToolCallDelta | StreamFinished
+
+
 class ToolSpec(BaseModel):
     """Provider-neutral definition. Call/result messages use the ChatReply contract."""
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -47,6 +73,7 @@ class ToolSpec(BaseModel):
 
 class ModelClient(Protocol):
     async def chat(self, messages: list[dict], tools: list[ToolSpec] | None = None) -> ChatReply: ...
+    def stream_chat(self, messages: list[dict], tools: list[ToolSpec] | None = None) -> AsyncIterator[ChatStreamEvent]: ...
     async def aclose(self) -> None: ...
 
 
@@ -56,9 +83,16 @@ def context_size(messages, tools):
 
 
 class OpenAICompatibleClient:
+    _RESPONSE_LIMIT = 1_048_576
+    _EVENT_LIMIT = 65_536
+    _CONTENT_LIMIT = 32_768
+    _TOOL_CALL_LIMIT = 8
+    _ARGUMENTS_LIMIT = 16_384
+
     def __init__(self, base_url: str, api_key: str, model: str, *,
                  timeout: float = 60.0,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 transport: httpx.AsyncBaseTransport | None = None,
+                 stream_include_usage: bool = False) -> None:
         if (not all(isinstance(v, str) and v.strip() for v in (base_url, api_key, model))
                 or len(model) > 256 or len(api_key) > 4_096
                 or any(ord(c) < 32 for c in api_key)):
@@ -72,13 +106,22 @@ class OpenAICompatibleClient:
             raise ForgePilotError("llm_config", "Use an http(s) API root without credentials/query/fragment")
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
             raise ForgePilotError("llm_config", "Request timeout must be in (0, 600] seconds")
+        if type(stream_include_usage) is not bool:
+            raise ForgePilotError("llm_config", "stream_include_usage must be a boolean")
         self._url = str(url).rstrip("/") + "/chat/completions"
         self._api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.stream_include_usage = stream_include_usage
         self.redactor = Redactor((api_key,))
         self._client = httpx.AsyncClient(transport=transport, timeout=timeout,
                                        follow_redirects=False, trust_env=False)
+        self._stream_metrics: StreamMetrics | None = None
+        self._stream_model_started: float | None = None
+
+    def set_stream_diagnostics(self, metrics: StreamMetrics | None, model_started: float) -> None:
+        self._stream_metrics = metrics
+        self._stream_model_started = model_started
 
     async def __aenter__(self):
         return self
@@ -146,3 +189,271 @@ class OpenAICompatibleClient:
             raise ForgePilotError("llm_network", "LLM transport failed; check service and network") from None
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError, ValidationError):
             raise ForgePilotError("llm_protocol", "Invalid Chat Completions response structure") from None
+
+    async def stream_chat(self, messages: list[dict],
+                          tools: list[ToolSpec] | None = None) -> AsyncIterator[ChatStreamEvent]:
+        """Yield validated, provider-neutral deltas from a Chat Completions SSE stream."""
+        payload = {"model": self.model, "messages": messages, "stream": True}
+        if self.stream_include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        if tools:
+            payload["tools"] = [{"type": "function", "function": {
+                "name": t.name, "description": t.description, "parameters": t.input_schema,
+            }} for t in tools]
+
+        content_parts: list[str] = []
+        content_length = 0
+        tool_states: list[dict[str, str | None]] = []
+        finish_reason: Literal["stop", "tool_calls"] | None = None
+        usage: dict | None = None
+        saw_done = False
+
+        try:
+            async with asyncio.timeout(self.timeout):
+                async with self._client.stream(
+                    "POST", self._url, json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                ) as response:
+                    self._validate_stream_response(response)
+                    async for event_data in self._iter_sse_data(response):
+                        if event_data == "[DONE]":
+                            saw_done = True
+                            break
+                        data = self._load_stream_event(event_data)
+                        choices = data.get("choices")
+                        event_usage = data.get("usage")
+                        if choices == [] and event_usage is not None:
+                            if finish_reason is None or usage is not None:
+                                raise ValueError("Unexpected usage event")
+                            usage = self._validate_usage(event_usage)
+                            continue
+                        if not isinstance(choices, list) or len(choices) != 1:
+                            raise ValueError("Expected exactly one choice")
+                        if finish_reason is not None:
+                            raise ValueError("Choice received after finish")
+                        choice = choices[0]
+                        if (not isinstance(choice, dict) or type(choice.get("index")) is not int
+                                or choice["index"] != 0):
+                            raise ValueError("Invalid choice index")
+                        delta = choice.get("delta")
+                        if not isinstance(delta, dict):
+                            raise ValueError("Invalid delta")
+                        if "role" in delta and delta["role"] != "assistant":
+                            raise ValueError("Invalid delta role")
+
+                        content = delta.get("content")
+                        if content is not None:
+                            if not isinstance(content, str):
+                                raise ValueError("Invalid content delta")
+                            content_length += len(content)
+                            if content_length > self._CONTENT_LIMIT:
+                                raise ForgePilotError("llm_response_limit", "Assistant content exceeds 32768 characters")
+                            if content:
+                                content_parts.append(content)
+                                yield ContentDelta(content)
+
+                        call_deltas = delta.get("tool_calls")
+                        if call_deltas is not None:
+                            if not isinstance(call_deltas, list):
+                                raise ValueError("Invalid tool call deltas")
+                            for call_delta in call_deltas:
+                                event = self._apply_tool_delta(tool_states, call_delta)
+                                yield event
+
+                        raw_finish = choice.get("finish_reason")
+                        if raw_finish is not None:
+                            finish_reason = self._validate_finish_reason(raw_finish)
+                            if event_usage is not None:
+                                usage = self._validate_usage(event_usage)
+
+            if not saw_done:
+                raise ForgePilotError("llm_protocol", "Chat Completions stream ended without [DONE]")
+            if finish_reason is None:
+                raise ForgePilotError("llm_protocol", "Chat Completions stream ended without finish_reason")
+
+            calls = self._validate_assembled_stream(finish_reason, content_parts, tool_states)
+            if not calls and not "".join(content_parts).strip():
+                raise ForgePilotError("llm_protocol", "Chat Completions stream contained no valid response")
+            yield StreamFinished(finish_reason, usage)
+        except (TimeoutError, httpx.TimeoutException):
+            raise ForgePilotError("llm_timeout", "LLM request timed out") from None
+        except httpx.HTTPError:
+            raise ForgePilotError("llm_network", "LLM transport failed; check service and network") from None
+        except ForgePilotError:
+            raise
+        except (UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError,
+                AttributeError, RecursionError, ValidationError):
+            raise ForgePilotError("llm_protocol", "Invalid streaming Chat Completions response") from None
+        except Exception:
+            # Custom transports must not make their exception text part of the public error.
+            raise ForgePilotError("llm_network", "LLM transport failed; check service and network") from None
+        finally:
+            self._stream_metrics = None
+            self._stream_model_started = None
+
+    def _validate_stream_response(self, response: httpx.Response) -> None:
+        if not 200 <= response.status_code < 300:
+            status = response.status_code
+            reason = ("模型鉴权失败，当前 API Key 未被服务接受。请核对密钥与 Base URL 是否属于同一服务；"
+                      "运行 Configure-ForgePilot.cmd 更新密钥后，依次运行 Stop-ForgePilot.cmd 和 Start-ForgePilot.cmd。"
+                      if status == 401 else
+                      "模型访问被拒绝，请检查当前 API Key 的模型访问权限及服务端访问限制。" if status == 403 else
+                      "Rate limited" if status == 429 else
+                      "Redirects are disabled" if 300 <= status < 400 else
+                      "Check API endpoint, model and service availability")
+            raise ForgePilotError("llm_http", f"HTTP {status}. {reason}")
+        content_type = response.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "text/event-stream":
+            raise ForgePilotError("llm_protocol", "Streaming response must use text/event-stream")
+
+    async def _iter_sse_data(self, response: httpx.Response) -> AsyncIterator[str]:
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        text_buffer = ""
+        data_lines: list[str] = []
+        event_size = 0
+        total_size = 0
+
+        async for chunk in response.aiter_bytes():
+            total_size += len(chunk)
+            if total_size > self._RESPONSE_LIMIT:
+                raise ForgePilotError("llm_response_limit", "Response exceeds 1 MiB")
+            text_buffer += decoder.decode(chunk, final=False)
+            while True:
+                newline = text_buffer.find("\n")
+                if newline < 0:
+                    if len(text_buffer.encode("utf-8")) + event_size > self._EVENT_LIMIT:
+                        raise ForgePilotError("llm_response_limit", "SSE event exceeds 65536 bytes")
+                    break
+                line, text_buffer = text_buffer[:newline], text_buffer[newline + 1:]
+                if line.endswith("\r"):
+                    line = line[:-1]
+                event_size += len(line.encode("utf-8")) + 1
+                if event_size > self._EVENT_LIMIT:
+                    raise ForgePilotError("llm_response_limit", "SSE event exceeds 65536 bytes")
+                if line == "":
+                    if data_lines:
+                        event_data = "\n".join(data_lines)
+                        if event_data:
+                            if self._stream_metrics is not None and self._stream_model_started is not None:
+                                self._stream_metrics.model_chunk(self._stream_model_started)
+                            yield event_data
+                    data_lines = []
+                    event_size = 0
+                elif line.startswith(":"):
+                    continue
+                else:
+                    field, separator, value = line.partition(":")
+                    if separator and value.startswith(" "):
+                        value = value[1:]
+                    if field == "data":
+                        data_lines.append(value)
+
+        text_buffer += decoder.decode(b"", final=True)
+        if text_buffer:
+            if text_buffer.endswith("\r"):
+                text_buffer = text_buffer[:-1]
+            event_size += len(text_buffer.encode("utf-8"))
+            if event_size > self._EVENT_LIMIT:
+                raise ForgePilotError("llm_response_limit", "SSE event exceeds 65536 bytes")
+            if text_buffer.startswith("data:"):
+                value = text_buffer[5:]
+                data_lines.append(value[1:] if value.startswith(" ") else value)
+        if data_lines:
+            event_data = "\n".join(data_lines)
+            if event_data:
+                if self._stream_metrics is not None and self._stream_model_started is not None:
+                    self._stream_metrics.model_chunk(self._stream_model_started)
+                yield event_data
+
+    @staticmethod
+    def _load_stream_event(event_data: str) -> dict:
+        data = json.loads(event_data)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid event object")
+        return data
+
+    @staticmethod
+    def _validate_usage(usage: object) -> dict:
+        if not isinstance(usage, dict):
+            raise ValueError("Invalid usage")
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if key in usage and (type(usage[key]) is not int or usage[key] < 0):
+                raise ValueError("Invalid token count")
+        return dict(usage)
+
+    @staticmethod
+    def _validate_finish_reason(reason: object) -> Literal["stop", "tool_calls"]:
+        if reason == "stop":
+            return "stop"
+        if reason == "tool_calls":
+            return "tool_calls"
+        if reason == "length":
+            raise ForgePilotError("llm_incomplete", "Streaming response reached the model length limit")
+        if reason == "content_filter":
+            raise ForgePilotError("llm_incomplete", "Streaming response was blocked by content filtering")
+        raise ForgePilotError("llm_incomplete", "Streaming response used an unsupported finish reason")
+
+    def _apply_tool_delta(self, states: list[dict[str, str | None]], raw: object) -> ToolCallDelta:
+        if not isinstance(raw, dict):
+            raise ValueError("Invalid tool call delta")
+        index = raw.get("index")
+        if type(index) is not int or index < 0 or index >= self._TOOL_CALL_LIMIT:
+            raise ValueError("Invalid tool call index")
+        if index > len(states):
+            raise ValueError("Tool call index skipped")
+        if index == len(states):
+            states.append({"id": None, "name": None, "arguments": ""})
+        state = states[index]
+        call_type = raw.get("type")
+        if call_type is not None and call_type != "function":
+            raise ValueError("Invalid tool call type")
+        call_id = raw.get("id")
+        if call_id is not None:
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError("Invalid tool call id")
+            if state["id"] is not None and state["id"] != call_id:
+                raise ValueError("Tool call id changed")
+            state["id"] = call_id
+        function = raw.get("function")
+        if function is None:
+            function = {}
+        if not isinstance(function, dict):
+            raise ValueError("Invalid function delta")
+        name = function.get("name")
+        if name is not None:
+            if not isinstance(name, str) or not name:
+                raise ValueError("Invalid function name")
+            if state["name"] is not None and state["name"] != name:
+                raise ValueError("Function name changed")
+            state["name"] = name
+        arguments = function.get("arguments", "")
+        if not isinstance(arguments, str):
+            raise ValueError("Invalid function arguments delta")
+        current_arguments = state["arguments"]
+        assert isinstance(current_arguments, str)
+        if len(current_arguments) + len(arguments) > self._ARGUMENTS_LIMIT:
+            raise ForgePilotError("llm_response_limit", "Tool arguments exceed 16384 characters")
+        state["arguments"] = current_arguments + arguments
+        return ToolCallDelta(index, call_id, name, arguments)
+
+    @staticmethod
+    def _validate_assembled_stream(finish_reason: Literal["stop", "tool_calls"],
+                                   content_parts: list[str],
+                                   states: list[dict[str, str | None]]) -> list[ToolCall]:
+        raw_calls = [{"id": state["id"], "type": "function", "function": {
+            "name": state["name"], "arguments": state["arguments"],
+        }} for state in states]
+        message = AssistantMessage.model_validate({
+            "role": "assistant",
+            "content": "".join(content_parts) or None,
+            "tool_calls": raw_calls or None,
+        })
+        calls = message.tool_calls or []
+        if finish_reason == "tool_calls" and not calls:
+            raise ValueError("Missing tool calls")
+        if finish_reason == "stop" and calls:
+            raise ValueError("Unexpected tool calls")
+        if len({call.id for call in calls}) != len(calls):
+            raise ValueError("Duplicate tool call ids")
+        return calls

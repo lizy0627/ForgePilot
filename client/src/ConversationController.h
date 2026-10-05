@@ -2,8 +2,10 @@
 #include "RecordListModel.h"
 #include "TaskController.h"
 #include "MemoryController.h"
+#include "ConversationStreamClient.h"
 #include <QMap>
 #include <QTimer>
+#include <QJsonArray>
 #include <functional>
 
 // Conversation text never carries TaskController permissions or execution state.
@@ -15,6 +17,7 @@ class ConversationController : public QObject {
     Q_PROPERTY(QString mode READ mode WRITE setMode NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY changed)
+    Q_PROPERTY(QString answerStatus READ answerStatus NOTIFY changed)
     Q_PROPERTY(QString contextNotice READ contextNotice NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(bool active READ active NOTIFY changed)
@@ -49,6 +52,7 @@ public:
     void setMode(const QString &mode);
     QString error() const { return m_error; }
     QString serverStatus() const { return m_serverStatus; }
+    QString answerStatus() const { return m_answerStatus; }
     QString contextNotice() const { return m_detail.value("context_notice").toString(); }
     bool busy() const { return m_creating || m_sending.contains(m_id) || m_editing || m_removing.contains(pendingKey()); }
     bool active() const { return !m_detail.value("active_request").toObject().isEmpty(); }
@@ -69,6 +73,9 @@ public:
     RecordListModel *messages() { return &m_messages; }
     MemoryController *memory() { return m_memory; }
     QVariantMap toolActivity() const;
+    int uiModelUpdates() const { return m_uiModelUpdates; }
+    int streamReconnectCount() const { return m_stream.reconnectCount(); }
+    int requestPollInterval() const { return m_poll.interval(); }
     QVariantList mcpTools() const { return m_mcpTools; }
     bool mcpToolsLoading() const { return m_mcpToolsLoading; }
     QString mcpToolsError() const { return m_mcpToolsError; }
@@ -110,6 +117,15 @@ private:
     void resetRequestPolling();
     void bindRequestTask(const QJsonObject &previous,const QJsonObject &request);
     void finishRequest(const QJsonObject &request,bool detailLoaded=false);
+    void beginAnswerStream(const QJsonObject &request);
+    void stopAnswerStream(bool removeRow=false);
+    void applyStreamEvent(const QString &type,const QJsonObject &payload,quint64 streamGeneration);
+    void flushStreamBuffer();
+    void updateStreamRow();
+    bool reconcileStreamMessage(const QJsonArray &messages);
+    bool streamOwnsPolling() const;
+    void restorePollInterval();
+    void recordClientStreamMetrics(const QString &errorCode);
     void patch(const QJsonObject &body);
     void create(const QString &prompt={},const QString &repositoryPath={});
     void postPending();
@@ -121,19 +137,27 @@ private:
     QNetworkAccessManager m_network;
     QSet<QNetworkReply*> m_replies;
     QTimer m_poll;
+    QTimer m_streamFlush;
+    ConversationStreamClient m_stream;
     RecordListModel m_messages;
     QMap<qint64,QVariantMap> m_rows;
     QHash<QString,QJsonObject> m_pending;
     QSet<QString> m_sending;
     QSet<QString> m_deleted,m_removing;
     QJsonObject m_detail;
-    QString m_id,m_mode="chat",m_error,m_cursor,m_serverStatus="disconnected";
+    QString m_id,m_mode="chat",m_error,m_cursor,m_serverStatus="disconnected",m_answerStatus;
+    QString m_streamRequest,m_streamSegment,m_streamDraft,m_streamBuffer,m_streamKey,m_streamSuppressedRequest;
+    QVariantMap m_streamToolActivity;
     QString m_deleteTarget,m_deleteTitle,m_deleteError;
     QVariantList m_history;
     quint64 m_generation=0,m_listGeneration=0;
+    quint64 m_streamGeneration=0;
+    qint64 m_streamRevision=0;
+    int m_uiModelUpdates=0;
     quint64 m_deleteGeneration=0;
     int m_historyTotal=0;
     bool m_deleteLoading=false,m_deleteActive=false,m_deleting=false;
+    bool m_conversationStreamSupported=true,m_streamMetricsRecorded=false;
     qint64 m_before=0;
     bool m_loading=false,m_historyLoading=false,m_creating=false,m_editing=false;
     bool m_pollingRequest=false;

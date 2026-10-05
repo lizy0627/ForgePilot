@@ -5,6 +5,7 @@
 #include "JsonHttp.h"
 #include "Protocol.h"
 #include "SseClient.h"
+#include "ConversationStreamClient.h"
 #include "SseParser.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,6 +21,15 @@
 using namespace Qt::Literals::StringLiterals;
 
 #include "HttpFixture.h"
+
+QByteArray conversationSse(int revision,const QString &type,QJsonObject values={},
+                           const QString &conversation=A,const QString &request=B)
+{
+    values["type"]=type; values["conversation_id"]=conversation;
+    values["request_id"]=request; values["revision"]=revision;
+    return "id: "+request.toUtf8()+':'+QByteArray::number(revision)+"\r\nevent: "+type.toUtf8()
+        +"\r\ndata: "+QJsonDocument(values).toJson(QJsonDocument::Compact)+"\r\n\r\n";
+}
 
 // Local HTTP fixture: count actual requests and hold individual responses to order races.
 class PollSource : public Source {
@@ -54,8 +64,10 @@ public:
     }
     QJsonObject detail(bool older=false) const {
         const bool running=state.value("status")=="running";
-        QJsonArray messages{QJsonObject{{"message_id",older?1:2},{"role","user"},{"content",older?"older":"question"}}};
-        if(!running && !older) messages.append(QJsonObject{{"message_id",3},{"role","assistant"},{"content","final"}});
+        QJsonArray messages{QJsonObject{{"message_id",older?1:2},{"conversation_id",cid},{"request_id",rid},
+            {"role","user"},{"content",older?"older":"question"}}};
+        if(!running && !older) messages.append(QJsonObject{{"message_id",3},{"conversation_id",cid},{"request_id",rid},
+            {"role","assistant"},{"content","final"}});
         return {{"conversation_id",cid},{"title",cid},{"messages",messages},{"next_before",older?0:2},
             {"context_notice",state.value("context_notice")},{"last_request",state},
             {"active_request",running?QJsonValue(state):QJsonValue::Null}};
@@ -234,20 +246,24 @@ private slots:
         QSignalSpy updates(c.messages(),&QAbstractItemModel::dataChanged);
         QSignalSpy inserts(c.messages(),&QAbstractItemModel::rowsInserted);
         c.showMcpTools(B); QTRY_COMPARE(source.records,1);
+        // This fixture returns a non-SSE 200 response for /events.  R7 treats
+        // that as a protocol error, performs one authoritative detail refresh,
+        // then falls back to the existing status poller.
+        QTRY_COMPARE(source.details.size(),2);
         QTRY_COMPARE_WITH_TIMEOUT(c.toolActivity().value("sequence").toInt(),10,12000);
-        QCOMPARE(source.polls.size(),10); QCOMPARE(source.details.size(),1); QCOMPARE(source.histories,0);
+        QCOMPARE(source.polls.size(),10); QCOMPARE(source.details.size(),2); QCOMPARE(source.histories,0);
         QCOMPARE(c.contextNotice(),QString("notice-10")); QCOMPARE(c.messages()->count(),1);
         QCOMPARE(resets.count(),0); QCOMPARE(updates.count(),0); QCOMPARE(inserts.count(),0);
         QVERIFY(!c.loading()); QVERIFY(!c.busy()); QCOMPARE(c.activeMode(),QString("chat"));
         QTRY_COMPARE(source.records,11); QTRY_VERIFY(!c.mcpToolsLoading());
         QCOMPARE(c.mcpTools().first().toMap().value("sequence").toInt(),11);
-        qInfo("R7 running: 10 status GETs, 1 initial detail GET, 0 history GETs, 0 message mutations, 11 MCP detail GETs");
-        c.refresh(); QTRY_COMPARE(source.details.size(),2); QTRY_VERIFY(!c.loading());
-        c.refresh(true); QTRY_COMPARE(source.details.size(),3); QTRY_VERIFY(!c.loading());
+        qInfo("R7 running: 10 status GETs, initial plus protocol-recovery detail GETs, 0 history GETs, 0 message mutations, 11 MCP detail GETs");
+        c.refresh(); QTRY_COMPARE(source.details.size(),3); QTRY_VERIFY(!c.loading());
+        c.refresh(true); QTRY_COMPARE(source.details.size(),4); QTRY_VERIFY(!c.loading());
         QCOMPARE(c.messages()->count(),2); QVERIFY(!c.hasMoreMessages());
         source.state["status"]="completed";
         QTRY_VERIFY(!c.active()); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(c.messages()->count(),3);
-        QCOMPARE(source.details.size(),4); QTRY_COMPARE(source.histories,1);
+        QCOMPARE(source.details.size(),5); QTRY_COMPARE(source.histories,1);
         QTRY_VERIFY(!c.mcpToolsLoading());
         QCOMPARE(c.mcpTools().first().toMap().value("status").toString(),QString("completed"));
         qInfo("R7 final: 1 additional detail GET and 1 history GET; manual refresh and older page each add 1 detail GET");
@@ -1046,6 +1062,147 @@ private slots:
         client.getTask(A); QTRY_COMPARE(source.requests.size(),1);
         client.abortPending(); Source::json(source.requests[0],snapshot());
         QTest::qWait(50); QCOMPARE(responses.size(),0); QCOMPARE(errors.size(),0); QCOMPARE(source.requests.size(),1);
+    }
+    void conversationStreamReconnectSnapshotAndUnicode() {
+        Source source; int connections=0;
+        source.handle=[&](const Request &r) {
+            ++connections;
+            if(connections==1) Source::stream(r,"retry: 250\n\n"+conversationSse(1,"answer_started",{{"segment_id","s1"}})
+                +conversationSse(3,"answer_delta",{{"segment_id","s1"},{"previous_revision",2},{"text","gap"}}),false);
+            else Source::stream(r,conversationSse(3,"answer_snapshot",{{"segment_id","s1"},{"content","快照🙂"},{"status","streaming"},{"terminal",false}})
+                +conversationSse(4,"answer_delta",{{"segment_id","s1"},{"previous_revision",3},{"text","继续😀"}})
+                +conversationSse(5,"answer_completed",{{"segment_id","s1"},{"content","快照🙂继续😀"},{"message_id",7}}));
+        };
+        ConversationStreamClient client; QVERIFY(client.setBaseUrl(source.url()));
+        QSignalSpy events(&client,&ConversationStreamClient::eventReceived),ended(&client,&ConversationStreamClient::streamEnded);
+        client.connectToRequest(A,B); QTRY_COMPARE_WITH_TIMEOUT(ended.size(),1,5000);
+        QCOMPARE(connections,2); QCOMPARE(events.size(),4);
+        QCOMPARE(events[1][0].toString(),QString("answer_snapshot"));
+        QCOMPARE(events[1][1].toJsonObject().value("content").toString(),QString("快照🙂"));
+        QCOMPARE(events[2][1].toJsonObject().value("text").toString(),QString("继续😀"));
+        QVERIFY(source.requests[1].headers.toLower().contains("last-event-id: "+B.toUtf8()+":1"));
+        QCOMPARE(client.lastEventId(),B+":5"); QCOMPARE(client.connectionState(),QString("ended"));
+    }
+    void conversationStreamRejectsBadWire_data() {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("content-type")<<QString("content-type");
+        QTest::newRow("json")<<QString("json");
+        QTest::newRow("limit")<<QString("limit");
+    }
+    void conversationStreamRejectsBadWire() {
+        QFETCH(QString,kind); Source source;
+        source.handle=[&](const Request &r) {
+            if(kind=="content-type") Source::json(r,{{"not","sse"}});
+            else if(kind=="json") Source::stream(r,"id: "+B.toUtf8()+":1\nevent: answer_started\ndata: broken\n\n");
+            else Source::stream(r,"id: "+B.toUtf8()+":1\nevent: answer_delta\ndata: "+QByteArray(130*1024,'x')+"\n\n");
+        };
+        ConversationStreamClient client; client.setBaseUrl(source.url());
+        QSignalSpy errors(&client,&ConversationStreamClient::fatalError),events(&client,&ConversationStreamClient::eventReceived);
+        client.connectToRequest(A,B); QTRY_COMPARE(client.connectionState(),QString("error"));
+        QCOMPARE(errors.size(),1); QCOMPARE(events.size(),0); QCOMPARE(source.requests.size(),1);
+    }
+    void conversationStreamPollingAndLegacyFallback() {
+        Source source; Request stream; int eventGets=0,polls=0,posts=0; bool running=true,holdReconnect=false;
+        auto requestState=[&] { return QJsonObject{{"conversation_id",A},{"request_id",B},{"mode","chat"},
+            {"status",running?"running":"completed"},{"task_id",QJsonValue::Null},{"context_notice",""}}; };
+        auto detail=[&] {
+            QJsonArray messages{QJsonObject{{"message_id",1},{"conversation_id",A},{"request_id",B},
+                {"role","user"},{"content","question"}}};
+            if(!running) messages.append(QJsonObject{{"message_id",2},{"conversation_id",A},{"request_id",B},
+                {"role","assistant"},{"content","legacy final"}});
+            return QJsonObject{{"conversation_id",A},{"title","compatibility"},{"messages",messages},{"next_before",0},
+                {"context_notice",""},{"last_request",requestState()},
+                {"active_request",running?QJsonValue(requestState()):QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.method=="POST") { ++posts; Source::json(r,{}); }
+            else if(r.path.endsWith("/events")) {
+                ++eventGets;
+                if(holdReconnect) return;
+                stream=r; Source::stream(r,conversationSse(1,"answer_started",{{"segment_id","s1"}}),false);
+            } else if(r.path.endsWith(("/requests/"+B).toUtf8())) { ++polls; Source::json(r,requestState()); }
+            else if(r.path=="/api/v1/conversations/"+A.toUtf8()) Source::json(r,detail());
+            else if(r.path.startsWith("/api/v1/conversations?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else Source::json(r,{});
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController controller(&tasks);
+        controller.selectConversation(A); QTRY_VERIFY(stream.socket); QTRY_COMPARE(eventGets,1);
+        QTest::qWait(1200); QCOMPARE(polls,0); QCOMPARE(posts,0);
+        QCOMPARE(controller.toolActivity(),QVariantMap{});
+        stream.socket->write(conversationSse(2,"tool_activity",{{"segment_id","s1"},{"activity","started"},
+            {"tool_call_id","call-1"},{"tool_name","read_file"}}));
+        QTRY_COMPARE(controller.toolActivity().value("status").toString(),QString("running"));
+        holdReconnect=true; stream.socket->disconnectFromHost();
+        QTRY_COMPARE(controller.answerStatus(),QString("正在重连…"));
+        QCOMPARE(controller.requestPollInterval(),5000);
+        QTRY_VERIFY_WITH_TIMEOUT(polls>=1,6500);
+
+        Source legacy; int legacyEvents=0,legacyPolls=0;
+        legacy.handle=[&](const Request &r) {
+            if(r.path.endsWith("/events")) { ++legacyEvents; Source::json(r,{{"error",QJsonObject{{"code","route_not_found"}}}},404); }
+            else if(r.path.endsWith(("/requests/"+B).toUtf8())) {
+                ++legacyPolls; running=false; Source::json(r,requestState());
+            } else if(r.path=="/api/v1/conversations/"+A.toUtf8()) Source::json(r,detail());
+            else if(r.path.startsWith("/api/v1/conversations?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else Source::json(r,{});
+        };
+        tasks.setBaseUrl(legacy.url()); controller.selectConversation(A);
+        QTRY_COMPARE(legacyEvents,1); QTRY_VERIFY(legacyPolls>=1);
+        QTRY_COMPARE(controller.messages()->count(),2);
+        QCOMPARE(controller.messages()->get(1).value("content").toString(),QString("legacy final"));
+        QVERIFY(controller.error().isEmpty()); QCOMPARE(posts,0);
+
+        // Capability failure is scoped to one Base URL; switching back retries SSE.
+        running=true; holdReconnect=false; tasks.setBaseUrl(source.url()); controller.selectConversation(A);
+        QTRY_VERIFY(eventGets>=2);
+    }
+    void conversationControllerStreamsThrottleDiscardAndReplace() {
+        Source source; Request stream; bool running=true;
+        auto detail=[&] {
+            QJsonObject request{{"conversation_id",A},{"request_id",B},{"mode","chat"},
+                {"status",running?"running":"completed"},{"task_id",QJsonValue::Null},{"context_notice",""}};
+            QJsonArray messages{QJsonObject{{"message_id",1},{"conversation_id",A},{"request_id",B},
+                {"role","user"},{"content","question"}}};
+            if(!running) messages.append(QJsonObject{{"message_id",2},{"conversation_id",A},{"request_id",B},
+                {"role","assistant"},{"content",QString(1000,'x')}});
+            return QJsonObject{{"conversation_id",A},{"title","stream"},{"messages",messages},{"next_before",0},
+                {"context_notice",""},{"last_request",request},{"active_request",running?QJsonValue(request):QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.path.endsWith("/events")) { stream=r; Source::stream(r,{},false); }
+            else if(r.path=="/api/v1/conversations/"+A.toUtf8()) Source::json(r,detail());
+            else if(r.path.startsWith("/api/v1/conversations?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else Source::json(r,{});
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController controller(&tasks);
+        controller.selectConversation(A); QTRY_VERIFY(stream.socket); QTRY_COMPARE(controller.messages()->count(),1);
+        stream.socket->write(conversationSse(1,"answer_started",{{"segment_id","s1"}})
+            +conversationSse(2,"answer_delta",{{"segment_id","s1"},{"previous_revision",1},{"text","旧草稿🙂"}}));
+        QTRY_COMPARE(controller.messages()->count(),2);
+        QTRY_COMPARE(controller.messages()->get(1).value("content").toString(),QString("旧草稿🙂"));
+        stream.socket->write(conversationSse(5,"answer_snapshot",{{"segment_id","s1"},{"content","快照😀"},{"status","streaming"},{"terminal",false}}));
+        QTRY_COMPARE(controller.messages()->get(1).value("content").toString(),QString("快照😀"));
+        stream.socket->write(conversationSse(6,"answer_segment_discarded",{{"segment_id","s1"}})
+            +conversationSse(7,"tool_activity",{{"segment_id","s1"},{"activity","started"},{"tool_name","read_file"}})
+            +conversationSse(8,"answer_started",{{"segment_id","s2"}}));
+        QTRY_COMPARE(controller.messages()->get(1).value("content").toString(),QString{});
+        QCOMPARE(controller.answerStatus(),QString("正在生成…"));
+        QSignalSpy updates(controller.messages(),&QAbstractItemModel::dataChanged);
+        QByteArray deltas;
+        for(int revision=9;revision<1009;++revision)
+            deltas+=conversationSse(revision,"answer_delta",{{"segment_id","s2"},{"previous_revision",revision-1},{"text","x"}});
+        stream.socket->write(deltas); QTRY_COMPARE_WITH_TIMEOUT(controller.messages()->get(1).value("content").toString().size(),1000,5000);
+        QVERIFY2(updates.size()<=4,qPrintable(QString("1000 deltas caused %1 model updates").arg(updates.size())));
+        running=false;
+        stream.socket->write(conversationSse(1009,"answer_segment_committed",{{"segment_id","s2"},{"content",QString(1000,'x')}})
+            +conversationSse(1010,"answer_completed",{{"segment_id","s2"},{"content",QString(1000,'x')},{"message_id",2}}));
+        QTRY_COMPARE_WITH_TIMEOUT(controller.messages()->count(),2,5000);
+        QTRY_COMPARE(controller.messages()->get(1).value("message_id").toLongLong(),qint64(2));
+        QCOMPARE(controller.messages()->get(1).value("content").toString(),QString(1000,'x'));
+        QVERIFY(!controller.messages()->get(1).value("streaming").toBool());
     }
     void sseFragmentReconnectReplayTerminal() {
         Source source; int connections=0;

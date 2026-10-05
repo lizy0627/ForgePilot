@@ -151,7 +151,8 @@ async def main():
 asyncio.run(main())
 '''
     run = await asyncio.to_thread(subprocess.run, [sys.executable, "-c", script, str(path), str(cpp_repo), rg_exe, git_exe,
-        json.dumps(proposal("main.cpp")), ending], timeout=20, capture_output=True)
+        json.dumps(proposal("main.cpp")), ending], timeout=20, capture_output=True,
+        cwd=Path(__file__).parents[1])
     assert run.returncode == 17, run.stderr.decode(errors="replace")
     async with api(path) as (client, app, _, _):
         store = app.state.task_host.store
@@ -542,7 +543,8 @@ async def main():
  os._exit(17)
 asyncio.run(main())
 '''
-    run=subprocess.run([sys.executable,"-c",script,str(path),str(cpp_repo),rg_exe,git_exe],timeout=15,capture_output=True)
+    run=subprocess.run([sys.executable,"-c",script,str(path),str(cpp_repo),rg_exe,git_exe],timeout=15,capture_output=True,
+                       cwd=Path(__file__).parents[1])
     assert run.returncode==17,run.stderr.decode(errors="replace")
     store=SqliteEventStore(path); saved=store.list()[0]
     assert saved["state"]=="failed" and saved["read_only"] and saved["error_code"]=="service_interrupted"

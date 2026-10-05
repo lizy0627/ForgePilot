@@ -3,8 +3,10 @@
 import json
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from .api import create_app
-from .api_models import EventPayload
+from .api_models import ConversationEvent, EventPayload
 
 
 def export(directory=None):
@@ -12,7 +14,11 @@ def export(directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     app = create_app(lambda trace: None)  # Schema generation never starts the service.
     try:
-        for name, content in {"openapi.json": app.openapi(), "events.schema.json": EventPayload.model_json_schema()}.items():
+        for name, content in {
+            "openapi.json": app.openapi(),
+            "events.schema.json": EventPayload.model_json_schema(),
+            "conversation-events.schema.json": TypeAdapter(ConversationEvent).json_schema(),
+        }.items():
             (directory / name).write_text(json.dumps(content, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     finally:
         app.state.task_host.store.close()
