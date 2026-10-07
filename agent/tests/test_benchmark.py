@@ -104,7 +104,7 @@ def test_analysis_requires_exact_file_symbol_and_directed_relation_sets():
     value = deepcopy(expected); value["relations"][0]["caller"] = "Counter::reset"
     assert not grade_analysis(json.dumps(value), expected)
     assert not grade_analysis("All correct! " + json.dumps(expected), expected)
-    value = deepcopy(expected); value["files"].append("README.md")
+    value = deepcopy(expected); value["files"].append("PROJECT.txt")
     assert not grade_analysis(json.dumps(value), expected)
 
 
@@ -221,8 +221,8 @@ async def test_revised_scope_stops_and_retains_prior_authorized_edits(benchmark_
     model = ScriptedLLM([reply("offline analysis"), reply(json.dumps(plan(task, ["src/subject.cpp"]))),
         message(calls=[call("read_file", {"path": "src/subject.cpp"}, "read-source"),
                        call("write_file", {"path": "src/subject.cpp", "content": fixed}, "approved"),
-                       call("write_file", {"path": "README.md", "content": "forbidden"}, "extra")]),
-        reply(json.dumps(plan(task, ["src/subject.cpp", "README.md"])))])
+                       call("write_file", {"path": "PROJECT.txt", "content": "forbidden"}, "extra")]),
+        reply(json.dumps(plan(task, ["src/subject.cpp", "PROJECT.txt"])))])
     benchmark.model_factory = lambda _: model
     output, rows, _ = await benchmark.run()
     row = rows[0]
@@ -232,7 +232,7 @@ async def test_revised_scope_stops_and_retains_prior_authorized_edits(benchmark_
     assert [d["plan_version"] for d in decisions] == [1, 2]
     repo = Path(row["repository"])
     assert (repo / "src/subject.cpp").read_text(encoding="utf-8") == fixed
-    assert (repo / "README.md").read_bytes() == asset(DATA_ROOT, task.fixture + "/README.md").read_bytes()
+    assert (repo / "PROJECT.txt").read_bytes() == asset(DATA_ROOT, task.fixture + "/PROJECT.txt").read_bytes()
 
 
 @pytest.mark.asyncio

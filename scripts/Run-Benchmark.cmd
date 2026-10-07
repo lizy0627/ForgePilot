@@ -1,7 +1,7 @@
 @echo off
 setlocal
 if not exist "%~dp0local-env.cmd" (
-    echo Missing scripts\local-env.cmd. See docs\environment.md.
+    echo Missing scripts\local-env.cmd. See README.md.
     exit /b 1
 )
 call "%~dp0local-env.cmd"

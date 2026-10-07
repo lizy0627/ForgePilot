@@ -3,7 +3,7 @@ setlocal
 set "FORGEPILOT_BUILD_EXIT=1"
 for /f "tokens=2 delims=:" %%p in ('chcp') do set "FORGEPILOT_OLD_CP=%%p"
 if not exist "%~dp0local-env.cmd" (
-    echo Missing scripts\local-env.cmd. See docs\environment.md.
+    echo Missing scripts\local-env.cmd. See README.md.
     exit /b 1
 )
 call "%~dp0local-env.cmd"

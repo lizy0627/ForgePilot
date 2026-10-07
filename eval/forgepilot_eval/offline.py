@@ -21,12 +21,12 @@ def plan(task, files):
 
 class OfflineModel:
     def __init__(self, task, solution, scenario="success"):
-        script = [message(calls=[call("read_file", {"path": "README.md"}, "inspect")])]
+        script = [message(calls=[call("read_file", {"path": "PROJECT.txt"}, "inspect")])]
         if task.analysis:
             script += [message(json.dumps(solution["answer"] if scenario != "wrong_analysis" else {"files": [], "symbols": [], "relations": []}))]
         else:
             files = solution.get("initial_files", solution["files"])
-            scope = ["README.md"] if scenario == "out_of_scope" else list(solution["files"])
+            scope = ["PROJECT.txt"] if scenario == "out_of_scope" else list(solution["files"])
             script += [message("OFFLINE FIXTURE analysis"), message(json.dumps(plan(task, scope)))]
             if scenario != "no_change":
                 script += [message(calls=[call("read_file", {"path": p}, f"read-{i}") for i, p in enumerate(files)] +

@@ -70,7 +70,7 @@ Qt 客户端需要先在本机准备好 MSVC 与 Qt Kit，再回到仓库根目�
 .\scripts\Build-Client.cmd
 ```
 
-如果脚本找不到工具，请先检查 `scripts/local-env.cmd` 中的本机路径。更完整的环境说明见 [docs/environment.md](docs/environment.md)。
+如果脚本找不到工具，请先检查 `scripts/local-env.cmd` 中的本机路径。
 
 ## 启动
 
@@ -90,8 +90,6 @@ Qt 客户端需要先在本机准备好 MSVC 与 Qt Kit，再回到仓库根目�
 | `Stop-ForgePilot.cmd` | 停止由启动器管理的进程 |
 | `Configure-ForgePilot.cmd` | 更新并验证模型配置 |
 | `Check-Model.cmd` | 只检查当前模型连接 |
-
-详细操作见 [docs/user-guide.md](docs/user-guide.md)，启动器参数和故障排查见 [docs/desktop-launcher.md](docs/desktop-launcher.md)。
 
 ## 模型配置与密钥
 
@@ -137,7 +135,7 @@ $env:FORGEPILOT_API_KEY = [System.Net.NetworkCredential]::new(
 .\scripts\Run-Benchmark.cmd --mode offline --approval manifest --generator Ninja
 ```
 
-离线测试使用受控模型和临时仓库，适合检查流程是否正确，但不能代表真实模型的修复能力。评测口径见 [docs/benchmark.md](docs/benchmark.md)。
+离线测试使用受控模型和临时仓库，适合检查流程是否正确，但不能代表真实模型的修复能力。
 
 ## 当前限制
 
@@ -149,14 +147,4 @@ $env:FORGEPILOT_API_KEY = [System.Net.NetworkCredential]::new(
 - 取消、拒绝或执行失败不会自动还原已经产生的文件修改
 - 真实模型效果取决于模型能力、上下文长度和项目复杂度
 
-## 文档
-
-- [使用指南](docs/user-guide.md)
-- [架构说明](docs/architecture.md)
-- [实现取舍](docs/implementation-decisions.md)
-- [MCP 接入](docs/mcp.md)
-- [代码理解与 clangd](docs/code-intelligence.md)
-- [协议说明](protocol/README.md)
-- [开发进度](docs/development-progress.md)
-
-如果只是想体验修改流程，建议先按 [Demo 说明](docs/demo-script.md) 创建隔离项目，不要直接拿重要仓库做第一次测试。
+如果只是想体验修改流程，建议先创建一个隔离项目，不要直接拿重要仓库做第一次测试。

@@ -8,7 +8,7 @@ if /i "%~1"=="Stop" goto run
 if /i "%~1"=="Check" goto run
 if /i "%~1"=="Configure" goto run
 if not exist "%~dp0local-env.cmd" (
-    echo Missing scripts\local-env.cmd. See docs\environment.md.
+    echo Missing scripts\local-env.cmd. See README.md.
     goto failed
 )
 call "%~dp0local-env.cmd"
