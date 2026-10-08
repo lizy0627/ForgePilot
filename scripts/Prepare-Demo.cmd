@@ -1,7 +1,6 @@
 @echo off
 setlocal
-if not exist "%~dp0local-env.cmd" exit /b 2
-call "%~dp0local-env.cmd"
+call "%~dp0Check-Environment.cmd" all
 if errorlevel 1 exit /b %errorlevel%
 call "%FORGEPILOT_VS_ROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b %errorlevel%

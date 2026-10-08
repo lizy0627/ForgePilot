@@ -28,6 +28,7 @@ from forgepilot.errors import ForgePilotError
 from forgepilot.llm import OpenAICompatibleClient
 
 PYTHON = ROOT / 'agent.venv/Scripts/python.exe'
+LEGACY_PYTHON_ENVIRONMENT = ROOT / 'agent/.venv'
 SCRIPT = Path(__file__).resolve()
 CLIENT_START_TIMEOUT = 15
 SHUTDOWN_TIMEOUT = 25
@@ -441,6 +442,9 @@ def start(config):
 
 
 def main():
+    if LEGACY_PYTHON_ENVIRONMENT.exists():
+        print('WARNING: agent/.venv is not supported. Use the root agent.venv; '
+              'the old environment was not removed.', file=sys.stderr)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('start', 'stop', 'status', 'supervise', 'backend', 'check'))
     parser.add_argument('--config', required=True, type=Path)

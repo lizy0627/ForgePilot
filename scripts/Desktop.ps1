@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $stage = '检查本机环境'
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$pythonExe = Join-Path $projectRoot 'agent.venv\Scripts\python.exe'
+$pythonExe = if ($env:FORGEPILOT_PYTHON) { $env:FORGEPILOT_PYTHON } else { Join-Path $projectRoot 'agent.venv\Scripts\python.exe' }
 $launcherScript = Join-Path $PSScriptRoot 'desktop_launcher.py'
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $identity = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($projectRoot.ToLowerInvariant())))).Replace('-', '').Substring(0, 16) }
@@ -61,8 +61,12 @@ function Save-Key {
 }
 
 try {
+    $legacyEnvironment = Join-Path $projectRoot 'agent\.venv'
+    if (Test-Path -LiteralPath $legacyEnvironment) {
+        Write-Host '警告：agent/.venv 不是当前支持的环境；请使用根目录 agent.venv。旧环境未被删除。' -ForegroundColor Yellow
+    }
     if (-not (Test-Path -LiteralPath $pythonExe)) {
-        Write-Host '缺少根目录 agent.venv，请先按 README 准备原有 Python 环境。' -ForegroundColor Red
+        Write-Host '缺少根目录 agent.venv，请先运行 scripts\Setup-Agent.cmd。' -ForegroundColor Red
         exit 2
     }
     if ($Action -eq 'Stop') {
@@ -116,11 +120,10 @@ try {
     if ($Action -eq 'Configure' -or -not (Test-Path -LiteralPath $keyFile)) { Save-Key }
     if ($Action -eq 'Configure') { Write-Host '模型连接验证通过，密钥已保存。请依次运行 Stop-ForgePilot.cmd 和 Start-ForgePilot.cmd 使新密钥生效。'; exit 0 }
     $clientExe = Join-Path $projectRoot 'client\build\Release\ForgePilotClient.exe'
-    $stage = '检查或构建客户端'
+    $stage = '检查已构建客户端'
     if (-not (Test-Path -LiteralPath $clientExe)) {
-        Write-Host '首次启动：正在调用原 Build-Client.cmd 构建并部署客户端……'
-        & (Join-Path $PSScriptRoot 'Build-Client.cmd')
-        if ($LASTEXITCODE -ne 0) { throw '客户端构建失败。' }
+        Write-Host '缺少已构建客户端，请在开发工具可用时运行 scripts\Build-Client.cmd。' -ForegroundColor Red
+        exit 2
     }
     $stage = '解密本机密钥（失败时请运行 Configure-ForgePilot.cmd 重新输入）'
     $secret = (Get-Content -LiteralPath $keyFile -Raw).Trim() | ConvertTo-SecureString

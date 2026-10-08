@@ -65,6 +65,7 @@ __pycache__/
 htmlcov/
 coverage.xml
 dist/
+/artifacts/
 *.egg-info/
 
 # Local machine settings, secrets, runtime data, and logs

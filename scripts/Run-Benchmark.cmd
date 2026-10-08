@@ -1,15 +1,12 @@
 @echo off
 setlocal
-if not exist "%~dp0local-env.cmd" (
-    echo Missing scripts\local-env.cmd. See README.md.
-    exit /b 1
-)
-call "%~dp0local-env.cmd"
+call "%~dp0Check-Environment.cmd" all
 if errorlevel 1 exit /b %errorlevel%
 call "%FORGEPILOT_VS_ROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b %errorlevel%
+if exist "%~dp0..\agent\.venv" echo WARNING: agent\.venv is not supported. Use the root agent.venv; the old environment was not removed.
 if not exist "%~dp0..\agent.venv\Scripts\python.exe" (
-    echo Missing existing root agent.venv. No environment was created.
+    echo Missing root agent.venv. Run scripts\Setup-Agent.cmd first. No environment was created.
     exit /b 1
 )
 set "UV_PROJECT_ENVIRONMENT=%~dp0..\agent.venv"

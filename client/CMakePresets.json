@@ -9,6 +9,26 @@
       "architecture": "x64",
       "toolset": "v143",
       "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "msvc2022-x64",
+      "displayName": "MSVC 2022 x64 with Qt 6.8",
+      "description": "Configure the ForgePilot client with VS 2022, the v143 toolset, x64, and FORGEPILOT_QT_KIT.",
+      "inherits": "vs2022-base",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": {
+          "type": "PATH",
+          "value": "$env{FORGEPILOT_QT_KIT}"
+        }
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "configurePreset": "msvc2022-x64",
+      "configuration": "Release"
     }
   ]
 }

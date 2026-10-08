@@ -18,7 +18,6 @@ def test_project_virtual_environment() -> None:
     environment = project.parent / "agent.venv"
     assert Path(sys.prefix).resolve() == environment.resolve()
     assert Path(sys.executable).resolve() == (environment / "Scripts" / "python.exe").resolve()
-    assert Path(sys.base_prefix).resolve() == Path(r"D:\Python312").resolve()
     assert sys.prefix != sys.base_prefix
     assert sys.version_info[:2] == (3, 12)
     assert struct.calcsize("P") * 8 == 64
