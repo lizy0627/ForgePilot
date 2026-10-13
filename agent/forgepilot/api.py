@@ -50,9 +50,10 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_idle_seconds=60.0,
                conversation_stream_retention_seconds=60.0,
                conversation_stream_max_subscribers=8,
-               chat_factory=None, mcp_disabled=False, legacy_mcp_config=None):
+               chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
+               model_client_closer=None):
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled, legacy_mcp_config=legacy_mcp_config)
-    conversations = ConversationHost(host,chat_factory,
+    conversations = ConversationHost(host,chat_factory,summary_factory=summary_factory,
         stream_retention_seconds=conversation_stream_retention_seconds,
         stream_max_subscribers=conversation_stream_max_subscribers)
 
@@ -63,7 +64,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
             yield
         finally:
             await conversations.close()
-            await host.close()
+            await host.close(close_resources=model_client_closer)
 
     app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
@@ -149,7 +150,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.post('/api/v1/conversations/{conversation_id}/requests',status_code=202,response_model=ConversationRequestState,responses=errors)
     async def conversation_request(conversation_id: str, body: ConversationRequest):
-        return await conversations.submit(conversation_id,body.request_id,body.mode,body.prompt)
+        return await conversations.submit(conversation_id,body.request_id,body.mode,body.prompt,body.tool_mode)
 
     @app.get('/api/v1/memories',response_model=MemoryList,responses=errors)
     def memory_list(repository_path: str | None = Query(default=None,max_length=4096)):

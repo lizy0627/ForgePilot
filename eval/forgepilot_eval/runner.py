@@ -34,7 +34,10 @@ def now():
 
 
 def config_presence():
-    return {name: bool(os.environ.get(name)) for name in ("FORGEPILOT_BASE_URL", "FORGEPILOT_API_KEY", "FORGEPILOT_MODEL")}
+    values = {name: bool(os.environ.get(name)) for name in ("FORGEPILOT_BASE_URL", "FORGEPILOT_API_KEY")}
+    values["FORGEPILOT_TASK_MODEL"] = bool(
+        os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ.get("FORGEPILOT_MODEL"))
+    return values
 
 
 def save(path, data, redactor):
@@ -109,7 +112,8 @@ class Benchmark:
         if self.model_factory: return self.model_factory(task)
         if self.args.mode == "offline": return OfflineModel(task, self.solutions[task.id])
         return OpenAICompatibleClient(os.environ["FORGEPILOT_BASE_URL"], os.environ["FORGEPILOT_API_KEY"],
-                                      os.environ["FORGEPILOT_MODEL"], timeout=self.args.llm_timeout)
+                                      os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"],
+                                      timeout=self.args.llm_timeout)
 
     async def environment(self):
         values = {"python": sys.version, "executable": sys.executable, "prefix": sys.prefix,
@@ -255,7 +259,7 @@ class Benchmark:
         output = Path(self.args.output_root).resolve() / (self.args.mode + "-" + run_id)
         output.mkdir(parents=True, exist_ok=False)
         sources = inventory(self.dataset)
-        metadata = {"run_id": run_id, "mode": self.args.mode, "model": "offline-fixed-script" if self.args.mode == "offline" else os.environ["FORGEPILOT_MODEL"],
+        metadata = {"run_id": run_id, "mode": self.args.mode, "model": "offline-fixed-script" if self.args.mode == "offline" else (os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"]),
             "endpoint": None if self.args.mode == "offline" else os.environ["FORGEPILOT_BASE_URL"],
             "started_at": now(), "finished_at": None, "selected_tasks": [t.id for t in self.tasks], "dataset_version": 1,
             "dataset_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),

@@ -13,14 +13,17 @@ import pytest
 
 from conftest import ScriptedLLM,reply,call
 from forgepilot.api import create_app
-from forgepilot.chat_service import ChatAnswerEvent,ChatService,ReadOnlyRegistry,READ_TOOLS
+from forgepilot.chat_service import (ChatAnswerEvent,ChatService,ReadOnlyRegistry,READ_TOOLS,
+                                     chat_tool_route)
 from forgepilot.conversation_stream import ConversationStreamBroker
 from forgepilot.conversation_host import STOP_SUFFIX,FAILURE_SUFFIX
 from forgepilot.errors import ForgePilotError
 from forgepilot.llm import ContentDelta,StreamFinished,ToolCallDelta,context_size
+from forgepilot.tools.mcp_tools import MCPToolAdapter,tool_alias
 from forgepilot.security import Redactor
+import forgepilot.repository as repository_module
 from forgepilot.sqlite_store import SqliteEventStore
-from forgepilot.stream_metrics import StreamMetrics
+from forgepilot.stream_metrics import StreamMetrics,close_metrics_logging,configure_metrics_logging
 from forgepilot.task_service import TaskService
 from forgepilot.tools import Tool,ToolResult
 from forgepilot.tools.registry import FunctionTool
@@ -56,9 +59,11 @@ async def api(path=':memory:',*,chat=None,task_factory=None,max_tasks=32):
     finally: store.close()
 
 
-async def send(client,cid,prompt,mode='chat',rid=None):
+async def send(client,cid,prompt,mode='chat',rid=None,tool_mode='auto'):
     rid=rid or str(uuid4())
-    response=await client.post(f'/api/v1/conversations/{cid}/requests',json=dict(request_id=rid,prompt=prompt,mode=mode))
+    body=dict(request_id=rid,prompt=prompt,mode=mode)
+    if mode=='chat': body['tool_mode']=tool_mode
+    response=await client.post(f'/api/v1/conversations/{cid}/requests',json=body)
     assert response.status_code==202,response.text
     async with asyncio.timeout(10):
         while True:
@@ -96,6 +101,37 @@ def conversation_frames(text):
         if 'data' in lines:
             result.append((lines['id'],lines['event'],json.loads(lines['data'])))
     return result
+
+
+@pytest.mark.parametrize(('mode','prompt','repository','expected'),[
+    ('fast','搜索今天的当前价格',True,(False,False)),
+    ('web','普通问题',True,(False,True)),
+    ('project','普通问题',True,(True,False)),
+    ('project','检查 main.cpp',False,(False,False)),
+    ('auto','解释一下依赖注入',True,(False,False)),
+    ('auto','请搜索今天的官网资料',True,(False,True)),
+    ('auto','检查当前项目配置',True,(True,False)),
+    ('auto','搜索当前项目的 main.cpp',True,(True,False)),
+    ('auto','检查当前项目并联网搜索最新资料',True,(True,True)),
+])
+def test_chat_tool_route_is_local_conservative_and_deterministic(mode,prompt,repository,expected):
+    route=chat_tool_route(mode,prompt,repository)
+    assert (route.project,route.web)==expected
+    assert chat_tool_route(mode,prompt,repository)==route
+
+
+def test_chat_tool_route_rejects_unknown_mode():
+    with pytest.raises(ForgePilotError,match='invalid_request'):
+        chat_tool_route('everything','prompt',True)
+
+
+def test_chat_tool_concurrency_requires_explicit_safe_read_only_metadata():
+    async def operation(path,start_line,end_line): return path
+    with pytest.raises(ValueError,match='read-only'):
+        FunctionTool('read_file','fixture',ReadArguments,operation,concurrent_safe=True)
+    assert ChatService(RecallModel([]),max_tool_concurrency=1).max_tool_concurrency==1
+    with pytest.raises(ForgePilotError,match='1'):
+        ChatService(RecallModel([]),max_tool_concurrency=9)
 
 
 def test_conversation_stream_broker_replay_snapshot_bounds_and_subscribers():
@@ -146,7 +182,13 @@ def test_conversation_stream_broker_replay_snapshot_bounds_and_subscribers():
 @pytest.mark.asyncio
 async def test_stream_metrics_are_bounded_structured_and_content_free(caplog):
     secret='METRIC-MUST-NOT-CONTAIN-CONTENT'
-    metrics=StreamMetrics()
+    metrics=StreamMetrics(mode='chat',project_tools_enabled=True,mcp_enabled=False,
+                          request_input_chars=len('fixture'))
+    metrics.request_prepared()
+    metrics.context_finished(metrics._started)
+    metrics.summary_finished(metrics._started)
+    metrics.repository_finished(metrics._started,cache_hit=True)
+    metrics.tool_finished(metrics._started)
     broker=ConversationStreamBroker('conversation','request',metrics=metrics,max_events=2)
     service=ChatService(StreamingModel([model_stream(
         ContentDelta(secret),StreamFinished('stop',None))]))
@@ -155,18 +197,124 @@ async def test_stream_metrics_are_bounded_structured_and_content_free(caplog):
     # Force a stale-cursor snapshot without logging its content.
     broker.read(0)
     metrics.persist_finished(metrics._started)
+    metrics.request_finished()
     values=metrics.snapshot()
     assert values['provider_chunk_count']==2
     assert values['conversation_event_count']>=4
     assert values['stream_snapshot_count']==1
     assert values['stream_output_chars']==len(secret)
-    assert values['llm_stream_ttft_ms']>=0 and values['first_safe_delta_ms']>=0
-    assert values['terminal_persist_ms']>=0 and values['stream_error_code']=='none'
-    caplog.set_level(logging.DEBUG,logger='forgepilot.conversation_stream')
+    assert values['request_to_first_safe_delta_ms']>=0 and values['request_total_ms']>=0
+    assert values['request_prepare_ms']>=0 and values['context_prepare_ms']>=0
+    assert values['summary_count']==1 and values['summary_total_ms']>=0
+    assert values['summary_queued']==1 and values['summary_started']==1
+    assert values['summary_ms']>=0 and values['summary_result']=='committed'
+    assert values['repository_open_ms']>=0 and values['repository_cache_hit']==1
+    assert values['tool_call_count']==1
+    assert values['terminal_persist_ms']>=0 and values['request_error_code']=='none'
+    assert values['llm_round_count']==1 and values['llm_rounds'][0]['round']==1
+    assert values['llm_rounds'][0]['llm_ttft_ms']>=0
+    assert values['llm_rounds'][0]['llm_duration_ms']>=values['llm_rounds'][0]['llm_ttft_ms']
+    assert values['request_mode']==1 and values['project_tools_enabled']==1 and values['mcp_enabled']==0
+    assert values['tool_mode']==4 and values['exposed_tool_count']==0
+    caplog.set_level(logging.WARNING,logger='forgepilot.chat_performance')
     metrics.emit(); metrics.emit()
-    records=[record for record in caplog.records if record.msg=='conversation_stream_metrics']
+    records=[record for record in caplog.records if record.name=='forgepilot.chat_performance']
     assert len(records)==1 and records[0].stream_metrics==values
+    assert json.loads(records[0].getMessage())==values
     assert secret not in caplog.text and all(secret not in str(value) for value in values.values())
+
+
+@pytest.mark.asyncio
+async def test_request_metrics_cover_failure_and_cancellation_without_exception_text(caplog):
+    caplog.set_level(logging.WARNING,logger='forgepilot.chat_performance')
+    private='PRIVATE-PROVIDER-BODY'
+    async def failing():
+        if False: yield ContentDelta('unreachable')
+        raise ForgePilotError('llm_network',private)
+    async with api(chat=lambda:StreamingModel([failing])) as (client,app,records,models):
+        cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']
+        assert (await send(client,cid,'failure fixture'))['status']=='failed'
+    failed=[r.stream_metrics for r in caplog.records
+            if r.name=='forgepilot.chat_performance'][-1]
+    assert failed['request_error_code']=='llm_network'
+    assert failed['llm_round_count']==1 and failed['llm_rounds'][0]['llm_duration_ms']>=0
+    assert failed['request_total_ms']>=failed['terminal_persist_ms']>=0
+    assert private not in caplog.text
+
+    entered=Event()
+    async def paused():
+        yield ContentDelta('safe')
+        entered.set()
+        await asyncio.Future()
+    async with api(chat=lambda:StreamingModel([paused])) as (client,app,records,models):
+        cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']; rid=str(uuid4())
+        await client.post(f'/api/v1/conversations/{cid}/requests',json={
+            'request_id':rid,'mode':'chat','prompt':'cancel fixture'})
+        assert await asyncio.to_thread(entered.wait,2)
+        assert (await client.post(f'/api/v1/conversations/{cid}/requests/{rid}/stop')).json()['status']=='cancelled'
+    cancelled=[r.stream_metrics for r in caplog.records
+               if r.name=='forgepilot.chat_performance'][-1]
+    assert cancelled['request_error_code']=='cancelled'
+    assert cancelled['request_to_first_safe_delta_ms']>=0
+    assert cancelled['terminal_persist_ms']>=0 and cancelled['request_total_ms']>=0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_request_metrics_are_one_record_per_request(caplog):
+    caplog.set_level(logging.WARNING,logger='forgepilot.chat_performance')
+    async with api() as (client,app,records,models):
+        conversations=[(await client.post('/api/v1/conversations',json={})).json()['conversation_id']
+                       for _ in range(4)]
+        prompts=['x','yy','zzz','wwww']
+        results=await asyncio.gather(*(send(client,cid,prompt)
+                                      for cid,prompt in zip(conversations,prompts)))
+        assert all(result['status']=='completed' for result in results)
+    emitted=[r.stream_metrics for r in caplog.records if r.name=='forgepilot.chat_performance']
+    assert len(emitted)==4
+    assert sorted(item['request_input_chars'] for item in emitted)==[1,2,3,4]
+    assert all(item['llm_round_count']==1 and item['request_error_code']=='none'
+               and item['request_total_ms']>=item['request_to_first_safe_delta_ms']>=0
+               for item in emitted)
+
+
+@pytest.mark.asyncio
+async def test_request_metrics_measure_post_answer_summary(caplog,monkeypatch):
+    caplog.set_level(logging.WARNING,logger='forgepilot.chat_performance')
+    async with api() as (client,app,records,models):
+        store=app.state.task_host.store
+        monkeypatch.setattr(store,'summary_plan',lambda cid:{'input':{'previous_summary':'','messages':[]}})
+        monkeypatch.setattr(store,'commit_summary',lambda plan,content:True)
+        cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']
+        assert (await send(client,cid,'summary fixture'))['status']=='completed'
+        async with asyncio.timeout(2):
+            while not [r for r in caplog.records if r.name=='forgepilot.chat_performance']:
+                await asyncio.sleep(.01)
+    measured=[r.stream_metrics for r in caplog.records
+              if r.name=='forgepilot.chat_performance'][-1]
+    assert measured['summary_count']==1 and measured['summary_total_ms']>=0
+    assert measured['summary_queued']==measured['summary_started']==1
+    assert measured['summary_ms']>=0 and measured['summary_result']=='committed'
+    assert measured['request_to_first_safe_delta_ms']<=measured['request_total_ms']
+
+
+def test_metrics_jsonl_storage_is_structured_and_rotates(tmp_path):
+    path=tmp_path/'chat-performance.jsonl'
+    logger=logging.getLogger('forgepilot.chat_performance')
+    configure_metrics_logging(path,max_bytes=900,backup_count=1)
+    try:
+        for _ in range(4):
+            metrics=StreamMetrics(request_input_chars=7)
+            metrics.request_prepared(); metrics.request_finished(); metrics.emit()
+        for handler in logger.handlers: handler.flush()
+        files=[candidate for candidate in (path,path.with_name(path.name+'.1')) if candidate.exists()]
+        assert len(files)==2
+        rows=[]
+        for candidate in files:
+            rows.extend(json.loads(line) for line in candidate.read_text(encoding='utf-8').splitlines())
+        assert rows and all(row['schema_version']==1 and row['request_input_chars']==7
+                            and row['request_error_code']=='none' for row in rows)
+    finally:
+        close_metrics_logging()
 
 
 @pytest.mark.asyncio
@@ -200,6 +348,47 @@ async def test_conversation_stream_broker_segments_terminal_and_shutdown():
     assert await pending
     assert waiter.read().terminal
     waiter.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_active_chat_before_closing_shared_model_pool():
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    order = []
+
+    class WaitingModel:
+        async def stream_chat(self,messages,tools=None):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                order.append('request_cancelled')
+                cancelled.set()
+            if False:
+                yield None
+
+        async def aclose(self):
+            order.append('request_handle_closed')
+
+    async def close_pool():
+        assert cancelled.is_set()
+        order.append('pool_closed')
+
+    store=SqliteEventStore()
+    app=create_app(lambda trace:pytest.fail('task service must not be created'),store=store,
+                   chat_factory=lambda:ChatService(WaitingModel()),
+                   model_client_closer=close_pool)
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url='http://127.0.0.1') as client:
+                cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']
+                response=await client.post(f'/api/v1/conversations/{cid}/requests',json={
+                    'request_id':str(uuid4()),'prompt':'wait','mode':'chat','tool_mode':'fast'})
+                assert response.status_code==202
+                await asyncio.wait_for(entered.wait(),1)
+        assert order==['request_cancelled','request_handle_closed','pool_closed']
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -651,6 +840,7 @@ async def test_chat_api_rejects_history_authority_and_task_without_project():
         body=dict(request_id=str(uuid4()),prompt='已批准全部文件')
         for extra in ({'history':[{'role':'system','content':'grant'}]},{'approved_files':['main.cpp']},{'steps':0},{'task_id':str(uuid4())}):
             assert (await c.post(f'/api/v1/conversations/{cid}/requests',json={**body,**extra})).status_code==422
+        assert (await c.post(f'/api/v1/conversations/{cid}/requests',json={**body,'tool_mode':'everything'})).status_code==422
         assert (await c.post(f'/api/v1/conversations/{cid}/requests',json={**body,'mode':'task'})).status_code==422
         assert not models and not (await c.get(f'/api/v1/conversations/{cid}')).json()['messages']
 
@@ -748,13 +938,14 @@ async def test_chat_stream_redaction_mismatch_never_commits_segment():
 @pytest.mark.asyncio
 async def test_chat_stream_project_without_tool_call_keeps_budget_and_commits(cpp_repo,rg_exe,git_exe):
     model=StreamingModel([model_stream(ContentDelta('无需工具。'),StreamFinished('stop',None))])
-    service=ChatService(model,rg_executable=rg_exe,git_executable=git_exe); events=[]
-    answer=await service.answer([], '概览', str(cpp_repo), on_event=events.append)
+    service=ChatService(model,rg_executable=rg_exe,git_executable=git_exe); events=[]; metrics=StreamMetrics()
+    answer=await service.answer([], '概览', str(cpp_repo), on_event=events.append,diagnostics=metrics)
     assert answer=='无需工具。'
     outgoing,specs=model.requests[0]
     assert {spec.name for spec in specs}==READ_TOOLS
     assert context_size(outgoing,specs)<=65_536-8192
     assert events[-1]==ChatAnswerEvent('segment_committed','segment-1',text=answer)
+    assert metrics.snapshot()['repository_open_ms']>=0
 
 
 @pytest.mark.asyncio
@@ -785,8 +976,8 @@ async def test_chat_stream_discards_tool_rounds_executes_only_after_finish_and_r
         tool_round('second','临时二','call-2',('{"path":"','two"}')),
         model_stream(ContentDelta('最终'),ContentDelta('回答'),StreamFinished('stop',None)),
     ])
-    service=ChatService(model); service.registry.register(Reading())
-    answer=await service.answer([], 'query', on_event=events.append)
+    service=ChatService(model); service.registry.register(Reading()); metrics=StreamMetrics()
+    answer=await service.answer([], 'query', on_event=events.append,diagnostics=metrics)
     assert answer=='最终回答' and executions==['one','two']
     assert [(event.type,event.segment_id) for event in events if event.type.startswith('segment_')]==[
         ('segment_started','segment-1'),('segment_discarded','segment-1'),
@@ -802,6 +993,9 @@ async def test_chat_stream_discards_tool_rounds_executes_only_after_finish_and_r
         'tool_name':event.tool_name,'success':event.success} for event in events],ensure_ascii=False)
     assert 'private tool output' not in public_events and '{"path"' not in public_events
     assert_chat_budget_and_pairs(model.requests)
+    measured=metrics.snapshot()
+    assert measured['llm_round_count']==3 and len(measured['llm_rounds'])==3
+    assert measured['tool_call_count']==2 and measured['tool_total_ms']>=0
 
 
 @pytest.mark.asyncio
@@ -848,6 +1042,215 @@ async def test_chat_event_callback_failure_after_tool_does_not_repeat_execution(
 
 
 @pytest.mark.asyncio
+async def test_chat_parallel_read_batch_is_bounded_and_preserves_model_order():
+    active=0; peak=0; completed=[]
+    delays={'one':.18,'two':.02,'three':.08}
+    async def read_file(path,start_line,end_line):
+        nonlocal active,peak
+        active+=1; peak=max(peak,active)
+        try:
+            await asyncio.sleep(delays[path])
+            completed.append(path)
+            return 'result-'+path
+        finally:
+            active-=1
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':name}),id='call-'+name)
+        for name in ('one','two','three')]),reply('done')])
+    service=ChatService(model,max_tool_concurrency=3)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=True))
+    events=[]; metrics=StreamMetrics(); started=asyncio.get_running_loop().time()
+    assert await service.answer([], 'query', on_event=events.append, diagnostics=metrics)=='done'
+    elapsed=asyncio.get_running_loop().time()-started
+    assert peak==3 and completed==['two','three','one'] and elapsed<.32
+    observations=[message for message in model.requests[1] if message['role']=='tool']
+    assert [message['tool_call_id'] for message in observations]==[
+        'call-one','call-two','call-three']
+    assert [json.loads(message['content'])['output'] for message in observations]==[
+        'result-one','result-two','result-three']
+    assert all(json.loads(message['content'])['duration_ms']>=10 for message in observations)
+    assert 240<=metrics.snapshot()['tool_total_ms']<600
+    activity=[(event.type,event.tool_call_id) for event in events if event.type.startswith('tool_')]
+    assert activity==[(kind,'call-'+name) for kind in ('tool_started','tool_finished')
+                      for name in ('one','two','three')]
+
+
+@pytest.mark.asyncio
+async def test_three_one_second_read_tools_finish_in_one_parallel_window():
+    active=0; peak=0
+    async def read_file(path,start_line,end_line):
+        nonlocal active,peak
+        active+=1; peak=max(peak,active)
+        try:
+            await asyncio.sleep(1)
+            return path
+        finally:
+            active-=1
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':str(index)}),id=str(index))
+                                    for index in range(3)]),reply('done')])
+    service=ChatService(model,max_tool_concurrency=3)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=True))
+    started=asyncio.get_running_loop().time()
+    assert await service.answer([],'query')=='done'
+    elapsed=asyncio.get_running_loop().time()-started
+    assert peak==3 and 1<=elapsed<1.6
+
+
+@pytest.mark.asyncio
+async def test_chat_parallel_read_batch_respects_configured_concurrency_limit():
+    active=0; peak=0; first_wave=asyncio.Event(); release=asyncio.Event()
+    async def read_file(path,start_line,end_line):
+        nonlocal active,peak
+        active+=1; peak=max(peak,active)
+        if active==2: first_wave.set()
+        try:
+            await release.wait()
+            return path
+        finally:
+            active-=1
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':str(index)}),id=str(index))
+                                    for index in range(5)]),reply('done')])
+    service=ChatService(model,max_tool_concurrency=2)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=True))
+    request=asyncio.create_task(service.answer([],'query'))
+    await asyncio.wait_for(first_wave.wait(),1)
+    await asyncio.sleep(.02)
+    assert active==peak==2
+    release.set()
+    assert await request=='done'
+
+
+@pytest.mark.asyncio
+async def test_chat_unmarked_read_tools_remain_serial():
+    active=0; peak=0; completed=[]
+    async def read_file(path,start_line,end_line):
+        nonlocal active,peak
+        active+=1; peak=max(peak,active)
+        try:
+            await asyncio.sleep(.04)
+            completed.append(path)
+            return path
+        finally:
+            active-=1
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':str(index)}),id=str(index))
+                                    for index in range(3)]),reply('done')])
+    service=ChatService(model,max_tool_concurrency=3)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=False))
+    assert await service.answer([],'query')=='done'
+    assert peak==1 and completed==['0','1','2']
+
+
+@pytest.mark.asyncio
+async def test_chat_parallel_batch_failure_and_timeout_do_not_cancel_peers():
+    finished=[]
+    async def read_file(path,start_line,end_line):
+        try:
+            if path=='timeout': await asyncio.Future()
+            if path=='failure': raise ForgePilotError('fixture_failure','controlled')
+            await asyncio.sleep(.02)
+            return 'ok-'+path
+        finally:
+            finished.append(path)
+    tool=FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+                      read_only=True,concurrent_safe=True)
+    tool.timeout_seconds=.06
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':name}),id=name)
+        for name in ('timeout','success','failure')]),reply('done')])
+    service=ChatService(model); service.registry.register(tool)
+    assert await service.answer([],'query')=='done'
+    assert set(finished)=={'timeout','success','failure'}
+    observations=[json.loads(message['content']) for message in model.requests[1]
+                  if message['role']=='tool']
+    assert observations[0]['error'].startswith('tool_timeout')
+    assert observations[1]['success'] and observations[1]['output']=='ok-success'
+    assert observations[2]['error'].startswith('fixture_failure')
+
+
+@pytest.mark.asyncio
+async def test_chat_parallel_batch_request_cancel_cancels_and_joins_every_tool():
+    active=0; all_started=asyncio.Event(); stopped=[]
+    async def read_file(path,start_line,end_line):
+        nonlocal active
+        active+=1
+        if active==3: all_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            active-=1; stopped.append(path)
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':str(index)}),id=str(index))
+                                    for index in range(3)])])
+    service=ChatService(model,max_tool_concurrency=3)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=True))
+    request=asyncio.create_task(service.answer([],'query'))
+    await asyncio.wait_for(all_started.wait(),1)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError): await request
+    assert active==0 and set(stopped)=={'0','1','2'}
+
+
+@pytest.mark.asyncio
+async def test_chat_batch_atomically_reserves_remaining_tool_budget():
+    executed=[]
+    async def read_file(path,start_line,end_line):
+        executed.append(path); return 'ok-'+path
+    model=ScriptedLLM([reply(calls=[call('read_file',json.dumps({'path':str(index)}),id=str(index))
+                                    for index in range(3)]),reply('done')])
+    service=ChatService(model)
+    service.registry.register(FunctionTool('read_file','Read fixture',ReadArguments,read_file,
+        read_only=True,concurrent_safe=True))
+    service.mcp.include_legacy_tool('read_file'); service.mcp.calls=7
+    assert await service.answer([],'query')=='done'
+    assert service.mcp.calls==8 and executed==['0']
+    observations=[json.loads(message['content']) for message in model.requests[1]
+                  if message['role']=='tool']
+    assert observations[0]['success']
+    assert all(item['error'].startswith('mcp_budget') for item in observations[1:])
+
+
+@pytest.mark.asyncio
+async def test_chat_mcp_same_session_serial_different_sessions_overlap():
+    state={'active':0,'peak':0}; session_peaks={}
+    class Connection:
+        def __init__(self,name): self.name=name; self.active=0
+        async def call_tool(self,name,arguments):
+            self.active+=1; state['active']+=1
+            session_peaks[self.name]=max(session_peaks.get(self.name,0),self.active)
+            state['peak']=max(state['peak'],state['active'])
+            try:
+                await asyncio.sleep(.08)
+                return {'content':[{'type':'text','text':arguments['value']}],'isError':False}
+            finally:
+                self.active-=1; state['active']-=1
+    server_a='00000000-0000-0000-0000-000000000001'
+    server_b='00000000-0000-0000-0000-000000000002'
+    definitions=[(server_a,'first',Connection('a')),(server_a,'second',None),
+                 (server_b,'third',Connection('b'))]
+    definitions[1]=(server_a,'second',definitions[0][2])
+    adapters=[MCPToolAdapter(server_id=server,remote_tool_name=name,
+        input_schema={'type':'object','properties':{'value':{'type':'string'}},
+                      'required':['value'],'additionalProperties':False},
+        annotations={'readOnlyHint':True},execution={},connection=connection,
+        description='fixture') for server,name,connection in definitions]
+    aliases=[adapter.name for adapter in adapters]
+    model=ScriptedLLM([reply(calls=[call(alias,json.dumps({'value':str(index)}),id=str(index))
+                                    for index,alias in enumerate(aliases)]),reply('done')])
+    service=ChatService(model,max_tool_concurrency=3)
+    service.registry=ReadOnlyRegistry(mcp_allowlist=aliases,redactor=service.redactor)
+    for adapter in adapters: service.registry.register(adapter)
+    started=asyncio.get_running_loop().time()
+    assert await service.answer([],'query')=='done'
+    elapsed=asyncio.get_running_loop().time()-started
+    assert session_peaks=={'a':1,'b':1} and state['peak']==2
+    assert .14<=elapsed<.25
+    messages=[message for message in model.requests[1] if message['role']=='tool']
+    assert [message['tool_call_id'] for message in messages]==['0','1','2']
+
+
+@pytest.mark.asyncio
 async def test_chat_on_event_legacy_client_fallback_preserves_return_value():
     model=ScriptedLLM([reply('旧客户端完整回答')]); service=ChatService(model); events=[]
     answer=await service.answer([], 'query', on_event=events.append)
@@ -872,6 +1275,82 @@ async def test_chat_stream_finishing_request_never_executes_returned_tool_call()
         await service.answer([], '问题'*29_000, on_event=events.append)
     assert model.requests[0][1] is None and not executed
     assert [event.type for event in events]==['segment_started','segment_discarded']
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_exposes_no_tools_and_rejects_hallucinated_tool_call():
+    executed=[]
+    async def forbidden(path,start_line,end_line):
+        executed.append(path); return 'must not execute'
+    model=StreamingModel([
+        model_stream(ToolCallDelta(0,'invented','read_file','{"path":"secret"}'),
+                     StreamFinished('tool_calls',None)),
+        model_stream(ContentDelta('未使用工具。'),StreamFinished('stop',None)),
+    ])
+    service=ChatService(model); service.registry.register(
+        FunctionTool('read_file','Read fixture',ReadArguments,forbidden))
+    metrics=StreamMetrics(tool_mode='fast'); events=[]
+    answer=await service.answer([], '普通问题', on_event=events.append,
+                                diagnostics=metrics,tool_mode='fast')
+    assert answer=='未使用工具。' and not executed
+    assert model.requests[0][1] is None and model.requests[1][1] is None
+    measured=metrics.snapshot()
+    assert measured['tool_mode']==1 and measured['exposed_tool_count']==0
+    assert measured['tool_call_count']==0 and measured['llm_round_count']==2
+
+
+@pytest.mark.asyncio
+async def test_project_mode_read_tool_uses_one_followup_round(cpp_repo,rg_exe,git_exe):
+    model=ScriptedLLM([
+        reply(calls=[call('read_file',json.dumps({'path':'main.cpp'}),id='read')]),
+        reply('项目分析完成'),
+    ])
+    metrics=StreamMetrics(tool_mode='project')
+    service=ChatService(model,rg_executable=rg_exe,git_executable=git_exe)
+    assert await service.answer([], '检查当前项目 main.cpp', str(cpp_repo),
+                                diagnostics=metrics,tool_mode='project')=='项目分析完成'
+    measured=metrics.snapshot()
+    assert len(model.requests)==2
+    assert measured['tool_mode']==3 and measured['exposed_tool_count']==len(READ_TOOLS)
+    assert measured['tool_call_count']==1 and measured['llm_round_count']==2
+
+
+@pytest.mark.asyncio
+async def test_conversation_host_reuses_repository_validation_and_clears_cache_on_shutdown(
+        cpp_repo,rg_exe,git_exe,monkeypatch,caplog):
+    calls=0
+    original=repository_module.run_process
+    async def counted(*args,**kwargs):
+        nonlocal calls
+        calls+=1
+        return await original(*args,**kwargs)
+    monkeypatch.setattr(repository_module,'run_process',counted)
+    models=[]
+    def factory():
+        model=ScriptedLLM([reply('项目回答')]); models.append(model)
+        return ChatService(model,rg_executable=rg_exe,git_executable=git_exe)
+    store=SqliteEventStore(':memory:')
+    app=create_app(lambda trace:pytest.fail('Q&A must not create TaskService'),
+                   store=store,chat_factory=factory)
+    cache=app.state.conversation_host.repository_cache
+    caplog.set_level(logging.WARNING,logger='forgepilot.chat_performance')
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url='http://127.0.0.1') as client:
+                cid=(await client.post('/api/v1/conversations',
+                    json={'repository_path':str(cpp_repo)})).json()['conversation_id']
+                first=await send(client,cid,'检查当前项目',tool_mode='project')
+                second=await send(client,cid,'继续检查当前项目',tool_mode='project')
+                assert first['status']==second['status']=='completed'
+                assert calls==1 and cache.size==1 and len(models)==2
+        assert cache.closed and cache.size==0
+    finally:
+        store.close()
+    rows=[record.stream_metrics for record in caplog.records
+          if record.name=='forgepilot.chat_performance']
+    assert [row['repository_cache_hit'] for row in rows[-2:]]==[0,1]
+    assert all(row['repository_open_ms']>=0 for row in rows[-2:])
 
 
 @pytest.mark.asyncio

@@ -121,10 +121,23 @@ cmake --list-presets -S client
 需要提供：
 
 - Base URL：兼容 OpenAI Chat Completions 的服务根地址。
-- model：服务端可用的模型标识。
-- API Key：在隐藏输入框中输入；配置程序会发送一次最多等待 30 秒的简短请求验证连接。
+- 缺省模型：旧配置和未单独指定用途时使用的模型标识。
+- 普通聊天、代码任务、对话摘要模型：可分别选择低延迟、高质量或低成本模型。
+- API Key：在隐藏输入框中输入；配置程序会对每个实际不同的模型各发送一次最多等待 30 秒的简短请求，并指出失败用途。
 
-也可以在当前 PowerShell 进程中设置 `FORGEPILOT_BASE_URL`、`FORGEPILOT_MODEL` 和 `FORGEPILOT_API_KEY`，作为交互配置的默认值或密钥来源。不要把 API Key 写入 README、`local-env.cmd`、命令行参数、源码或可提交的 `.env`。
+也可以在当前 PowerShell 进程中设置 `FORGEPILOT_BASE_URL`、`FORGEPILOT_MODEL`、`FORGEPILOT_CHAT_MODEL`、`FORGEPILOT_TASK_MODEL`、`FORGEPILOT_SUMMARY_MODEL` 和 `FORGEPILOT_API_KEY`，作为交互配置的默认值或密钥来源。`CHAT_MODEL` 和 `TASK_MODEL` 未设置时分别回退到 `FORGEPILOT_MODEL`；`SUMMARY_MODEL` 未设置时先使用 `CHAT_MODEL`，再回退到 `FORGEPILOT_MODEL`。只含 `model` 字段的旧 `config.json` 无需迁移即可继续使用。
+
+例如，让普通聊天优先低延迟，同时保留高质量代码任务模型：
+
+```powershell
+$env:FORGEPILOT_MODEL = 'quality-default'
+$env:FORGEPILOT_CHAT_MODEL = 'low-latency-chat'
+$env:FORGEPILOT_TASK_MODEL = 'high-quality-code'
+$env:FORGEPILOT_SUMMARY_MODEL = 'economical-summary' # 可省略；省略时使用聊天模型
+.\Configure-ForgePilot.cmd
+```
+
+不要把 API Key 写入 README、`local-env.cmd`、命令行参数、源码或可提交的 `.env`。
 
 非秘密配置保存在：
 
@@ -143,7 +156,7 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 # 请求当前 ForgePilot 实例正常停止
 .\Stop-ForgePilot.cmd
 
-# 重新填写并验证 Base URL、model 和 API Key
+# 重新填写并验证 Base URL、各用途模型和 API Key
 .\Configure-ForgePilot.cmd
 
 # 使用已保存配置和密钥检查模型连接
@@ -155,6 +168,8 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 ## 普通问答与工作模式
 
 普通问答不要求选择仓库，也不要求 Visual Studio、Qt、CMake、CTest、Ninja、ripgrep 或 clangd。它使用已保存的模型连接，支持连续对话、历史记录和记忆。
+
+问答输入框可选择工具模式：`自动`使用保守的本地关键词规则，仅在明确要求联网或检查当前项目时提供对应工具；`快速`不提供任何工具；`联网`只提供已启用且允许用于 chat 的远程 MCP 工具；`项目`只提供当前关联仓库的内置只读工具。路由不会额外请求模型。默认使用`自动`，无法明确判断时不提供工具，回答也必须说明没有联网或检查项目。
 
 工作模式面向本地 Git 仓库，流程是：
 
@@ -197,6 +212,38 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 
 离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。
 
+### 普通问答性能基准与指标
+
+后端为每个已接受的普通问答请求写入一条固定 schema 的 warning 级 JSON 记录，同时保存到数据库同目录的 `chat-performance.jsonl`。可用 `--chat-metrics-file` 或 `FORGEPILOT_CHAT_METRICS_FILE` 指定其他位置。文件按 5 MiB 轮转，保留当前文件和 4 个备份（上限约 25 MiB）；记录不包含请求 ID、提示词、回答、历史消息、工具参数或结果、URL 和凭证。`request_mode=1` 表示普通问答，`tool_mode=1/2/3/4` 分别表示 fast/web/project/auto，`exposed_tool_count` 是本轮向模型暴露过的最大工具数；布尔维度使用 `0/1`，不适用或尚未到达的耗时为 `-1`。
+
+长对话在回答前只读取已经提交的摘要和有界近期完整轮次；新摘要在回答成功持久化后以单并发后台任务生成，不阻塞本轮首字输出。`summary_queued`、`summary_started`、`summary_ms` 和稳定的 `summary_result` 记录排队及结果，不记录摘要正文。编辑/禁用摘要、删除对话或关闭服务会取消对应后台任务，CAS 会拒绝迟到结果。
+
+模型在一轮中返回多个工具调用时，普通问答只会并发执行已由注册端明确标记为“只读且可并发”的工具；默认上限为 3。未知工具以及未显式标记的写入、构建、测试或审批能力仍保持串行/拒绝。来自同一 MCP server/session 的调用始终串行，不同 session 才能并发；发送给模型的 `tool` 消息仍按原始 `tool_calls` 顺序排列。可通过服务参数 `--chat-tool-concurrency 1..8` 或 `FORGEPILOT_CHAT_TOOL_CONCURRENCY` 调整上限（设为 `1` 可关闭批次并发）。
+
+无需模型、网络、MCP 或仓库即可重复运行聊天链路基准：
+
+```powershell
+.\agent.venv\Scripts\python.exe .\scripts\benchmark_chat.py --samples 30 --output .\logs\chat-benchmark.json
+```
+
+报告为每项指标输出 P50、P95、最大值和样本数。只有显式添加 `--real-model` 时脚本才读取 `FORGEPILOT_BASE_URL`、聊天模型配置和 `FORGEPILOT_API_KEY` 并产生真实外部模型请求；该模式可能产生费用。
+
+比较候选聊天模型时，默认命令只运行两个离线模拟模型，不连接网络：
+
+```powershell
+.\agent.venv\Scripts\python.exe .\scripts\benchmark_chat_models.py --repeats 3 --output .\logs\chat-models-offline.json
+```
+
+真实候选模型必须同时显式指定开关和模型；API Key 仍只从环境或启动器的 DPAPI 流程取得，不能作为参数传入：
+
+```powershell
+.\agent.venv\Scripts\python.exe .\scripts\benchmark_chat_models.py --real-model `
+  --model low-latency-candidate --model second-candidate `
+  --repeats 3 --output .\logs\chat-models-real.json
+```
+
+报告对同一组三条固定、无敏感内容的提示给出首字延迟、完整耗时、响应字符数的 P50/P95，以及每个模型的成功率；报告不包含提示词、回答、Base URL 或密钥。真实模式可能产生费用。
+
 `.github/workflows/ci.yml` 在 Windows Server 2022、Python 3.12 和固定的 uv 0.12.15 上，从干净 checkout 运行锁定安装，检查根 `agent.venv`、锁文件、Python 编译、离线核心 Agent 测试和协议重新导出。当前 CI 不构建 Qt 客户端；Qt 构建和 CTest 仍由上述本地命令验证。
 
 ## 常见问题
@@ -235,7 +282,7 @@ cmake --list-presets -S client
 
 ### 模型返回 401 或 403
 
-401 通常表示密钥无效、过期或目标地址不接受该认证；403 通常表示账户、模型或端点权限不足。运行 `Configure-ForgePilot.cmd` 重新输入 Base URL、model 和 API Key，再运行 `Check-Model.cmd`。不要把密钥粘贴到日志、Issue 或聊天记录；怀疑泄漏时应立即在服务商处撤销并换新。
+401 通常表示密钥无效、过期或目标地址不接受该认证；403 通常表示账户、模型或端点权限不足。运行 `Configure-ForgePilot.cmd` 重新输入 Base URL、各用途模型和 API Key，再运行 `Check-Model.cmd`；检查输出会指出聊天、任务或摘要用途。不要把密钥粘贴到日志、Issue 或聊天记录；怀疑泄漏时应立即在服务商处撤销并换新。
 
 ### 8765 端口被占用
 

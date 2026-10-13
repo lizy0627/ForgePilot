@@ -35,4 +35,5 @@ def register_repository_tools(registry: ToolRegistry, repository: Repository) ->
         ("read_file", "Read numbered UTF-8 lines within the repository; reports partial/truncated content.", ReadArguments),
         ("search_code", "Case-sensitive literal text search; returns file paths, LF-based line numbers and text. Text matches are not semantic references.", SearchArguments),
     ):
-        registry.register(FunctionTool(name, description, model, getattr(repository, name)))
+        registry.register(FunctionTool(name, description, model, getattr(repository, name),
+                                       read_only=True, concurrent_safe=True))

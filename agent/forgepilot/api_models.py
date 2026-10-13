@@ -61,6 +61,7 @@ class UpdateConversation(CreateConversation):
 class ConversationRequest(RequestModel):
     request_id: str = Field(pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
     mode: Literal['chat','task'] = 'chat'
+    tool_mode: Literal['fast','web','project','auto'] = 'auto'
     prompt: str = Field(min_length=1,max_length=16_384)
 
     @field_validator('prompt')

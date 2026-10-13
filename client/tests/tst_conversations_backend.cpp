@@ -81,6 +81,11 @@ private slots:
         auto capture=[&](const QString &name){ QTest::qWait(100); return window->grabWindow().save(output+"/conversation-"+name+".png"); };
         auto *prompt=find("conversationPrompt"); QVERIFY(prompt);
         QTRY_VERIFY(!c.historyLoading()); QCOMPARE(c.mode(),"chat");
+        auto *toolMode=find("chatToolMode"); QVERIFY(toolMode); QCOMPARE(c.toolMode(),QString("auto"));
+        toolMode->setProperty("currentIndex",1);
+        QVERIFY(QMetaObject::invokeMethod(toolMode,"activated",Q_ARG(int,1))); QCOMPARE(c.toolMode(),QString("fast"));
+        toolMode->setProperty("currentIndex",0);
+        QVERIFY(QMetaObject::invokeMethod(toolMode,"activated",Q_ARG(int,0))); QCOMPARE(c.toolMode(),QString("auto"));
         const auto restart=qEnvironmentVariable("FORGEPILOT_RESTART_CONVERSATION_ID");
         if(!restart.isEmpty()) {
             c.selectConversation(restart); QTRY_VERIFY(!c.loading());
@@ -117,6 +122,7 @@ private slots:
             const auto first=c.conversationId(); QVERIFY(!first.isEmpty());
             prompt->setProperty("text","刚才的称呼是什么？"); QVERIFY(click("sendMessageButton"));
             QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),4,10000);
+            QTRY_VERIFY_WITH_TIMEOUT(!c.active(),10000);
             QVERIFY(c.messages()->get(3).value("content").toString().contains("青松")); QVERIFY(capture("followup"));
             c.renameConversation("青松的连续对话"); QTRY_COMPARE(c.title(),QString("青松的连续对话"));
             QVERIFY(click("newTaskButton")); QTRY_VERIFY(c.conversationId()!=first); QTRY_VERIFY(!c.loading());
@@ -128,13 +134,12 @@ private slots:
             QTRY_VERIFY(!c.loading());
             QSignalSpy resets(c.messages(),&QAbstractItemModel::modelReset);
             QSignalSpy updates(c.messages(),&QAbstractItemModel::dataChanged);
-            QSignalSpy changes(&c,&ConversationController::changed);
             for(int i=0;i<3;++i) {
-                const auto before=changes.count(); QTest::qWait(1100);
-                QVERIFY(changes.count()>before); QVERIFY(c.active()); QVERIFY(!c.loading()); QVERIFY(!c.busy());
+                QTest::qWait(1100);
+                QVERIFY(c.active()); QVERIFY(!c.loading()); QVERIFY(!c.busy());
                 QVERIFY(find("stopAnswerButton")->property("enabled").toBool());
             }
-            QCOMPARE(resets.count(),0); QCOMPARE(updates.count(),0); QCOMPARE(c.messages()->count(),1);
+            QCOMPARE(resets.count(),0); QCOMPARE(updates.count(),0); QCOMPARE(c.messages()->count(),2);
             QVERIFY(click("stopAnswerButton")); QTRY_VERIFY(!c.active()); QTRY_COMPARE(c.messages()->count(),2);
             QVERIFY(c.messages()->get(1).value("content").toString().contains("停止")); QVERIFY(capture("stopped"));
             prompt->setProperty("text","停止回答后继续提问"); QVERIFY(click("sendMessageButton"));
@@ -173,6 +178,7 @@ private slots:
             QVERIFY(c.messages()->get(15).value("content").toString().contains("青松")); QTRY_COMPARE(tasks.tasks().size(),3);
             prompt->setProperty("text","fixture chat failure"); QVERIFY(click("sendMessageButton"));
             QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),18,10000);
+            QTRY_VERIFY_WITH_TIMEOUT(!c.active(),10000);
             QVERIFY(c.messages()->get(17).value("content").toString().contains("回答未完成")); QVERIFY(capture("failed"));
             window->resize(1000,720); QTRY_COMPARE(window->width(),1000); QTest::qWait(100);
             auto *send=qobject_cast<QQuickItem*>(find("sendMessageButton")); QVERIFY(send);

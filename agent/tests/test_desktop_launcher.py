@@ -191,6 +191,32 @@ def test_config_cannot_override_listener(configured):
         launcher.read_config(config)
 
 
+def test_launcher_reads_legacy_partial_complete_and_rejects_invalid_models(tmp_path):
+    config = tmp_path / 'config.json'
+    base = {'base_url': 'https://provider.invalid/v1', 'port': 8765, 'server_args': []}
+
+    config.write_text(json.dumps({**base, 'model': 'legacy'}), encoding='utf-8')
+    assert {name: launcher.read_config(config)[name] for name in
+            ('chat_model','task_model','summary_model')} == {
+                'chat_model':'legacy','task_model':'legacy','summary_model':'legacy'}
+
+    config.write_text(json.dumps({**base, 'model':'fallback', 'chat_model':'fast'}), encoding='utf-8')
+    partial=launcher.read_config(config)
+    assert (partial['chat_model'],partial['task_model'],partial['summary_model']) == ('fast','fallback','fast')
+
+    config.write_text(json.dumps({**base, 'chat_model':'chat','task_model':'task',
+                                  'summary_model':'summary'}), encoding='utf-8')
+    complete=launcher.read_config(config)
+    assert (complete['model'],complete['chat_model'],complete['task_model'],complete['summary_model']) == (
+        None,'chat','task','summary')
+
+    for invalid in ({**base,'chat_model':'chat'},
+                    {**base,'model':'fallback','task_model':'bad\nmodel'},
+                    {**base,'model':'fallback','unexpected':'value'}):
+        config.write_text(json.dumps(invalid),encoding='utf-8')
+        with pytest.raises(ValueError): launcher.read_config(config)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('status', [200, 401, 403, 429])
 async def test_model_check_uses_config_without_history_or_secret_output(configured, monkeypatch, capsys, status):
@@ -241,6 +267,43 @@ async def test_model_check_requires_key_and_text_reply(configured, monkeypatch, 
         client_type(*a, **kw, transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))))
     assert await launcher.check_model(config) == 1
     assert 'llm_protocol' in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_model_check_validates_each_distinct_model_and_names_failed_purpose(tmp_path,monkeypatch,capsys):
+    from conftest import reply
+    from forgepilot.errors import ForgePilotError
+    config=tmp_path/'models.json'
+    config.write_text(json.dumps({'base_url':'https://provider.invalid/v1','chat_model':'fast-chat',
+        'task_model':'quality-task','summary_model':'cheap-summary','port':8765,'server_args':[]}),encoding='utf-8')
+    calls=[]
+    class Client:
+        def __init__(self,base_url,key,model,**kwargs): self.model=model
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def chat(self,messages,tools=None):
+            calls.append(self.model)
+            if self.model=='quality-task': raise ForgePilotError('llm_http','HTTP 403 from model provider')
+            return reply('OK')
+    monkeypatch.setenv('FORGEPILOT_API_KEY',KEY)
+    monkeypatch.setattr(launcher,'OpenAICompatibleClient',Client)
+    assert await launcher.check_model(config)==1
+    output=capsys.readouterr()
+    assert calls==['fast-chat','quality-task','cheap-summary']
+    assert '任务模型检查失败' in output.err and '聊天模型检查失败' not in output.err
+    assert KEY not in output.out+output.err and 'provider.invalid' not in output.out+output.err
+
+
+@pytest.mark.asyncio
+async def test_model_check_names_invalid_configuration_purpose(tmp_path,monkeypatch,capsys):
+    config=tmp_path/'invalid-model.json'
+    config.write_text(json.dumps({'base_url':'https://must-not-be-printed.invalid/v1','model':'fallback',
+        'task_model':'bad\nmodel','port':8765,'server_args':[]}),encoding='utf-8')
+    monkeypatch.setenv('FORGEPILOT_API_KEY',KEY)
+    assert await launcher.check_model(config)==1
+    output=capsys.readouterr().err
+    assert '任务模型配置无效' in output
+    assert KEY not in output and 'must-not-be-printed.invalid' not in output
 
 
 @pytest.mark.parametrize('existing_key', [False, True])
@@ -319,6 +382,42 @@ def test_configure_checks_before_saving_and_check_reads_saved_key(tmp_path, exis
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_configure_saves_and_checks_distinct_purpose_models(tmp_path):
+    received=[]
+    class Endpoint(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            received.append(body['model'])
+            payload=json.dumps({'choices':[{'message':{'role':'assistant','content':'OK'},
+                                            'finish_reason':'stop'}]}).encode()
+            self.send_response(200); self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(payload))); self.end_headers(); self.wfile.write(payload)
+        def log_message(self,*_): pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Endpoint)
+    thread=Thread(target=server.serve_forever,daemon=True); thread.start()
+    local=tmp_path/'purpose local data'
+    identity=hashlib.sha256(str(ROOT).lower().encode('utf-8')).hexdigest()[:16].upper()
+    config=local/'ForgePilot/launcher'/identity/'config.json'; config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'base_url':f'http://127.0.0.1:{server.server_port}/v1',
+        'model':'legacy','port':8765,'server_args':[]}),encoding='utf-8')
+    env={k:v for k,v in os.environ.items() if k.upper()!='PSMODULEPATH'}
+    env.update(LOCALAPPDATA=str(local),FORGEPILOT_API_KEY=KEY,
+               FORGEPILOT_CHAT_MODEL='fast-chat',FORGEPILOT_TASK_MODEL='quality-task',
+               FORGEPILOT_SUMMARY_MODEL='cheap-summary')
+    try:
+        result=subprocess.run(['cmd.exe','/d','/c',str(ROOT/'Configure-ForgePilot.cmd')],env=env,
+            capture_output=True,timeout=50,stdin=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode==0,(result.stdout+result.stderr).decode(errors='replace')
+        saved=json.loads(config.read_text(encoding='utf-8-sig'))
+        assert [saved[name] for name in ('chat_model','task_model','summary_model')]==[
+            'fast-chat','quality-task','cheap-summary']
+        assert received==['fast-chat','quality-task','cheap-summary']
+        assert KEY.encode() not in result.stdout+result.stderr
+        assert KEY not in config.read_text(encoding='utf-8-sig')
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=5)
 
 
 @pytest.mark.parametrize('bad_backend', [False, True])

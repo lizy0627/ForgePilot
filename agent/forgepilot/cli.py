@@ -20,6 +20,7 @@ from .sqlite_store import SqliteEventStore
 from .recording import TaskJournal
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments, mcp_from_args
+from .settings import task_model_from_args
 
 
 class SafeArgumentParser(argparse.ArgumentParser):
@@ -124,14 +125,15 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
     store = None
     trace = None
     try:
-        if not args.base_url or not args.model or not key:
-            raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL, FORGEPILOT_API_KEY and FORGEPILOT_MODEL")
+        if not args.base_url or not key:
+            raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
+        task_model = task_model_from_args(args)
         rg = executable(args.rg, "rg")
         git = executable(args.git, "git")
         build_config = None
         if not (args.analysis_only or args.plan_only or args.modify_only):
             build_config = build_config_from_args(args)
-        async with OpenAICompatibleClient(args.base_url, key, args.model,
+        async with OpenAICompatibleClient(args.base_url, key, task_model,
                                           timeout=args.timeout, transport=transport) as llm:
             store = SqliteEventStore(args.database, redactor=redactor)
             trace = TaskJournal(store, lambda: service.snapshot(persist_diff=True), redactor, on_event=display_event)

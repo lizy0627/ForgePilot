@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -9,7 +10,9 @@ import pytest
 
 from forgepilot.errors import ForgePilotError
 from forgepilot.process import executable, run_process
-from forgepilot.repository import MAX_FILE_BYTES, MAX_OUTPUT_CHARS, MAX_SEARCH_BYTES, Repository
+import forgepilot.repository as repository_module
+from forgepilot.repository import (MAX_FILE_BYTES, MAX_OUTPUT_CHARS, MAX_SEARCH_BYTES,
+                                   Repository, RepositoryCache)
 from forgepilot.tools import ToolRegistry, register_repository_tools
 
 
@@ -18,6 +21,167 @@ async def registry_for(root, rg_exe, git_exe):
     registry = ToolRegistry()
     register_repository_tools(registry, repo)
     return registry
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_hit_returns_fresh_request_session(cpp_repo, rg_exe, git_exe,
+                                                                  monkeypatch):
+    calls = 0
+    original = repository_module.run_process
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "run_process", counted)
+    cache = RepositoryCache(capacity=2)
+    first, first_hit = await cache.open(str(cpp_repo / "."), rg_executable=rg_exe,
+                                        git_executable=git_exe)
+    await first.read_file("main.cpp")
+    second, second_hit = await cache.open(str(cpp_repo.resolve()), rg_executable=rg_exe,
+                                          git_executable=git_exe)
+    assert not first_hit and second_hit and calls == 1 and cache.size == 1
+    assert first is not second and first.root == second.root == cpp_repo.resolve()
+    assert first._read_versions and second._read_versions == {}
+    await cache.aclose()
+    assert cache.closed and cache.size == 0
+    with pytest.raises(ForgePilotError, match="server_stopping"):
+        await cache.open(str(cpp_repo), rg_executable=rg_exe, git_executable=git_exe)
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_singleflight_survives_one_waiter_cancellation(cpp_repo, rg_exe,
+                                                                              git_exe, monkeypatch):
+    calls = 0
+    launched = asyncio.Event()
+    release = asyncio.Event()
+    original = repository_module.run_process
+
+    async def paused(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        launched.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "run_process", paused)
+    cache = RepositoryCache()
+    first = asyncio.create_task(cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                           git_executable=git_exe))
+    second = asyncio.create_task(cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                            git_executable=git_exe))
+    third = asyncio.create_task(cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                           git_executable=git_exe))
+    await launched.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    opened = await asyncio.gather(second, third)
+    assert calls == 1 and all(not hit for _, hit in opened)
+    assert opened[0][0] is not opened[1][0]
+    _, hit = await cache.open(str(cpp_repo), rg_executable=rg_exe, git_executable=git_exe)
+    assert hit and calls == 1
+    await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_invalidates_replaced_root(cpp_repo, tmp_path, rg_exe, git_exe,
+                                                           monkeypatch):
+    calls = 0
+    original = repository_module.run_process
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "run_process", counted)
+    cache = RepositoryCache()
+    old_session, hit = await cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                        git_executable=git_exe)
+    old_identity = old_session._root_identity
+    moved = tmp_path / "original-repository"
+    cpp_repo.rename(moved)
+    shutil.copytree(moved, cpp_repo)
+    with pytest.raises(ForgePilotError, match="repository_boundary"):
+        old_session._path("main.cpp")
+    replacement, hit = await cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                         git_executable=git_exe)
+    assert not hit and calls == 2
+    assert replacement._root_identity != old_identity
+    await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_invalidates_root_observed_moved(cpp_repo, tmp_path, rg_exe,
+                                                                 git_exe, monkeypatch):
+    calls = 0
+    original = repository_module.run_process
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "run_process", counted)
+    cache = RepositoryCache()
+    await cache.open(str(cpp_repo), rg_executable=rg_exe, git_executable=git_exe)
+    moved = tmp_path / "temporarily-moved"
+    cpp_repo.rename(moved)
+    with pytest.raises(ForgePilotError, match="repository_invalid"):
+        await cache.open(str(cpp_repo), rg_executable=rg_exe, git_executable=git_exe)
+    moved.rename(cpp_repo)
+    _, hit = await cache.open(str(cpp_repo), rg_executable=rg_exe, git_executable=git_exe)
+    assert not hit and calls == 2
+    await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_close_cancels_inflight_validation(cpp_repo, rg_exe, git_exe,
+                                                                  monkeypatch):
+    launched = asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        launched.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(repository_module, "run_process", blocked)
+    cache = RepositoryCache()
+    pending = asyncio.create_task(cache.open(str(cpp_repo), rg_executable=rg_exe,
+                                             git_executable=git_exe))
+    await launched.wait()
+    await cache.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert cache.closed and cache.size == 0 and not cache._inflight
+
+
+@pytest.mark.asyncio
+async def test_repository_cache_lru_capacity_evicts_oldest(tmp_path, rg_exe, git_exe, monkeypatch):
+    roots = []
+    for name in ("one", "two", "three"):
+        root = tmp_path / name
+        root.mkdir()
+        subprocess.run([git_exe, "init", "--quiet", str(root)], check=True, capture_output=True)
+        roots.append(root)
+    calls = 0
+    original = repository_module.run_process
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "run_process", counted)
+    cache = RepositoryCache(capacity=2)
+    for index in (0, 1, 0, 2, 1):
+        _, hit = await cache.open(str(roots[index]), rg_executable=rg_exe,
+                                  git_executable=git_exe)
+        assert hit is (index == 0 and calls == 2)
+    assert calls == 4 and cache.size == 2
+    await cache.aclose()
 
 
 @pytest.mark.asyncio

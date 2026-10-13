@@ -2,6 +2,8 @@
 
 import asyncio
 import codecs
+from collections import OrderedDict
+from dataclasses import dataclass
 import fnmatch
 import hashlib
 import json
@@ -18,6 +20,7 @@ MAX_FILES = 2_000
 MAX_SEARCH_FILES = 200
 MAX_SEARCH_BYTES = 8_388_608
 MAX_OUTPUT_CHARS = 12_000
+DEFAULT_REPOSITORY_CACHE_CAPACITY = 16
 EXCLUDED = (
     ".git", ".hg", ".svn", ".forgepilot", ".venv", "*.venv", "venv", "env",
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".uv-cache",
@@ -64,34 +67,205 @@ def opened_path(fd: int) -> Path | None:
     return Path(value)
 
 
+@dataclass(frozen=True, slots=True)
+class _RepositoryIdentity:
+    device: int
+    inode: int
+    mode: int
+    attributes: int
+    size: int | None = None
+    modified_ns: int | None = None
+
+
+def _identity(path: Path, *, marker: bool = False) -> _RepositoryIdentity:
+    info = path.lstat()
+    return _RepositoryIdentity(
+        info.st_dev, info.st_ino, info.st_mode,
+        getattr(info, "st_file_attributes", 0),
+        info.st_size if marker and stat.S_ISREG(info.st_mode) else None,
+        getattr(info, "st_mtime_ns", None) if marker and stat.S_ISREG(info.st_mode) else None,
+    )
+
+
+def _canonical_root(path: str) -> Path:
+    try:
+        root = Path(path).resolve(strict=True)
+        if not root.is_dir():
+            raise OSError()
+        return root
+    except (OSError, ValueError, RuntimeError):
+        raise ForgePilotError("repository_invalid", "Repository directory does not exist") from None
+
+
+def _cache_key(root: Path) -> str:
+    """Return the stable, platform-normalized absolute cache key."""
+    return os.path.normcase(os.path.normpath(str(root.absolute())))
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedRepositoryRoot:
+    root: Path
+    key: str
+    root_identity: _RepositoryIdentity
+    marker_identity: _RepositoryIdentity
+
+    def valid(self) -> bool:
+        try:
+            return (_canonical_root(str(self.root)) == self.root
+                    and _identity(self.root) == self.root_identity
+                    and _identity(self.root / ".git", marker=True) == self.marker_identity)
+        except (ForgePilotError, OSError, ValueError, RuntimeError):
+            return False
+
+    def session(self, rg_executable: str) -> "Repository":
+        return Repository(self.root, rg_executable,
+                          expected_root_identity=self.root_identity,
+                          expected_marker_identity=self.marker_identity)
+
+
+async def _verify_repository_root(root: Path, key: str, git_executable: str) -> _VerifiedRepositoryRoot:
+    try:
+        before_root = _identity(root)
+        before_marker = _identity(root / ".git", marker=True)
+    except OSError:
+        raise ForgePilotError("repository_not_git_root",
+                              "Select the root of a local Git working repository") from None
+    result = await run_process(
+        [git_executable, "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root),
+         "rev-parse", "--show-toplevel"], root, output_limit=16_384,
+    )
+    try:
+        valid = (result.returncode == 0 and not result.truncated
+                 and Path(result.stdout.decode("utf-8").strip()).resolve() == root)
+        after_root = _identity(root)
+        after_marker = _identity(root / ".git", marker=True)
+    except (ValueError, OSError, UnicodeError):
+        valid = False
+        after_root = after_marker = None
+    if not valid:
+        raise ForgePilotError("repository_not_git_root",
+                              "Select the root of a local Git working repository")
+    if before_root != after_root or before_marker != after_marker or _canonical_root(str(root)) != root:
+        raise ForgePilotError("repository_boundary", "Repository root changed during validation")
+    return _VerifiedRepositoryRoot(root, key, after_root, after_marker)
+
+
+class RepositoryCache:
+    """Bounded LRU of verified roots; every open returns a fresh request session."""
+
+    def __init__(self, capacity: int = DEFAULT_REPOSITORY_CACHE_CAPACITY) -> None:
+        if type(capacity) is not int or not 1 <= capacity <= 256:
+            raise ValueError("invalid repository cache capacity")
+        self.capacity = capacity
+        self._entries: OrderedDict[str, _VerifiedRepositoryRoot] = OrderedDict()
+        self._inflight: dict[str, asyncio.Task[_VerifiedRepositoryRoot]] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    @staticmethod
+    def _consume_unobserved_failure(task: asyncio.Task[_VerifiedRepositoryRoot]) -> None:
+        # Waiters still receive the same result. This only prevents an abandoned
+        # single-flight (all callers cancelled) from leaking an asyncio warning.
+        if not task.cancelled():
+            task.exception()
+
+    async def open(self, path: str, *, rg_executable: str,
+                   git_executable: str) -> tuple["Repository", bool]:
+        try:
+            root = _canonical_root(path)
+        except ForgePilotError:
+            # A direct cached root that was deleted or moved must not remain
+            # eligible if it later reappears at the same path.
+            try:
+                missing_key = _cache_key(Path(path))
+            except (OSError, ValueError, RuntimeError):
+                missing_key = None
+            if missing_key is not None:
+                async with self._lock:
+                    self._entries.pop(missing_key, None)
+            raise
+        key = _cache_key(root)
+        async with self._lock:
+            if self._closed:
+                raise ForgePilotError("server_stopping", "Repository cache is closed")
+            entry = self._entries.get(key)
+            if entry is not None:
+                if entry.valid():
+                    self._entries.move_to_end(key)
+                    return entry.session(rg_executable), True
+                self._entries.pop(key, None)
+            task = self._inflight.get(key)
+            if task is None:
+                task = asyncio.create_task(self._load(root, key, git_executable))
+                task.add_done_callback(self._consume_unobserved_failure)
+                self._inflight[key] = task
+        # One cancelled request must not cancel verification shared by other requests.
+        entry = await asyncio.shield(task)
+        return entry.session(rg_executable), False
+
+    async def _load(self, root: Path, key: str,
+                    git_executable: str) -> _VerifiedRepositoryRoot:
+        current = asyncio.current_task()
+        try:
+            entry = await _verify_repository_root(root, key, git_executable)
+            async with self._lock:
+                if self._closed:
+                    raise ForgePilotError("server_stopping", "Repository cache is closed")
+                self._entries[key] = entry
+                self._entries.move_to_end(key)
+                while len(self._entries) > self.capacity:
+                    self._entries.popitem(last=False)
+            return entry
+        finally:
+            async with self._lock:
+                if self._inflight.get(key) is current:
+                    self._inflight.pop(key, None)
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            self._closed = True
+            pending = tuple(self._inflight.values())
+            self._entries.clear()
+            for task in pending:
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        async with self._lock:
+            self._inflight.clear()
+
+    @property
+    def size(self) -> int:
+        return len(self._entries)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+
 class Repository:
-    def __init__(self, root: Path, rg_executable: str) -> None:
+    def __init__(self, root: Path, rg_executable: str, *,
+                 expected_root_identity: _RepositoryIdentity | None = None,
+                 expected_marker_identity: _RepositoryIdentity | None = None) -> None:
         self.root = root
         self.rg_executable = rg_executable
-        info = root.stat()
+        try:
+            info = root.stat()
+            actual_root = _identity(root)
+            actual_marker = (_identity(root / ".git", marker=True)
+                             if expected_marker_identity is not None else None)
+        except OSError:
+            raise ForgePilotError("repository_boundary", "Repository root changed") from None
+        if ((expected_root_identity is not None and actual_root != expected_root_identity)
+                or (expected_marker_identity is not None and actual_marker != expected_marker_identity)
+                or root.resolve(strict=True) != root):
+            raise ForgePilotError("repository_boundary", "Repository root changed")
         self._root_identity = (info.st_dev, info.st_ino)
         self._read_versions: dict[str, str] = {}
 
     @classmethod
     async def open(cls, path: str, *, rg_executable: str, git_executable: str):
-        try:
-            root = Path(path).resolve(strict=True)
-            if not root.is_dir():
-                raise OSError()
-        except (OSError, ValueError, RuntimeError):
-            raise ForgePilotError("repository_invalid", "Repository directory does not exist") from None
-        result = await run_process(
-            [git_executable, "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root),
-             "rev-parse", "--show-toplevel"], root, output_limit=16_384,
-        )
-        try:
-            valid = (result.returncode == 0 and not result.truncated and
-                     Path(result.stdout.decode("utf-8").strip()).resolve() == root)
-        except (ValueError, OSError, UnicodeError):
-            valid = False
-        if not valid:
-            raise ForgePilotError("repository_not_git_root", "Select the root of a local Git working repository")
-        return cls(root, rg_executable)
+        root = _canonical_root(path)
+        entry = await _verify_repository_root(root, _cache_key(root), git_executable)
+        return entry.session(rg_executable)
 
     def _path(self, value: str, *, allow_missing: bool = False) -> Path:
         if (len(value) > 1_024 or not value or any(ord(c) < 32 for c in value)

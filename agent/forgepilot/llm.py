@@ -4,7 +4,8 @@ import asyncio
 import codecs
 import json
 import math
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -73,7 +74,9 @@ class ToolSpec(BaseModel):
 
 class ModelClient(Protocol):
     async def chat(self, messages: list[dict], tools: list[ToolSpec] | None = None) -> ChatReply: ...
-    def stream_chat(self, messages: list[dict], tools: list[ToolSpec] | None = None) -> AsyncIterator[ChatStreamEvent]: ...
+    def stream_chat(self, messages: list[dict], tools: list[ToolSpec] | None = None, *,
+                    diagnostics: StreamMetrics | None = None,
+                    model_started: float | None = None) -> AsyncIterator[ChatStreamEvent]: ...
     async def aclose(self) -> None: ...
 
 
@@ -88,10 +91,12 @@ class OpenAICompatibleClient:
     _CONTENT_LIMIT = 32_768
     _TOOL_CALL_LIMIT = 8
     _ARGUMENTS_LIMIT = 16_384
+    supports_stream_diagnostics = True
 
     def __init__(self, base_url: str, api_key: str, model: str, *,
                  timeout: float = 60.0,
                  transport: httpx.AsyncBaseTransport | None = None,
+                 limits: httpx.Limits | None = None,
                  stream_include_usage: bool = False) -> None:
         if (not all(isinstance(v, str) and v.strip() for v in (base_url, api_key, model))
                 or len(model) > 256 or len(api_key) > 4_096
@@ -115,13 +120,9 @@ class OpenAICompatibleClient:
         self.stream_include_usage = stream_include_usage
         self.redactor = Redactor((api_key,))
         self._client = httpx.AsyncClient(transport=transport, timeout=timeout,
+                                       limits=limits or httpx.Limits(max_connections=20,
+                                           max_keepalive_connections=10, keepalive_expiry=30.0),
                                        follow_redirects=False, trust_env=False)
-        self._stream_metrics: StreamMetrics | None = None
-        self._stream_model_started: float | None = None
-
-    def set_stream_diagnostics(self, metrics: StreamMetrics | None, model_started: float) -> None:
-        self._stream_metrics = metrics
-        self._stream_model_started = model_started
 
     async def __aenter__(self):
         return self
@@ -191,7 +192,9 @@ class OpenAICompatibleClient:
             raise ForgePilotError("llm_protocol", "Invalid Chat Completions response structure") from None
 
     async def stream_chat(self, messages: list[dict],
-                          tools: list[ToolSpec] | None = None) -> AsyncIterator[ChatStreamEvent]:
+                          tools: list[ToolSpec] | None = None, *,
+                          diagnostics: StreamMetrics | None = None,
+                          model_started: float | None = None) -> AsyncIterator[ChatStreamEvent]:
         """Yield validated, provider-neutral deltas from a Chat Completions SSE stream."""
         payload = {"model": self.model, "messages": messages, "stream": True}
         if self.stream_include_usage:
@@ -215,7 +218,8 @@ class OpenAICompatibleClient:
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 ) as response:
                     self._validate_stream_response(response)
-                    async for event_data in self._iter_sse_data(response):
+                    async for event_data in self._iter_sse_data(
+                            response, diagnostics=diagnostics, model_started=model_started):
                         if event_data == "[DONE]":
                             saw_done = True
                             break
@@ -287,9 +291,6 @@ class OpenAICompatibleClient:
         except Exception:
             # Custom transports must not make their exception text part of the public error.
             raise ForgePilotError("llm_network", "LLM transport failed; check service and network") from None
-        finally:
-            self._stream_metrics = None
-            self._stream_model_started = None
 
     def _validate_stream_response(self, response: httpx.Response) -> None:
         if not 200 <= response.status_code < 300:
@@ -307,7 +308,9 @@ class OpenAICompatibleClient:
         if media_type != "text/event-stream":
             raise ForgePilotError("llm_protocol", "Streaming response must use text/event-stream")
 
-    async def _iter_sse_data(self, response: httpx.Response) -> AsyncIterator[str]:
+    async def _iter_sse_data(self, response: httpx.Response, *,
+                             diagnostics: StreamMetrics | None = None,
+                             model_started: float | None = None) -> AsyncIterator[str]:
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         text_buffer = ""
         data_lines: list[str] = []
@@ -335,8 +338,8 @@ class OpenAICompatibleClient:
                     if data_lines:
                         event_data = "\n".join(data_lines)
                         if event_data:
-                            if self._stream_metrics is not None and self._stream_model_started is not None:
-                                self._stream_metrics.model_chunk(self._stream_model_started)
+                            if diagnostics is not None and model_started is not None:
+                                diagnostics.model_chunk(model_started)
                             yield event_data
                     data_lines = []
                     event_size = 0
@@ -362,8 +365,8 @@ class OpenAICompatibleClient:
         if data_lines:
             event_data = "\n".join(data_lines)
             if event_data:
-                if self._stream_metrics is not None and self._stream_model_started is not None:
-                    self._stream_metrics.model_chunk(self._stream_model_started)
+                if diagnostics is not None and model_started is not None:
+                    diagnostics.model_chunk(model_started)
                 yield event_data
 
     @staticmethod
@@ -457,3 +460,85 @@ class OpenAICompatibleClient:
         if len({call.id for call in calls}) != len(calls):
             raise ValueError("Duplicate tool call ids")
         return calls
+
+
+class PooledModelClient:
+    """A non-owning, model-specific view of a shared HTTP client.
+
+    Request services may close this handle using their existing ownership rules;
+    only OpenAIClientPool owns and closes the underlying connection pool.
+    """
+    supports_stream_diagnostics = True
+
+    def __init__(self, client: OpenAICompatibleClient) -> None:
+        self._client = client
+        self.model = client.model
+        self.redactor = client.redactor
+
+    async def chat(self, messages: list[dict],
+                   tools: list[ToolSpec] | None = None) -> ChatReply:
+        return await self._client.chat(messages, tools=tools)
+
+    async def stream_chat(self, messages: list[dict],
+                          tools: list[ToolSpec] | None = None, *,
+                          diagnostics: StreamMetrics | None = None,
+                          model_started: float | None = None) -> AsyncIterator[ChatStreamEvent]:
+        async for event in self._client.stream_chat(
+                messages, tools=tools, diagnostics=diagnostics, model_started=model_started):
+            yield event
+
+    async def aclose(self) -> None:
+        # The application-level pool owns the transport lifetime.
+        return None
+
+
+class OpenAIClientPool:
+    """Own one reusable OpenAI-compatible HTTP client per configured model."""
+
+    def __init__(self, base_url: str, api_key: str, *, timeout: float = 60.0,
+                 max_connections: int = 20, max_keepalive_connections: int = 10,
+                 keepalive_expiry: float = 30.0,
+                 stream_include_usage: bool = False,
+                 transport_factory: Callable[[str], httpx.AsyncBaseTransport | None] | None = None) -> None:
+        if (type(max_connections) is not int or type(max_keepalive_connections) is not int
+                or max_connections < 1 or not 0 <= max_keepalive_connections <= max_connections
+                or type(keepalive_expiry) not in (int, float)
+                or not math.isfinite(keepalive_expiry) or keepalive_expiry < 0):
+            raise ForgePilotError("llm_config", "Invalid HTTP connection pool limits")
+        self._base_url = base_url
+        self._api_key = api_key
+        self._timeout = timeout
+        self._limits = httpx.Limits(max_connections=max_connections,
+                                    max_keepalive_connections=max_keepalive_connections,
+                                    keepalive_expiry=float(keepalive_expiry))
+        self._stream_include_usage = stream_include_usage
+        self._transport_factory = transport_factory
+        self._clients: dict[str, OpenAICompatibleClient] = {}
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def lease(self, model: str) -> PooledModelClient:
+        with self._lock:
+            if self._closed:
+                raise ForgePilotError("server_stopping", "Model connection pool is closed")
+            client = self._clients.get(model)
+            if client is None:
+                transport = self._transport_factory(model) if self._transport_factory is not None else None
+                client = OpenAICompatibleClient(
+                    self._base_url, self._api_key, model, timeout=self._timeout,
+                    transport=transport, limits=self._limits,
+                    stream_include_usage=self._stream_include_usage)
+                self._clients[model] = client
+            return PooledModelClient(client)
+
+    async def aclose(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            clients = list(self._clients.values())
+            self._clients.clear()
+        results = await asyncio.gather(*(client.aclose() for client in clients),
+                                       return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            raise ForgePilotError("llm_cleanup", "One or more model connection pools could not be closed")

@@ -25,14 +25,14 @@ function Find-OptionalTool([string]$Variable, [string]$Name) {
     return $null # Ordinary Q&A does not need development tools.
 }
 
-function Test-ModelKey([Security.SecureString]$Secret) {
+function Test-ModelKey([Security.SecureString]$Secret, [string]$ValidationConfig = $configFile) {
     Write-Host '正在发送一条简短模型请求检查连接（最多等待 30 秒）……'
     $previousKey = $env:FORGEPILOT_API_KEY
     $previousConsoleEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
         $env:FORGEPILOT_API_KEY = [Net.NetworkCredential]::new('', $Secret).Password
-        & $pythonExe -X utf8 -I $launcherScript check --config $configFile
+        & $pythonExe -X utf8 -I $launcherScript check --config $ValidationConfig
         if ($LASTEXITCODE -ne 0) { throw '模型连接检查失败。' }
     } finally {
         if ($null -eq $previousKey) { Remove-Item Env:FORGEPILOT_API_KEY -ErrorAction SilentlyContinue }
@@ -41,14 +41,14 @@ function Test-ModelKey([Security.SecureString]$Secret) {
     }
 }
 
-function Save-Key {
+function Save-Key([string]$ValidationConfig = $configFile) {
     Write-Host 'API Key 仅在本机使用 Windows 当前账户加密保存，不写入项目、日志或命令参数。'
     if ($env:FORGEPILOT_API_KEY) { $secret = ConvertTo-SecureString $env:FORGEPILOT_API_KEY -AsPlainText -Force }
     else { $secret = Read-Host '请输入 API Key（输入不显示）' -AsSecureString }
     $pendingKey = Join-Path $settingsDirectory ('api-key-' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         if ($secret.Length -eq 0) { throw 'API Key 不能为空。' }
-        Test-ModelKey $secret
+        Test-ModelKey $secret $ValidationConfig
         $secret | ConvertFrom-SecureString | Set-Content -LiteralPath $pendingKey -Encoding ASCII
         Move-Item -LiteralPath $pendingKey -Destination $keyFile -Force
     } catch {
@@ -58,6 +58,14 @@ function Save-Key {
         if (Test-Path -LiteralPath $pendingKey) { Remove-Item -LiteralPath $pendingKey }
         if ($secret) { $secret.Dispose() }
     }
+}
+
+function Config-Property($Object, [string]$Name, $Default) {
+    if ($Object -and $Object.PSObject.Properties.Name -contains $Name) {
+        $value = $Object.$Name
+        if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    }
+    return $Default
 }
 
 try {
@@ -98,26 +106,59 @@ try {
     }
     New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
     $stage = '读取或创建本机配置'
-    if (-not (Test-Path -LiteralPath $configFile)) {
-        Write-Host '首次配置：问答只需模型连接。执行任务前可在 config.json 配置构建工具与项目 Presets。'
-        $baseUrl = if ($env:FORGEPILOT_BASE_URL) { $env:FORGEPILOT_BASE_URL } else { 'https://ark.cn-beijing.volces.com/api/v3' }
-        $model = if ($env:FORGEPILOT_MODEL) { $env:FORGEPILOT_MODEL } else { 'doubao-seed-2-0-lite-260215' }
-        $serverArguments = @('--database', (Join-Path $projectRoot 'logs\demo-live.sqlite3'), '--timeout', '120')
-        foreach ($toolSpec in @(@('--rg', 'FORGEPILOT_RG', 'rg.exe'), @('--clangd', 'FORGEPILOT_CLANGD', 'clangd.exe'), @('--cmake', 'FORGEPILOT_CMAKE', 'cmake.exe'))) {
-            $toolPath = Find-OptionalTool $toolSpec[1] $toolSpec[2]
-            if ($toolPath) { $serverArguments += @($toolSpec[0], $toolPath) }
+    $hasConfig = Test-Path -LiteralPath $configFile
+    $existingConfig = if ($hasConfig) { Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json } else { $null }
+    $pendingConfig = $null
+    if (-not $hasConfig -or $Action -eq 'Configure') {
+        Write-Host '模型配置：普通聊天、代码任务和对话摘要可以使用不同模型。'
+        $storedFallback = Config-Property $existingConfig 'model' 'doubao-seed-2-0-lite-260215'
+        $baseUrl = if ($env:FORGEPILOT_BASE_URL) { $env:FORGEPILOT_BASE_URL } else { Config-Property $existingConfig 'base_url' 'https://ark.cn-beijing.volces.com/api/v3' }
+        $fallback = if ($env:FORGEPILOT_MODEL) { $env:FORGEPILOT_MODEL } else { $storedFallback }
+        $chatDefault = if ($env:FORGEPILOT_CHAT_MODEL) { $env:FORGEPILOT_CHAT_MODEL } else { Config-Property $existingConfig 'chat_model' $fallback }
+        $taskDefault = if ($env:FORGEPILOT_TASK_MODEL) { $env:FORGEPILOT_TASK_MODEL } else { Config-Property $existingConfig 'task_model' $fallback }
+        $summaryDefault = if ($env:FORGEPILOT_SUMMARY_MODEL) { $env:FORGEPILOT_SUMMARY_MODEL } else { Config-Property $existingConfig 'summary_model' $chatDefault }
+        if ($hasConfig) {
+            $serverArguments = @($existingConfig.server_args)
+            $port = [int]$existingConfig.port
+        } else {
+            $port = 8765
+            $serverArguments = @('--database', (Join-Path $projectRoot 'logs\demo-live.sqlite3'), '--timeout', '120')
+            foreach ($toolSpec in @(@('--rg', 'FORGEPILOT_RG', 'rg.exe'), @('--clangd', 'FORGEPILOT_CLANGD', 'clangd.exe'), @('--cmake', 'FORGEPILOT_CMAKE', 'cmake.exe'))) {
+                $toolPath = Find-OptionalTool $toolSpec[1] $toolSpec[2]
+                if ($toolPath) { $serverArguments += @($toolSpec[0], $toolPath) }
+            }
         }
         $config = [ordered]@{
             base_url = (Ask-Default '模型 Base URL' $baseUrl)
-            model = (Ask-Default '模型名称' $model)
-            port = 8765
+            model = (Ask-Default '缺省模型（兼容 FORGEPILOT_MODEL）' $fallback)
+            chat_model = (Ask-Default '普通聊天模型' $chatDefault)
+            task_model = (Ask-Default '代码任务模型' $taskDefault)
+            summary_model = (Ask-Default '对话摘要模型' $summaryDefault)
+            port = $port
             server_args = $serverArguments
         }
-        $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configFile -Encoding UTF8
+        $sameModels = ($hasConfig -and $config.base_url -eq $existingConfig.base_url -and
+            $config.model -eq $storedFallback -and $config.chat_model -eq (Config-Property $existingConfig 'chat_model' $storedFallback) -and
+            $config.task_model -eq (Config-Property $existingConfig 'task_model' $storedFallback) -and
+            $config.summary_model -eq (Config-Property $existingConfig 'summary_model' (Config-Property $existingConfig 'chat_model' $storedFallback)))
+        if (-not $sameModels) {
+            $pendingConfig = Join-Path $settingsDirectory ('config-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pendingConfig -Encoding UTF8
+        }
     }
     Write-Host "本机配置：$configFile"
     $stage = '验证并保存本机加密密钥'
-    if ($Action -eq 'Configure' -or -not (Test-Path -LiteralPath $keyFile)) { Save-Key }
+    $validationConfig = if ($pendingConfig) { $pendingConfig } else { $configFile }
+    if ($Action -eq 'Configure' -or -not (Test-Path -LiteralPath $keyFile)) {
+        Save-Key $validationConfig
+        if ($pendingConfig) { Move-Item -LiteralPath $pendingConfig -Destination $configFile -Force; $pendingConfig = $null }
+    } elseif ($pendingConfig) {
+        $savedSecret = (Get-Content -LiteralPath $keyFile -Raw).Trim() | ConvertTo-SecureString
+        try { Test-ModelKey $savedSecret $validationConfig }
+        finally { $savedSecret.Dispose() }
+        Move-Item -LiteralPath $pendingConfig -Destination $configFile -Force
+        $pendingConfig = $null
+    }
     if ($Action -eq 'Configure') { Write-Host '模型连接验证通过，密钥已保存。请依次运行 Stop-ForgePilot.cmd 和 Start-ForgePilot.cmd 使新密钥生效。'; exit 0 }
     $clientExe = Join-Path $projectRoot 'client\build\Release\ForgePilotClient.exe'
     $stage = '检查已构建客户端'
@@ -141,6 +182,7 @@ try {
     }
     Write-Host 'ForgePilot 已启动。双击 Stop-ForgePilot.cmd 可关闭客户端和后端。'
 } catch {
+    if ($pendingConfig -and (Test-Path -LiteralPath $pendingConfig)) { Remove-Item -LiteralPath $pendingConfig }
     # Do not echo arbitrary exception text: credential conversion errors may contain input.
     Write-Host "操作未完成，步骤：$stage。请检查上面的提示、本机 config.json 和 logs\desktop。" -ForegroundColor Red
     exit 1

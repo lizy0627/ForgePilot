@@ -172,6 +172,15 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true; spacing: 8
                     ActionButton { text: "＋ 项目"; flat: true; horizontalPadding: 8; visible: !root.workMode && !root.conversations.repositoryPath; enabled: !root.conversations.active && !root.conversations.busy && !root.conversations.retryPending; onClicked: folder.open(); ToolTip.visible: hovered; ToolTip.text: "关联项目后可询问代码" }
+                    ComboBox {
+                        objectName: "chatToolMode"; visible: !root.workMode; Layout.preferredWidth: 94
+                        model: ["自动", "快速", "联网", "项目"]
+                        currentIndex: ["auto", "fast", "web", "project"].indexOf(root.conversations.toolMode)
+                        enabled: !root.conversations.active && !root.conversations.busy && !root.conversations.retryPending
+                        onActivated: root.conversations.toolMode = ["auto", "fast", "web", "project"][currentIndex]
+                        ToolTip.visible: hovered
+                        ToolTip.text: currentIndex === 0 ? "保守判断是否需要工具" : currentIndex === 1 ? "不使用工具" : currentIndex === 2 ? "仅联网工具" : "仅项目只读工具"
+                    }
                     Label { text: root.workMode ? (root.conversations.repositoryPath ? "修改前会请你确认方案" : "先选择要工作的项目") : root.conversations.repositoryPath ? "仅阅读和分析项目" : ""; color: Theme.muted; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
                     ActionButton { objectName: "stopAnswerButton"; text: "■"; Accessible.name: "停止回答"; highlighted: true; cornerRadius: 20; horizontalPadding: 0; Layout.preferredWidth: 40; Layout.preferredHeight: 40; visible: root.conversations.activeMode === "chat"; enabled: !root.conversations.busy; onClicked: root.conversations.stopAnswer(); ToolTip.visible: hovered; ToolTip.text: "停止回答" }
                     ActionButton { objectName: "stopTaskButton"; text: "停止工作"; visible: root.conversations.activeMode === "task"; enabled: root.controller.canCancel; onClicked: root.controller.cancelTask() }

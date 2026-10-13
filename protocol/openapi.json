@@ -314,6 +314,17 @@
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "title": "Request Id",
             "type": "string"
+          },
+          "tool_mode": {
+            "default": "auto",
+            "enum": [
+              "fast",
+              "web",
+              "project",
+              "auto"
+            ],
+            "title": "Tool Mode",
+            "type": "string"
           }
         },
         "required": [

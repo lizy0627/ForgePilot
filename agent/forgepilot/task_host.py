@@ -419,12 +419,14 @@ class TaskHost:
                     raise entry.persistence_error from None
                 raise
 
-    async def close(self):
+    async def close(self, close_resources=None):
         if self._loop is None or self._loop.is_closed():
             return
-        await self._submit(self._shutdown())
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        await asyncio.to_thread(self._thread.join)
+        try:
+            await self._submit(self._shutdown(close_resources=close_resources))
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            await asyncio.to_thread(self._thread.join)
 
     async def stop_for_deletion(self, task_id):
         """Worker-loop only. Also join terminal tasks still closing their LLM/processes."""
@@ -451,7 +453,7 @@ class TaskHost:
                     raise entry.persistence_error from None
                 raise
 
-    async def _shutdown(self):
+    async def _shutdown(self, *, close_resources=None):
         self._stopping = True
         checks = list(self._mcp_active)
         for check in checks:
@@ -462,3 +464,5 @@ class TaskHost:
                                if not entry.closed), return_exceptions=True)
         await asyncio.gather(*(entry.running for entry in self._tasks.values() if entry.running is not None),
                              return_exceptions=True)
+        if close_resources is not None:
+            await close_resources()

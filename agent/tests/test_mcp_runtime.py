@@ -32,6 +32,7 @@ from forgepilot.mcp_manager import MCPManager
 from forgepilot.mcp_records import bounded_records, search_sources
 from forgepilot.mcp_service import MCPService, LEGACY_SERVER_ID
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.stream_metrics import StreamMetrics
 from forgepilot.task_service import TaskService
 from forgepilot.tools.mcp_tools import tool_alias
 from forgepilot.trace import MemoryTrace
@@ -516,6 +517,32 @@ def assert_chat_budget_and_pairs(requests):
 
 
 @pytest.mark.asyncio
+async def test_chat_tool_modes_expose_only_the_selected_tool_classes(peers,database,cpp_repo,rg_exe,git_exe):
+    peer=await peers(); service=MCPService(database); record=await save_new(service,peer)
+    alias=tool_alias(record['server_id'],'search'); peer.records.clear()
+    names=[]; request_counts=[]; web_metrics=StreamMetrics(tool_mode='web')
+    async def expose(mode,prompt,metrics=None):
+        model=LocalModel([reply('answer')])
+        client=ChatService(model,rg_executable=rg_exe,git_executable=git_exe)
+        client.configure_mcp(service.snapshots('chat'),connection_factory=create_mcp_connection)
+        try: await client.answer([],prompt,str(cpp_repo),tool_mode=mode,diagnostics=metrics)
+        finally: await client.close()
+        names.append({tool.name for tool in model.requests[0][1] or []})
+        request_counts.append(len(model.requests))
+    await expose('fast','普通概念问题')
+    await expose('web','普通概念问题',web_metrics)
+    await expose('project','普通概念问题')
+    await expose('auto','解释依赖注入')
+    await expose('auto','请搜索今天的官网资料')
+    await expose('auto','检查当前项目配置')
+    await expose('auto','检查当前项目并联网搜索最新资料')
+    assert names==[set(),{alias},set(READ_TOOLS),set(),{alias},set(READ_TOOLS),set(READ_TOOLS)|{alias}]
+    assert request_counts==[1]*7
+    assert web_metrics.snapshot()['tool_mode']==2 and web_metrics.snapshot()['exposed_tool_count']==1
+    assert not peer.records
+
+
+@pytest.mark.asyncio
 async def test_chat_closing_reservation_omits_definitions_before_accepting_batch(peers, database):
     peer = await peers()
     peer.tools[0]["description"] = "D" * 4096
@@ -879,7 +906,8 @@ async def test_host_snapshot_captured_before_model_await(peers,tmp_path):
         async with httpx.AsyncClient(base_url=url,timeout=10) as client:
             record=await saved(client,peer); cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']; rid=str(uuid4())
             try:
-                await client.post(f'/api/v1/conversations/{cid}/requests',json={'request_id':rid,'prompt':'snapshot'})
+                await client.post(f'/api/v1/conversations/{cid}/requests',json={
+                    'request_id':rid,'prompt':'snapshot','tool_mode':'web'})
                 await eventually(entered.is_set)
                 assert not methods(peer,'tools/call')
                 assert (await client.delete(PREFIX+'/servers/'+record['server_id']+'?revision=1')).status_code==200
@@ -906,7 +934,7 @@ async def test_mode_filter_and_disabled_host_no_connections(peers,tmp_path,cpp_r
             cid=(await client.post('/api/v1/conversations',json={})).json()['conversation_id']; rid=str(uuid4())
             await client.post(f'/api/v1/conversations/{cid}/requests',json={'request_id':rid,'prompt':'chat'})
             assert (await wait_request(client,cid,rid))['status']=='completed'
-            assert bool(requests[-1])==(mode=='chat') and not peer.records
+            assert not requests[-1] and not peer.records
             requests.clear(); cid=(await client.post('/api/v1/conversations',json={'repository_path':str(cpp_repo)})).json()['conversation_id']; rid=str(uuid4())
             response=await client.post(f'/api/v1/conversations/{cid}/requests',json={'request_id':rid,'mode':'task','prompt':'work'})
             tid=response.json()['task_id']
@@ -1031,6 +1059,7 @@ async def test_real_api_chat_records_sources_cancel_history_and_delete(peers,tmp
             path=f'/api/v1/conversations/{cid}/requests/{rid}'
             assert (await client.post(f'/api/v1/conversations/{cid}/requests',json={'request_id':rid,'prompt':'查 Qt 文档'})).status_code==202
             state=await wait_request(client,cid,rid); assert state['status']=='completed'
+            assert len(models[0].requests)==2 and len(methods(peer,'tools/call'))==1
             assert state['tool_activity']['status']=='succeeded' and 'mcp_calls_json' not in state
             records=(await client.get(path+'/mcp-tools')).json()['items']; assert len(records)==1
             assert records[0]['sources']==[{'title':'Qt 文档','url':'https://doc.qt.io/qt-6/'}]

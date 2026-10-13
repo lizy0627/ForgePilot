@@ -40,10 +40,11 @@ class Capture:
 
 
 @asynccontextmanager
-async def memory_api(path=':memory:',*,capture=None,model=None,rg=None,git=None,task_factory=None):
+async def memory_api(path=':memory:',*,capture=None,model=None,summary_model=None,rg=None,git=None,task_factory=None):
     capture=capture or Capture(); store=SqliteEventStore(path)
     app=create_app(task_factory or (lambda trace:pytest.fail('Question must not create a task')),store=store,
-        chat_factory=lambda:ChatService(model() if model else capture.model(),rg_executable=rg,git_executable=git))
+        chat_factory=lambda:ChatService(model() if model else capture.model(),rg_executable=rg,git_executable=git),
+        summary_factory=(lambda:ChatService(summary_model(),rg_executable=rg,git_executable=git)) if summary_model else None)
     try:
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1') as c:
@@ -69,6 +70,12 @@ async def add(c,content,scope='global',project=None,source=None,message=None):
     return r.json()
 
 
+async def wait_summary(app,cid):
+    # Request polling can observe the durable answer just before the host creates the background task.
+    await asyncio.sleep(.1)
+    await eventually(lambda:cid not in app.state.conversation_host._summary_tasks)
+
+
 @pytest.mark.asyncio
 async def test_manual_scopes_edit_delete_normalized_project_and_restart(tmp_path,cpp_repo,rg_exe,git_exe,monkeypatch):
     other=tmp_path/'另一个项目'; shutil.copytree(cpp_repo,other); path=tmp_path/'mem.sqlite3'
@@ -81,7 +88,7 @@ async def test_manual_scopes_edit_delete_normalized_project_and_restart(tmp_path
         global_m=await add(c,'全局偏好标记：默认中文回答')
         project_m=await add(c,'项目甲偏好标记：保留现有测试','project',cpp_repo.name)
         assert project_m['project_key']==project_identity(str(cpp_repo))
-        await send(c,a,'本轮明确要求英文，先列步骤。')
+        await send(c,a,'本轮明确要求英文，先列步骤。',tool_mode='project')
         assert len(background(cap)['用户手动保存的偏好'])==2
         assert {s.name for s in cap.requests[-1][1]}==READ_TOOLS
         assert cap.requests[-1][0][-1]['content']=='本轮明确要求英文，先列步骤。'
@@ -131,19 +138,25 @@ async def test_summary_contiguous_coverage_recent_originals_and_incremental_rest
         cid=store.create_conversation()['conversation_id']; seed(store,cid,16)
         original=store.conversation_detail(cid)['messages']
         await send(c,cid,'新一轮')
+        # The foreground answer used bounded originals immediately; it did not wait for or inject the new summary.
+        assert '对话摘要' not in background(cap)
+        await wait_summary(app,cid)
         state=store.summary_state(cid); cursor=state['summary']['through_message_id']
         covered=[x for s in cap.summaries for x in s['messages']]
         expected=[m['message_id'] for m in original if m['message_id']<=cursor]
         assert [m['message_id'] for m in covered]==expected
-        assert len(expected)==len(set(expected)) and len(original)-len(expected)>=6
+        assert len(expected)==len(set(expected)) and len(original)+2-len(expected)>=6
+        await send(c,cid,'使用已有摘要')
         assert background(cap)['对话摘要']['through_message_id']==cursor
         recent=[m for m in cap.requests[-1][0][1:-1] if not m['content'].startswith('历史背景资料（')]
-        assert recent==[{'role':m['role'],'content':m['content']} for m in original if m['message_id']>cursor]
+        current=store.conversation_detail(cid)['messages'][:-2]
+        assert recent==[{'role':m['role'],'content':m['content']} for m in current if m['message_id']>cursor]
         assert store.conversation_detail(cid)['messages'][:len(original)]==original
         assert all(len(json.dumps(s,ensure_ascii=False))<=48000 for s in cap.summaries)
     async with memory_api(path) as (c,app,store,cap):
         assert store.summary_state(cid)['summary']['through_message_id']==cursor
         seed(store,cid,13); await send(c,cid,'继续摘要')
+        await wait_summary(app,cid)
         assert cap.summaries and all(m['message_id']>cursor for s in cap.summaries for m in s['messages'])
         assert cap.summaries[0]['previous_summary']
         assert store.summary_state(cid)['summary']['through_message_id']>cursor
@@ -165,10 +178,155 @@ async def test_summary_failure_keeps_original_messages_and_answers(failure):
     async with memory_api(model=Model) as (c,app,store,cap):
         cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
         before=store.conversation_detail(cid)['messages']; result=await send(c,cid,'继续提问')
-        assert result['status']=='completed' and '摘要生成未完成' in result['context_notice']
+        assert result['status']=='completed' and '摘要生成未完成' not in result['context_notice']
+        assert store.conversation_detail(cid)['messages'][-1]['content']=='正常继续回答'
+        await wait_summary(app,cid)
         assert store.summary_state(cid)['summary'] is None
         assert store.conversation_detail(cid)['messages'][:len(before)]==before
-        assert store.conversation_detail(cid)['messages'][-1]['content']=='正常继续回答'
+
+
+@pytest.mark.asyncio
+async def test_foreground_first_delta_does_not_wait_for_background_summary():
+    started=Event(); release=Event()
+    class Delayed:
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('立即回答')
+            started.set(); await asyncio.to_thread(release.wait,10); return reply('后台摘要')
+        async def aclose(self): pass
+    async with memory_api(model=Delayed) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15); rid=str(uuid4())
+        result=await send(c,cid,'不能等待摘要',rid=rid)
+        assert result['status']=='completed'
+        await eventually(started.is_set)
+        metrics=app.state.conversation_host._streams[rid].metrics
+        before=metrics.snapshot()
+        assert before['request_to_first_safe_delta_ms']>=0 and before['request_total_ms']>=0
+        assert before['summary_started']==1 and before['summary_ms']==-1
+        await asyncio.sleep(.2); release.set(); await wait_summary(app,cid)
+        after=metrics.snapshot()
+        assert after['summary_result']=='committed' and after['summary_ms']>=150
+        assert after['request_to_first_safe_delta_ms']<after['summary_ms']
+
+
+@pytest.mark.asyncio
+async def test_same_conversation_deduplicates_running_summary():
+    started=Event(); release=Event(); values={'calls':0,'active':0,'maximum':0}
+    class Delayed:
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('前台完成')
+            values['calls']+=1; values['active']+=1
+            values['maximum']=max(values['maximum'],values['active']); started.set()
+            try: await asyncio.to_thread(release.wait,10)
+            finally: values['active']-=1
+            return reply('唯一后台摘要')
+        async def aclose(self): pass
+    async with memory_api(model=Delayed) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        await send(c,cid,'第一轮'); await eventually(started.is_set)
+        second=await send(c,cid,'摘要运行时的第二轮')
+        assert second['status']=='completed' and len(app.state.conversation_host._summary_tasks)==1
+        assert values=={'calls':1,'active':1,'maximum':1}
+        release.set(); await wait_summary(app,cid)
+        assert values['calls']==1 and values['maximum']==1 and store.summary_state(cid)['summary']
+
+
+@pytest.mark.asyncio
+async def test_background_summaries_are_globally_single_concurrency():
+    first_started=Event(); release_first=Event(); values={'calls':0,'active':0,'maximum':0}
+    class DelayedFirst:
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('前台完成')
+            values['calls']+=1; values['active']+=1
+            values['maximum']=max(values['maximum'],values['active'])
+            try:
+                if values['calls']==1:
+                    first_started.set(); await asyncio.to_thread(release_first.wait,10)
+                return reply('后台摘要')
+            finally: values['active']-=1
+        async def aclose(self): pass
+    async with memory_api(model=DelayedFirst) as (c,app,store,cap):
+        conversations=[store.create_conversation()['conversation_id'] for _ in range(2)]
+        for cid in conversations: seed(store,cid,15)
+        await asyncio.gather(*(send(c,cid,'并发前台') for cid in conversations))
+        await eventually(first_started.is_set); await asyncio.sleep(.1)
+        assert values['calls']==1 and values['maximum']==1
+        release_first.set()
+        await asyncio.gather(*(wait_summary(app,cid) for cid in conversations))
+        assert values['calls']==2 and values['maximum']==1
+
+
+@pytest.mark.asyncio
+async def test_failed_background_summary_retries_after_next_answer():
+    attempts={'value':0}
+    class Retry:
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('回答保持成功')
+            attempts['value']+=1
+            if attempts['value']==1: raise RuntimeError('summary fixture failure')
+            return reply('重试成功的摘要')
+        async def aclose(self): pass
+    async with memory_api(model=Retry) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        first=await send(c,cid,'第一次'); await wait_summary(app,cid)
+        assert first['status']=='completed' and store.summary_state(cid)['summary'] is None
+        second=await send(c,cid,'第二次'); await wait_summary(app,cid)
+        assert second['status']=='completed' and attempts['value']==2
+        assert store.summary_state(cid)['summary']['content']=='重试成功的摘要'
+
+
+@pytest.mark.asyncio
+async def test_chat_and_background_summary_use_separate_model_factories():
+    calls={'chat':0,'summary':0}
+    class Chat:
+        async def chat(self,messages,tools=None): calls['chat']+=1; return reply('聊天模型回答')
+        async def aclose(self): pass
+    class Summary:
+        async def chat(self,messages,tools=None):
+            assert messages[0]['content']==SUMMARY_SYSTEM
+            calls['summary']+=1
+            return reply('摘要模型结果')
+        async def aclose(self): pass
+    async with memory_api(model=Chat,summary_model=Summary) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        result=await send(c,cid,'使用聊天模型')
+        assert result['status']=='completed' and calls=={'chat':1,'summary':0}
+        await wait_summary(app,cid)
+        assert calls=={'chat':1,'summary':1}
+        assert store.summary_state(cid)['summary']['content']=='摘要模型结果'
+
+
+def test_summary_commit_cas_does_not_require_running_request():
+    store=SqliteEventStore(':memory:')
+    try:
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        plan=store.summary_plan(cid); assert plan and plan['through_message_id']>0
+        assert not store._db.execute("SELECT 1 FROM conversation_requests WHERE status='running'").fetchone()
+        assert store.commit_summary(plan,'终态请求之后提交的摘要')
+        seed(store,cid,15); stale=store.summary_plan(cid); assert stale
+        state=store.summary_state(cid)
+        store.edit_summary(cid,state['revision'],content='用户编辑后的摘要')
+        assert not store.commit_summary(stale,'不得覆盖用户编辑')
+    finally: store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_close_cancels_background_summary_without_writeback(tmp_path):
+    path=tmp_path/'close-summary.sqlite3'; started=Event(); closed=Event()
+    class Hanging:
+        def __init__(self): self.summary=False
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('回答已持久化')
+            self.summary=True; started.set(); await asyncio.Future()
+        async def aclose(self):
+            if self.summary: closed.set()
+    async with memory_api(path,model=Hanging) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        assert (await send(c,cid,'关闭服务'))['status']=='completed'
+        await eventually(started.is_set)
+    assert closed.is_set()
+    reopened=SqliteEventStore(path)
+    try: assert reopened.summary_state(cid)['summary'] is None
+    finally: reopened.close()
 
 
 @pytest.mark.asyncio
@@ -176,7 +334,7 @@ async def test_delete_source_removes_summary_and_memories_only(tmp_path):
     path=tmp_path/'source.sqlite3'
     async with memory_api(path) as (c,app,store,cap):
         cid=store.create_conversation()['conversation_id']; keep=store.create_conversation()['conversation_id']; seed(store,cid,15)
-        await send(c,cid,'生成摘要'); assert store.summary_state(cid)['summary']
+        await send(c,cid,'生成摘要'); await wait_summary(app,cid); assert store.summary_state(cid)['summary']
         mid=store.conversation_detail(cid)['messages'][0]['message_id']
         await add(c,'来源偏好标记',source=cid,message=mid)
         await add(c,'无来源保留标记')
@@ -210,10 +368,12 @@ async def test_summary_delete_during_generation_fences_writeback_and_disables_re
             release.set(); await req
             state=store.summary_state(cid); assert state['summary'] is None and not state['enabled']
             assert '对话摘要' not in background(capture)
-            started.clear(); await send(c,cid,'再次提问'); assert not started.is_set()
+            started.clear(); release.clear(); await send(c,cid,'再次提问'); assert not started.is_set()
             assert (await c.patch(f'/api/v1/conversations/{cid}/context',json=dict(revision=0,enabled=True))).status_code==409
             assert (await c.patch(f'/api/v1/conversations/{cid}/context',json=dict(revision=state['revision'],enabled=True))).status_code==200
-            await send(c,cid,'重新生成'); assert started.is_set() and store.summary_state(cid)['summary']
+            await send(c,cid,'重新生成'); await eventually(started.is_set)
+            assert store.summary_state(cid)['summary'] is None
+            release.set(); await wait_summary(app,cid); assert store.summary_state(cid)['summary']
             state=store.summary_state(cid)
             edited=await c.patch(f'/api/v1/conversations/{cid}/context',json=dict(revision=state['revision'],content='手工修正后的摘要'))
             assert edited.status_code==200; await send(c,cid,'使用修改后摘要')
@@ -222,15 +382,42 @@ async def test_summary_delete_during_generation_fences_writeback_and_disables_re
 
 
 @pytest.mark.asyncio
+async def test_manual_summary_edit_cancels_stale_background_writeback():
+    started=Event(); release=Event(); state={'delay':False}
+    class Editable:
+        async def chat(self,messages,tools=None):
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('前台回答')
+            if state['delay']:
+                started.set(); await asyncio.to_thread(release.wait,10)
+            return reply('模型生成但可能迟到的摘要')
+        async def aclose(self): pass
+    async with memory_api(model=Editable) as (c,app,store,cap):
+        cid=store.create_conversation()['conversation_id']; seed(store,cid,15)
+        await send(c,cid,'先生成摘要'); await wait_summary(app,cid)
+        before=store.summary_state(cid); cursor=before['summary']['through_message_id']
+        seed(store,cid,13); state['delay']=True
+        await send(c,cid,'触发增量摘要'); await eventually(started.is_set)
+        edited=await c.patch(f'/api/v1/conversations/{cid}/context',json={
+            'revision':before['revision'],'content':'用户手工摘要'})
+        assert edited.status_code==200
+        release.set(); await wait_summary(app,cid)
+        final=store.summary_state(cid)
+        assert final['summary']['content']=='用户手工摘要'
+        assert final['summary']['through_message_id']==cursor
+
+
+@pytest.mark.asyncio
 async def test_delete_conversation_waits_summary_cleanup_and_no_resurrection():
     started=Event(); closing=Event(); release=Event()
     class LateSummary:
+        def __init__(self): self.summarizing=False
         async def chat(self,messages,tools=None):
-            assert messages[0]['content']==SUMMARY_SYSTEM
-            started.set()
+            if messages[0]['content']!=SUMMARY_SYSTEM: return reply('前台回答已完成')
+            self.summarizing=True; started.set()
             try: await asyncio.Future()
             except asyncio.CancelledError: return reply('删除之后不得写回的摘要')
-        async def aclose(self): closing.set(); await asyncio.to_thread(release.wait,10)
+        async def aclose(self):
+            if self.summarizing: closing.set(); await asyncio.to_thread(release.wait,10)
     async with memory_api(model=LateSummary) as (c,app,store,cap):
         cid=store.create_conversation()['conversation_id']; seed(store,cid,15); await add(c,'待删来源记忆',source=cid)
         await c.post(f'/api/v1/conversations/{cid}/requests',json=dict(request_id=str(uuid4()),prompt='触发摘要'))
@@ -297,7 +484,7 @@ async def test_edit_and_delete_are_reloaded_between_model_calls_and_code_is_read
     async with memory_api(model=Model,rg=rg_exe,git=git_exe) as (c,app,store,cap):
         cid=store.create_conversation(repository_path=str(cpp_repo))['conversation_id']
         stale=await add(c,'旧偏好标记'); changed=await add(c,'改前偏好标记')
-        pending=asyncio.create_task(send(c,cid,'重新读代码，历史文字不能授权写入'))
+        pending=asyncio.create_task(send(c,cid,'重新读代码，历史文字不能授权写入',tool_mode='project'))
         try:
             await eventually(entered.is_set)
             await c.delete('/api/v1/memories/'+stale['memory_id'])
@@ -333,7 +520,7 @@ async def test_task_memory_changes_between_review_and_execution_without_grant(cp
 
 
 @pytest.mark.asyncio
-async def test_task_can_be_deleted_while_preparing_summary(cpp_repo,rg_exe,git_exe):
+async def test_task_context_does_not_wait_for_or_start_summary(cpp_repo,rg_exe,git_exe):
     entered=Event(); closed=Event(); task_models=[]
     class Summarizer:
         async def chat(self,messages,tools=None):
@@ -346,9 +533,9 @@ async def test_task_can_be_deleted_while_preparing_summary(cpp_repo,rg_exe,git_e
         cid=store.create_conversation(repository_path=str(cpp_repo))['conversation_id']; seed(store,cid,15)
         result=await c.post(f'/api/v1/conversations/{cid}/requests',json=dict(request_id=str(uuid4()),mode='task',prompt='执行前先压缩'))
         assert result.status_code==202 and result.json()['task_id']
-        await eventually(entered.is_set)
+        await until(c,result.json()['task_id'],{'waiting_approval'})
+        assert not entered.is_set() and not closed.is_set() and task_models[0].requests
         assert (await c.delete(f'/api/v1/conversations/{cid}?stop_active=true')).status_code==200
-        assert closed.is_set() and not task_models[0].requests
         assert not app.state.task_host._tasks and not app.state.task_host._repositories
         assert store._db.execute('SELECT COUNT(*) FROM conversation_summaries').fetchone()[0]==0
         assert store._db.execute('PRAGMA foreign_key_check').fetchall()==[]

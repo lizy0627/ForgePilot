@@ -27,6 +27,9 @@ class Tool(ABC):
     name: str
     description: str
     arguments_model: type[BaseModel]
+    read_only = False
+    concurrent_safe = False
+    concurrency_group: object | None = None
 
     @property
     def input_schema(self) -> dict:
@@ -47,11 +50,23 @@ class Tool(ABC):
 
 class FunctionTool(Tool):
     """Adapt an async text-returning function to the registry's result format."""
-    def __init__(self, name, description, arguments_model, execute):
+    def __init__(self, name, description, arguments_model, execute, *,
+                 read_only=False, concurrent_safe=False, concurrency_group=None):
+        if (type(read_only) is not bool or type(concurrent_safe) is not bool
+                or concurrent_safe and not read_only):
+            raise ValueError("Concurrent tools must be explicitly read-only")
+        if concurrency_group is not None:
+            try:
+                hash(concurrency_group)
+            except TypeError:
+                raise ValueError("Tool concurrency group must be hashable") from None
         self.name = name
         self.description = description
         self.arguments_model = arguments_model
         self._execute = execute
+        self.read_only = read_only
+        self.concurrent_safe = concurrent_safe
+        self.concurrency_group = concurrency_group
 
     async def execute(self, arguments):
         return ToolResult(success=True, output=await self._execute(**arguments), error=None, duration_ms=0)
@@ -74,6 +89,13 @@ class ToolRegistry:
     def get_specs(self) -> list[ToolSpec]:
         return [ToolSpec(name=t.name, description=t.description, input_schema=deepcopy(t.input_schema))
                 for t in self._tools.values()]
+
+    def concurrency_policy(self, name: str) -> tuple[bool, object | None]:
+        """Return an explicit safe-parallel decision without executing a tool."""
+        tool = self.get(name)
+        if tool is None or not (tool.read_only and tool.concurrent_safe):
+            return False, None
+        return True, tool.concurrency_group
 
     async def execute(self, name: str, arguments: dict | str) -> ToolResult:
         started = perf_counter()

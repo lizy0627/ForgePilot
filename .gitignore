@@ -75,7 +75,6 @@ scripts/local-env.cmd
 !.env.example
 .cache/
 logs/
-docs/test-results/
 *.log
 *.tmp
 *.temp

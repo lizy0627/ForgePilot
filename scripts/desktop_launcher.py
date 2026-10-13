@@ -26,6 +26,7 @@ from forgepilot.build_process import ProcessJob, build_environment
 from forgepilot.security import Redactor
 from forgepilot.errors import ForgePilotError
 from forgepilot.llm import OpenAICompatibleClient
+from forgepilot.settings import resolve_models
 
 PYTHON = ROOT / 'agent.venv/Scripts/python.exe'
 LEGACY_PYTHON_ENVIRONMENT = ROOT / 'agent/.venv'
@@ -98,41 +99,76 @@ def write_json(path, value):
 
 def read_config(path):
     data = json.loads(path.read_text(encoding='utf-8-sig'))
-    if set(data) != {'base_url', 'model', 'port', 'server_args'}:
+    required = {'base_url', 'port', 'server_args'}
+    model_fields = {'model', 'chat_model', 'task_model', 'summary_model'}
+    if not isinstance(data, dict) or not required <= set(data) or not set(data) <= required | model_fields:
         raise ValueError('config_fields')
-    if not all(isinstance(data[n], str) and data[n].strip() for n in ('base_url', 'model')):
+    if not isinstance(data['base_url'], str) or not data['base_url'].strip():
         raise ValueError('model_config')
+    try:
+        models = resolve_models(model=data.get('model'), chat_model=data.get('chat_model'),
+                                task_model=data.get('task_model'), summary_model=data.get('summary_model'))
+    except ForgePilotError as exc:
+        purposes = [name for name in ('fallback', 'chat', 'task', 'summary') if name in exc.message]
+        raise ValueError('model_config_' + '_'.join(purposes or ['unknown'])) from None
     if type(data['port']) is not int or not 1 <= data['port'] <= 65535:
         raise ValueError('port_config')
     args = data['server_args']
     if not isinstance(args, list) or not all(isinstance(a, str) and '\x00' not in a for a in args):
         raise ValueError('server_args')
     # Host/port and model identity have one authoritative configuration source.
-    if any(a.split('=')[0] in {'--host', '--port', '--base-url', '--model'} for a in args):
+    reserved = {'--host', '--port', '--base-url', '--model', '--chat-model', '--task-model', '--summary-model'}
+    if any(a.split('=')[0] in reserved for a in args):
         raise ValueError('reserved_server_arg')
-    return data
+    return {**data, 'model': data.get('model'), 'chat_model': models.chat,
+            'task_model': models.task, 'summary_model': models.summary}
 
 
 async def check_model(config):
-    """One bounded request; no repository, history database or running service needed."""
+    """One bounded request per distinct model; no history database or service needed."""
     key = os.environ.get('FORGEPILOT_API_KEY', '')
     redactor = Redactor((key,))
     try:
         data = read_config(config)
         if not key:
             raise ForgePilotError('llm_config', '未配置 API Key，请运行 Configure-ForgePilot.cmd。')
-        async with OpenAICompatibleClient(data['base_url'], key, data['model'], timeout=30) as llm:
-            reply = await llm.chat([{'role': 'user', 'content': 'Reply with only OK.'}])
-            if reply.message.tool_calls or not (reply.message.content or '').strip():
-                raise ForgePilotError('llm_protocol', '模型未返回有效的文本回答，请核对模型与接口兼容性。')
+        groups = {}
+        for purpose, model in (('聊天', data['chat_model']), ('任务', data['task_model']),
+                               ('摘要', data['summary_model'])):
+            groups.setdefault(model, []).append(purpose)
+        failed = False
+        for model, purposes in groups.items():
+            label = '/'.join(purposes)
+            try:
+                async with OpenAICompatibleClient(data['base_url'], key, model, timeout=30) as llm:
+                    reply = await llm.chat([{'role': 'user', 'content': 'Reply with only OK.'}])
+                    if reply.message.tool_calls or not (reply.message.content or '').strip():
+                        raise ForgePilotError('llm_protocol', '模型未返回有效文本。')
+            except ForgePilotError as exc:
+                failed = True
+                print(f'{label}模型检查失败：' + redactor.text(str(exc)), file=sys.stderr)
+            except Exception:
+                failed = True
+                print(f'{label}模型检查失败：连接或响应无效。', file=sys.stderr)
+        if failed:
+            return 1
     except ForgePilotError as exc:
         print(redactor.text(str(exc)), file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        code = str(exc)
+        if code.startswith('model_config_'):
+            labels = [('chat','聊天'),('task','任务'),('summary','摘要'),('fallback','缺省')]
+            affected = '/'.join(label for name,label in labels if name in code) or '用途'
+            print(f'{affected}模型配置无效，请检查本机 config.json。', file=sys.stderr)
+        else:
+            print('模型连接检查未完成，请检查本机 config.json 和运行环境。', file=sys.stderr)
         return 1
     except Exception:
         # Malformed local configuration must not echo arbitrary values either.
         print('模型连接检查未完成，请检查本机 config.json 和运行环境。', file=sys.stderr)
         return 1
-    print('模型连接检查通过：当前地址、模型与 API Key 已成功返回文本回答。')
+    print('模型连接检查通过：聊天、任务和摘要用途的所有不同模型均返回了文本回答。')
     return 0
 
 
@@ -168,7 +204,13 @@ def backend(config, job, ready, log):
     event = kernel.event()
     data = read_config(config)
     os.environ['FORGEPILOT_BASE_URL'] = data['base_url']
-    os.environ['FORGEPILOT_MODEL'] = data['model']
+    if data['model']:
+        os.environ['FORGEPILOT_MODEL'] = data['model']
+    else:
+        os.environ.pop('FORGEPILOT_MODEL', None)
+    os.environ['FORGEPILOT_CHAT_MODEL'] = data['chat_model']
+    os.environ['FORGEPILOT_TASK_MODEL'] = data['task_model']
+    os.environ['FORGEPILOT_SUMMARY_MODEL'] = data['summary_model']
     with log.open('w', encoding='utf-8') as output:
         writer = RedactedLog(output, os.environ.get('FORGEPILOT_API_KEY', ''))
         previous = sys.stdout, sys.stderr

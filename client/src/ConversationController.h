@@ -15,6 +15,7 @@ class ConversationController : public QObject {
     Q_PROPERTY(QString title READ title NOTIFY changed)
     Q_PROPERTY(QString repositoryPath READ repositoryPath NOTIFY changed)
     Q_PROPERTY(QString mode READ mode WRITE setMode NOTIFY changed)
+    Q_PROPERTY(QString toolMode READ toolMode WRITE setToolMode NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY changed)
     Q_PROPERTY(QString answerStatus READ answerStatus NOTIFY changed)
@@ -50,6 +51,8 @@ public:
     QString repositoryPath() const { return m_detail.value("repository_path").toString(); }
     QString mode() const { return m_mode; }
     void setMode(const QString &mode);
+    QString toolMode() const { return m_toolMode; }
+    void setToolMode(const QString &mode);
     QString error() const { return m_error; }
     QString serverStatus() const { return m_serverStatus; }
     QString answerStatus() const { return m_answerStatus; }
@@ -145,7 +148,7 @@ private:
     QSet<QString> m_sending;
     QSet<QString> m_deleted,m_removing;
     QJsonObject m_detail;
-    QString m_id,m_mode="chat",m_error,m_cursor,m_serverStatus="disconnected",m_answerStatus;
+    QString m_id,m_mode="chat",m_toolMode="auto",m_error,m_cursor,m_serverStatus="disconnected",m_answerStatus;
     QString m_streamRequest,m_streamSegment,m_streamDraft,m_streamBuffer,m_streamKey,m_streamSuppressedRequest;
     QVariantMap m_streamToolActivity;
     QString m_deleteTarget,m_deleteTitle,m_deleteError;

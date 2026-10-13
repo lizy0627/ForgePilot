@@ -170,7 +170,9 @@ async def run(args):
     output = Path(args.output_root).resolve() / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"-"+uuid4().hex[:8])
     output.mkdir(parents=True, exist_ok=False)
     evidence = {"mode": "fixture preparation and local checks; not real LLM MVP acceptance", "started_at": datetime.now(timezone.utc).isoformat(),
-        "output": str(output), "fixture_hashes": inventory(FIXTURE), "model_configured": all(os.environ.get(k) for k in ("FORGEPILOT_API_KEY", "FORGEPILOT_BASE_URL", "FORGEPILOT_MODEL"))}
+        "output": str(output), "fixture_hashes": inventory(FIXTURE), "model_configured": bool(
+            os.environ.get("FORGEPILOT_API_KEY") and os.environ.get("FORGEPILOT_BASE_URL") and
+            (os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ.get("FORGEPILOT_MODEL")))}
     try:
         repo = await copy_demo(args)
         evidence.update(repository=str(repo), demo_executable=str(repo/".forgepilot/build/ButtonStatusDemo.exe"))

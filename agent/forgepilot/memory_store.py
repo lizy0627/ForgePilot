@@ -116,20 +116,20 @@ class MemoryStore:
                 if len(json.dumps(base,ensure_ascii=False))>SUMMARY_INPUT_CHARS:
                     chosen.pop(); break
             if not chosen: return None
-            return dict(conversation_id=cid,revision=state['revision'],previous=after,
-                        through=chosen[-1]['message_id'],input=base)
+            return dict(conversation_id=cid,revision=state['revision'],
+                        previous_through_message_id=after,
+                        through_message_id=chosen[-1]['message_id'],input=base)
 
-    def commit_summary(self,plan,content,rid):
+    def commit_summary(self,plan,content):
         value=checked_text(content,self.redactor,SUMMARY_LENGTH)
         with self._transaction():
             c=self._db.execute('SELECT * FROM conversations WHERE conversation_id=?',(plan['conversation_id'],)).fetchone()
             if not c or not c['summary_enabled'] or c['summary_revision']!=plan['revision']: return False
-            if not self._db.execute("SELECT 1 FROM conversation_requests WHERE request_id=? AND conversation_id=? AND status='running'",(rid,plan['conversation_id'])).fetchone(): return False
             current=self._db.execute('SELECT through_message_id FROM conversation_summaries WHERE conversation_id=?',(plan['conversation_id'],)).fetchone()
-            if (current[0] if current else 0)!=plan['previous']: return False
+            if (current[0] if current else 0)!=plan['previous_through_message_id']: return False
             # Coverage is server-owned; callers cannot move the message cursor via the API.
             self._db.execute('INSERT INTO conversation_summaries VALUES(?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET content=excluded.content,through_message_id=excluded.through_message_id,project_key=excluded.project_key,updated_at=excluded.updated_at',
-                (plan['conversation_id'],value,plan['through'],project_identity(c['repository_path']),stamp()))
+                (plan['conversation_id'],value,plan['through_message_id'],project_identity(c['repository_path']),stamp()))
             self._db.execute('UPDATE conversations SET summary_revision=summary_revision+1 WHERE conversation_id=?',(plan['conversation_id'],))
             return True
 

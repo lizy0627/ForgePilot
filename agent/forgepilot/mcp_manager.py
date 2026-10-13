@@ -1,6 +1,7 @@
 """Request-owned selected tools, lazy sessions and a budget surviving Plan review."""
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 import logging
 from time import monotonic, perf_counter
 
@@ -29,6 +30,13 @@ Only use supplied tools. Never claim a search happened without a successful call
 state that limitation; do not fabricate results or URLs. Cite actual returned sources when using them."""
 
 
+@dataclass(frozen=True, slots=True)
+class CallReservation:
+    name: str
+    budgeted: bool
+    sequence: int | None
+
+
 class _Session:
     def __init__(self, snapshot, factory, redactor):
         self.snapshot, self.factory, self.redactor = snapshot, factory, redactor
@@ -37,6 +45,7 @@ class _Session:
         self.recovery_pending = False
         self.reconnects = 0
         self.retry_not_before = 0.0
+        self._call_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def _phase(self, phase, budget, deadline):
@@ -69,6 +78,12 @@ class _Session:
                 fields["server_id"], phase, fields["duration_ms"], self.reconnects, code, extra=fields)
 
     async def call_tool(self, name, arguments):
+        # Session initialization, recovery and close mutate shared state. Keep a
+        # single server/session serial even when a chat batch spans other servers.
+        async with self._call_lock:
+            return await self._call_tool(name, arguments)
+
+    async def _call_tool(self, name, arguments):
         deadline = monotonic() + CALL_TIMEOUT
         if self.fatal_failure:
             raise ForgePilotError(self.fatal_failure, "This MCP server is unavailable for this request")
@@ -165,16 +180,33 @@ class MCPManager:
         snapshot, remote = self.selected[name]
         return {"server_id": snapshot.server_id, "server_name": snapshot.config.name, "tool_name": remote}
 
-    async def execute(self, registry, name, arguments, call_id):
-        if name not in self.budget_tools:
+    def reserve_calls(self, names) -> list[CallReservation]:
+        """Atomically reserve the request-wide MCP budget in model call order."""
+        reservations = []
+        for name in names:
+            budgeted = name in self.budget_tools
+            if not budgeted:
+                reservations.append(CallReservation(name, False, None))
+            elif self.calls >= MAX_CALLS:
+                reservations.append(CallReservation(name, True, None))
+            else:
+                self.calls += 1
+                reservations.append(CallReservation(name, True, self.calls))
+        return reservations
+
+    async def execute(self, registry, name, arguments, call_id, reservation=None):
+        if reservation is None:
+            reservation = self.reserve_calls((name,))[0]
+        if not isinstance(reservation, CallReservation) or reservation.name != name:
+            raise ForgePilotError("mcp_state", "Invalid MCP call reservation")
+        if not reservation.budgeted:
             return await registry.execute(name, arguments)
-        if self.calls >= MAX_CALLS:
+        if reservation.sequence is None:
             return ToolResult(success=False, output="", error="mcp_budget: Request reached its 8 MCP calls limit", duration_ms=0)
-        self.calls += 1
         if name not in self.selected:
             return await registry.execute(name, arguments)  # Legacy callers retain their existing Trace.
         started = perf_counter()
-        record = {"sequence": self.calls, "tool_call_id": call_id, **self.metadata(name), "status": "running",
+        record = {"sequence": reservation.sequence, "tool_call_id": call_id, **self.metadata(name), "status": "running",
                   "arguments_excerpt": plain_excerpt(self.redactor.data(arguments), 1024),
                   "result_excerpt": "", "duration_ms": 0, "error_code": None, "sources": []}
         self._emit(record)

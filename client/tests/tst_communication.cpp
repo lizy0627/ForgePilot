@@ -834,12 +834,15 @@ private slots:
         };
         TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QCOMPARE(c.mode(),"chat");
+        QCOMPARE(c.toolMode(),QString("auto")); c.setToolMode("invalid"); QCOMPARE(c.toolMode(),QString("auto"));
+        c.setToolMode("web"); QCOMPARE(c.toolMode(),QString("web"));
         c.sendMessage("原问题"); c.sendMessage("不能重复发送");
         QTRY_COMPARE(posts.size(),1); QTRY_VERIFY(!c.busy()); QVERIFY(c.retryPending());
         c.sendMessage("不能替换原请求"); QCOMPARE(posts.size(),1);
         c.retrySend(); QTRY_COMPARE(posts.size(),2); QCOMPARE(posts[0].body,posts[1].body);
         QVERIFY(Protocol::validTaskId(posts[0].body.value("request_id").toString()));
         QCOMPARE(posts[0].body.value("mode").toString(),"chat");
+        QCOMPARE(posts[0].body.value("tool_mode").toString(),"web");
         accepted=true;
         Source::json(posts[1],{{"request_id",posts[1].body.value("request_id")},{"status","completed"}});
         QTRY_VERIFY(!c.retryPending()); QTRY_VERIFY(!c.loading()); QVERIFY(!c.active()); QVERIFY(tasks.taskId().isEmpty());

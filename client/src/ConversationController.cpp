@@ -93,6 +93,13 @@ void ConversationController::request(const QByteArray &method,const QString &pat
 }
 void ConversationController::setMode(const QString &mode)
 { if((mode=="chat" || mode=="task") && !busy() && !retryPending()) { m_mode=mode; emit changed(); } }
+void ConversationController::setToolMode(const QString &mode)
+{
+    static const QSet<QString> allowed{"fast","web","project","auto"};
+    if(allowed.contains(mode) && !busy() && !active() && !retryPending()) {
+        m_toolMode=mode; emit changed();
+    }
+}
 void ConversationController::refreshHistory(bool more)
 {
     if(m_historyLoading || (more && m_cursor.isEmpty())) return;
@@ -482,7 +489,10 @@ void ConversationController::sendMessage(const QString &prompt)
     if(m_mode=="task" && repositoryPath().isEmpty()) { m_error="执行任务前必须关联项目。"; emit changed(); return; }
     if(m_id.isEmpty()) { create(prompt); return; }
     stopAnswerStream(true);
-    m_pending.insert(pendingKey(),{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"mode",m_mode},{"prompt",prompt}});
+    QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {"mode",m_mode},{"prompt",prompt}};
+    if(m_mode=="chat") pending["tool_mode"]=m_toolMode;
+    m_pending.insert(pendingKey(),pending);
     postPending();
 }
 void ConversationController::retrySend() { if(!busy() && retryPending()) postPending(); }
