@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -102,6 +104,15 @@ class RagRuntimeSettings(BaseModel):
         return _checked_api_key(value)
 
 
+@dataclass(frozen=True, slots=True)
+class RagRuntimeAvailability:
+    """Non-throwing startup view for this disabled-by-default subsystem."""
+
+    status: Literal["available", "unavailable"]
+    settings: RagRuntimeSettings | None = None
+    reason: Literal["disabled", "not_configured", "invalid_configuration"] | None = None
+
+
 def protect_embedding_api_key(value: str) -> bytes:
     try:
         return protect_secrets({EMBEDDING_SECRET_NAME: _checked_api_key(value)})
@@ -150,6 +161,20 @@ def rag_runtime_from_args(args, *, api_key: str | None = None) -> RagRuntimeSett
     if not secret:
         raise ForgePilotError("rag_secret_unavailable", "Embedding API key is not configured")
     return RagRuntimeSettings(config=config, embedding_api_key=secret)
+
+
+def rag_runtime_availability_from_args(args, *, api_key: str | None = None) -> RagRuntimeAvailability:
+    """Return an inert unavailable state instead of breaking the established Agent startup."""
+    if not args.rag_enabled:
+        return RagRuntimeAvailability("unavailable", reason="disabled")
+    if not args.embedding_model or not args.embedding_base_url:
+        return RagRuntimeAvailability("unavailable", reason="not_configured")
+    try:
+        settings = rag_runtime_from_args(args, api_key=api_key)
+    except ForgePilotError as exc:
+        reason = "not_configured" if exc.code == "rag_secret_unavailable" else "invalid_configuration"
+        return RagRuntimeAvailability("unavailable", reason=reason)
+    return RagRuntimeAvailability("available", settings=settings)
 
 
 def add_rag_arguments(parser):

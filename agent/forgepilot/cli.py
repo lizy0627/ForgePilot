@@ -21,7 +21,7 @@ from .recording import TaskJournal
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments, mcp_from_args
 from .settings import task_model_from_args
-from .rag import add_rag_arguments, rag_runtime_from_args
+from .rag import add_rag_arguments, rag_runtime_availability_from_args
 
 
 class SafeArgumentParser(argparse.ArgumentParser):
@@ -130,7 +130,7 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
         if not args.base_url or not key:
             raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
         task_model = task_model_from_args(args)
-        rag_runtime_from_args(args, api_key=key)
+        rag_runtime_availability_from_args(args, api_key=key)
         rg = executable(args.rg, "rg")
         git = executable(args.git, "git")
         build_config = None
