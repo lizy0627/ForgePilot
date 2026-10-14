@@ -1512,7 +1512,7 @@ def version_one_database(path):
     value=task(); value.update(state='completed',final_result='旧任务结果',finished_at=value['updated_at'])
     store.create(value['task_id'],value); store.publish(value['task_id'],value,[],closed=True); store.close()
     with sqlite3.connect(path) as db:
-        for table in ['mcp_migrations','mcp_servers','memories','conversation_summaries','conversation_messages','conversation_requests','conversations']: db.execute('DROP TABLE '+table)
+        for table in ['rag_files','mcp_migrations','mcp_servers','memories','conversation_summaries','conversation_messages','conversation_requests','conversations']: db.execute('DROP TABLE '+table)
         db.execute('PRAGMA user_version=1')
     return value['task_id']
 

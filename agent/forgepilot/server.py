@@ -21,6 +21,7 @@ from .chat_service import ChatService
 from .stream_metrics import close_metrics_logging, configure_metrics_logging
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments
+from .rag import add_rag_arguments, rag_runtime_from_args
 
 
 def parser():
@@ -32,6 +33,7 @@ def parser():
     add_storage_arguments(result)
     add_code_intelligence_arguments(result)
     add_mcp_arguments(result)
+    add_rag_arguments(result)
     return result
 
 
@@ -65,6 +67,9 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
         if not args.base_url or not key:
             raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
         models = models_from_args(args)
+        # Foundation only: validate the disabled-by-default settings and keep any
+        # credential runtime-only. Indexing/retrieval is intentionally not wired yet.
+        rag_runtime_from_args(args, api_key=key)
         model_clients = OpenAIClientPool(args.base_url, key, timeout=args.timeout)
         if not 1 <= args.port <= 65535:
             raise ForgePilotError("server_config", "Port must be between 1 and 65535")

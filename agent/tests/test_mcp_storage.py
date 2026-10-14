@@ -42,6 +42,7 @@ def version_three(path):
     cid = store.create_conversation(title="历史不应丢失")["conversation_id"]
     store.close()
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE rag_files")
         db.execute("DROP TABLE mcp_servers")
         db.execute("DROP TABLE mcp_migrations")
         db.execute("ALTER TABLE conversation_requests DROP COLUMN mcp_calls_json")
@@ -62,7 +63,7 @@ def test_v3_migration_backup_preserves_all_old_tables_and_only_runs_once(tmp_pat
     cid, old = version_three(path)
     store = SqliteEventStore(path)
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert_old_data(store._db, old)
         assert store.conversation_detail(cid)["title"] == "历史不应丢失"
         assert MCPService(store).list_servers() == {"items": []}
@@ -100,7 +101,7 @@ def test_v3_migration_failure_rolls_back_partial_ddl_and_version(tmp_path, monke
     monkeypatch.setattr(sqlite_store, "create_mcp_schema", real_create)
     store = SqliteEventStore(path)
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert_old_data(store._db, old)
     finally:
         store.close()

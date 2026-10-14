@@ -382,8 +382,8 @@ def test_initialize_reopen_three_tables_and_version(tmp_path):
     path=tmp_path/"history.sqlite3"
     for _ in range(2):
         store=SqliteEventStore(path)
-        assert store._db.execute("PRAGMA user_version").fetchone()[0]==5
-        assert {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}=={"tasks","task_events","tool_calls","conversations","conversation_requests","conversation_messages","conversation_summaries","memories","mcp_servers","mcp_migrations"}
+        assert store._db.execute("PRAGMA user_version").fetchone()[0]==6
+        assert {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}=={"tasks","task_events","tool_calls","conversations","conversation_requests","conversation_messages","conversation_summaries","memories","mcp_servers","mcp_migrations","rag_files"}
         assert store._db.execute("PRAGMA foreign_keys").fetchone()[0]==1
         store.close()
     with sqlite3.connect(path) as db: db.execute("PRAGMA user_version=99")
