@@ -40,11 +40,11 @@ def checked_hash(value: str) -> str:
 
 
 def make_chunk_id(*, repository_id: str, path: str, start_line: int, end_line: int,
-                  symbol: str | None, content: str) -> str:
+                  symbol: str | None, content: str, file_hash: str) -> str:
     """Hash an unambiguous canonical tuple; source content itself is never logged."""
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     payload = json.dumps(
-        [repository_id, path, start_line, end_line, symbol, content_hash],
+        [repository_id, path, start_line, end_line, symbol, file_hash, content_hash],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -103,6 +103,7 @@ class CodeChunk(_RagModel):
             end_line=self.end_line,
             symbol=self.symbol,
             content=self.content,
+            file_hash=self.file_hash,
         )
         if self.chunk_id and self.chunk_id != expected:
             raise ValueError("chunk_id does not match the chunk identity")
@@ -174,16 +175,84 @@ class RetrievedChunk(_RagModel):
         return value
 
 
+class RetrievalScoreTrace(_RagModel):
+    """One deterministic contribution to a result's final score."""
+
+    source: str = Field(min_length=1, max_length=64)
+    rank: int | None = Field(default=None, ge=1, le=10_000)
+    weight: float = Field(ge=0.0, le=1.0)
+    rrf: float | None = Field(default=None, ge=0.0)
+    contribution: float = Field(ge=0.0)
+
+    @field_validator("source")
+    @classmethod
+    def source_name(cls, value):
+        return _checked_text(value, name="source", maximum=64)
+
+    @field_validator("weight", "rrf", "contribution")
+    @classmethod
+    def finite_value(cls, value):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("score trace values must be finite")
+        return value
+
+
+class RetrievalSourceTrace(_RagModel):
+    source: Literal["literal", "vector", "clangd"]
+    status: Literal["available", "unavailable", "failed", "not_applicable"]
+    candidate_count: int = Field(default=0, ge=0, le=10_000)
+    reason: str | None = Field(default=None, max_length=128)
+
+    @field_validator("reason")
+    @classmethod
+    def bounded_reason(cls, value):
+        if value is not None:
+            return _checked_text(value, name="reason", maximum=128)
+        return value
+
+
+class RetrievalTrace(_RagModel):
+    """Content-free query diagnostics safe for status events and logs."""
+
+    mode: Literal["lexical", "vector", "hybrid"]
+    status: Literal["ready", "degraded"]
+    sources: tuple[RetrievalSourceTrace, ...] = Field(min_length=3, max_length=3)
+    events: tuple[str, ...] = Field(default=(), max_length=32)
+    stale_chunk_filtered: int = Field(default=0, ge=0, le=10_000)
+    incremental_update_triggered: int = Field(default=0, ge=0, le=10_000)
+    result_count: int = Field(default=0, ge=0, le=100)
+    context_chars: int = Field(default=0, ge=0, le=1_000_000)
+
+    @field_validator("events")
+    @classmethod
+    def bounded_events(cls, values):
+        if any(not value or len(value) > 128 or value != value.strip() or "\0" in value
+               for value in values):
+            raise ValueError("trace events must be bounded nonblank text")
+        if len(set(values)) != len(values):
+            raise ValueError("trace events must be unique")
+        return values
+
+
 class RetrievalResult(_RagModel):
     """Ranked repository evidence; ``content`` is always untrusted source data."""
 
+    repository_id: str | None = None
     path: str
     line: int = Field(ge=1, le=2**31 - 1)
     end_line: int = Field(ge=1, le=2**31 - 1)
     symbol: str | None = Field(default=None, max_length=512)
     score: float
     reasons: tuple[str, ...] = Field(min_length=1, max_length=32)
+    file_hash: str | None = None
+    sources: tuple[str, ...] = Field(default=(), max_length=8)
+    score_trace: tuple[RetrievalScoreTrace, ...] = Field(default=(), max_length=16)
     content: str = Field(min_length=1, max_length=1_048_576, repr=False)
+
+    @field_validator("repository_id")
+    @classmethod
+    def optional_repository_identity(cls, value):
+        return checked_repository_id(value) if value is not None else value
 
     @field_validator("path")
     @classmethod
@@ -196,6 +265,21 @@ class RetrievalResult(_RagModel):
         if value is not None:
             return _checked_text(value, name="symbol", maximum=512)
         return value
+
+    @field_validator("file_hash")
+    @classmethod
+    def optional_source_hash(cls, value):
+        return checked_hash(value) if value is not None else value
+
+    @field_validator("sources")
+    @classmethod
+    def bounded_sources(cls, values):
+        if any(not value or len(value) > 64 or value != value.strip() or "\0" in value
+               for value in values):
+            raise ValueError("sources must be bounded nonblank text")
+        if len(set(values)) != len(values):
+            raise ValueError("sources must be unique")
+        return values
 
     @field_validator("score")
     @classmethod

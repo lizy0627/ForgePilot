@@ -67,13 +67,16 @@ def _bounded_payload(payload: dict) -> str:
             raise ValueError("Retrieval metadata exceeds the tool output limit")
 
 
-def _structured_output(results) -> str:
-    return _bounded_payload({
+def _structured_output(results, trace=None) -> str:
+    payload = {
         "results": [result.model_dump() for result in results],
         "count": len(results),
         "content_is_untrusted": True,
         "usage": "Location evidence only; read_file is required before modifying existing files.",
-    })
+    }
+    if trace is not None:
+        payload["trace"] = trace.model_dump()
+    return _bounded_payload(payload)
 
 
 class RetrievalTool(FunctionTool):
@@ -87,6 +90,12 @@ class RetrievalTool(FunctionTool):
                 if item[key] is not None:
                     item[key] = redactor.text(item[key])
             item["reasons"] = [redactor.text(reason) for reason in item["reasons"]]
+        trace = payload.get("trace")
+        if isinstance(trace, dict):
+            trace["events"] = [redactor.text(value) for value in trace.get("events", [])]
+            for source in trace.get("sources", []):
+                if source.get("reason") is not None:
+                    source["reason"] = redactor.text(source["reason"])
         return _bounded_payload(payload)
 
 
@@ -104,7 +113,7 @@ def register_retrieval_tool(registry, retrieval, *, planned_files=lambda: ()):
             path_filters=tuple(path_filters),
             languages=tuple(languages),
         )
-        return _structured_output(results)
+        return _structured_output(results, getattr(retrieval, "last_trace", None))
 
     registry.register(RetrievalTool(
         "retrieve_code_context",

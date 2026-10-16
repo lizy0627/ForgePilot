@@ -44,13 +44,16 @@ class LspClient:
         except OSError:
             raise ForgePilotError("clangd_unavailable", "Cannot start clangd") from None
         self.stderr_reader = asyncio.create_task(self._stderr())
+        # Process creation through the isolated worker can exceed an intentionally
+        # tiny per-request timeout on loaded Windows hosts.  Keep protocol
+        # requests strict while giving startup a small, bounded floor.
         response = await self.request("initialize", {
             "processId": os.getpid(), "rootUri": self.root.as_uri(),
             "clientInfo": {"name": "ForgePilot", "version": "1"},
             "capabilities": {"general": {"positionEncodings": ["utf-16"]},
                 "textDocument": {"definition": {"linkSupport": True},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}},
-            "trace": "off"})
+            "trace": "off"}, timeout=max(self.request_timeout, 2.0))
         capabilities = response.get("capabilities", {}) if isinstance(response, dict) else {}
         if not isinstance(capabilities, dict):
             raise ForgePilotError("clangd_protocol", "Invalid initialize capabilities")

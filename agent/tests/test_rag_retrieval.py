@@ -52,6 +52,16 @@ class FakeIntelligence:
         return json.dumps({"source": "clangd", "locations": rows})
 
 
+class FallbackIntelligence:
+    async def query(self, operation, **arguments):
+        return json.dumps({
+            "source": "rg", "semantic": False,
+            "fallback_reason": "clangd_unavailable",
+            "locations": [],
+            "text_matches": [{"path": arguments["path"], "line": arguments["line"]}],
+        })
+
+
 def config(*, top_k=8, max_chars=24_000):
     return RagConfig(
         enabled=True,
@@ -121,7 +131,9 @@ async def test_rrf_ranking_is_deterministic_and_uses_full_query(tmp_path):
     first = await subject.retrieve(task)
     second = await subject.retrieve(task)
 
-    assert [item.path for item in first] == ["alpha.py", "beta.py"]
+    # The documented 0.40 vector weight is intentionally greater than the
+    # 0.35 literal weight, so the vector rank-one result wins this symmetric case.
+    assert [item.path for item in first] == ["beta.py", "alpha.py"]
     assert [(item.path, item.score, item.reasons) for item in first] == [
         (item.path, item.score, item.reasons) for item in second]
     assert embeddings.queries == [task, task]
@@ -197,6 +209,112 @@ async def test_stale_vector_chunk_is_rejected(tmp_path):
     found = await subject.retrieve("semantic request")
 
     assert [item.path for item in found] == ["fresh.py"]
+
+
+@pytest.mark.asyncio
+async def test_stale_vector_records_trace_and_triggers_one_incremental_refresh(tmp_path):
+    (tmp_path / "stale.py").write_text("current = True\n", encoding="utf-8")
+    stale = chunk(tmp_path, "repository-a", "stale.py", file_hash="0" * 64)
+    refreshed = []
+
+    def refresh(path):
+        refreshed.append(path)
+        return True
+
+    subject = RetrievalService(
+        "repository-a", repository(tmp_path), config(), QueryEmbeddings(),
+        MemorySearchVectors({"repository-a": [result(stale, 0.99, 1)]}),
+        stale_handler=refresh)
+
+    found = await subject.retrieve("semantic request")
+
+    assert found == [] and refreshed == ["stale.py"]
+    assert subject.last_trace.status == "degraded"
+    assert subject.last_trace.stale_chunk_filtered == 1
+    assert subject.last_trace.incremental_update_triggered == 1
+    assert {"stale_chunk_filtered", "incremental_update_triggered"} <= set(
+        subject.last_trace.events)
+
+
+@pytest.mark.asyncio
+async def test_results_retain_repository_hash_sources_and_weighted_score_trace(tmp_path):
+    (tmp_path / "target.py").write_text("needle_value = 1\n", encoding="utf-8")
+    value = chunk(tmp_path, "repository-a", "target.py")
+    subject = RetrievalService(
+        "repository-a", repository(tmp_path), config(), QueryEmbeddings(),
+        MemorySearchVectors({"repository-a": [result(value, 0.9, 1)]}))
+
+    found = await subject.retrieve("Find needle_value")
+
+    item = found[0]
+    assert item.repository_id == "repository-a"
+    assert item.file_hash == value.file_hash
+    assert item.sources == ("literal", "vector")
+    traces = {entry.source: entry for entry in item.score_trace}
+    assert traces["literal"].weight == 0.35
+    assert traces["vector"].weight == 0.40
+    assert traces["literal"].contribution == pytest.approx(0.35 / 61)
+    assert traces["vector"].contribution == pytest.approx(0.40 / 61)
+    assert item.score == pytest.approx(sum(entry.contribution for entry in item.score_trace))
+
+
+@pytest.mark.asyncio
+async def test_same_file_limit_and_configured_path_scope_apply_before_packing(tmp_path):
+    rows = [f"line_{index}" for index in range(1, 13)]
+    (tmp_path / "many.py").write_text("\n".join(rows), encoding="utf-8")
+    (tmp_path / "protected.py").write_text("protected_symbol = 1\n", encoding="utf-8")
+    values = [
+        result(chunk(tmp_path, "repository-a", "many.py", start=line, end=line),
+               1.0 - line / 100, rank)
+        for rank, line in enumerate((1, 3, 5, 7), 1)
+    ]
+    values.append(result(chunk(tmp_path, "repository-a", "protected.py"), 0.99, 5))
+    scoped = RagConfig(
+        enabled=True, embedding_model="fixture",
+        embedding_base_url="https://provider.invalid/v1",
+        exclude=("protected.py",), retrieval_top_k=8,
+        retrieval_max_chunks_per_file=2, context_max_chars=24_000)
+    subject = RetrievalService(
+        "repository-a", repository(tmp_path), scoped, QueryEmbeddings(),
+        MemorySearchVectors({"repository-a": values}))
+
+    found = await subject.retrieve("semantic request")
+
+    assert [item.path for item in found] == ["many.py", "many.py"]
+    assert sum(len(item.content) for item in found) <= 24_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "embeddings,vectors,intelligence,expected_event,expected_sources",
+    [
+        (None, MemorySearchVectors(), FakeIntelligence(
+            definitions=[{"path": "main.cpp", "line": 1, "end_line": 1}]),
+         "embedding_unavailable", {"literal", "clangd"}),
+        (QueryEmbeddings(), None, FakeIntelligence(
+            definitions=[{"path": "main.cpp", "line": 1, "end_line": 1}]),
+         "qdrant_unavailable", {"literal", "clangd"}),
+        (QueryEmbeddings(), MemorySearchVectors(), FallbackIntelligence(),
+         "clangd_unavailable", {"literal"}),
+        (None, None, None, "literal_only", {"literal"}),
+    ],
+    ids=("no-embedding", "no-qdrant", "no-clangd", "literal-only"),
+)
+async def test_optional_component_degradation_is_explicit_and_non_blocking(
+        tmp_path, embeddings, vectors, intelligence, expected_event, expected_sources):
+    (tmp_path / "main.cpp").write_text(
+        "int target_symbol() { return 1; }\n", encoding="utf-8")
+    subject = RetrievalService(
+        "repository-a", repository(tmp_path),
+        RagConfig(enabled=True), embeddings, vectors,
+        code_intelligence=intelligence)
+
+    found = await subject.retrieve("Fix target_symbol()")
+
+    assert found and found[0].path == "main.cpp"
+    assert set(found[0].sources) == expected_sources
+    assert subject.last_trace.status == "degraded"
+    assert expected_event in subject.last_trace.events
 
 
 @pytest.mark.asyncio

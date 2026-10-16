@@ -98,7 +98,7 @@ def error(response, status, code):
 async def test_real_http_crud_reopen_and_safe_contract(peers, tmp_path, auth, sse):
     peer = await peers(auth=auth, sse=sse)
     with serving(tmp_path) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url, timeout=10) as client:
+        async with httpx.AsyncClient(base_url=url, timeout=10, trust_env=False) as client:
             presets = (await client.get(PREFIX + "/presets")).json()["items"]
             assert len(presets) == 1 and presets[0]["real_service_verified"] is False
             empty = (await client.get(PREFIX + "/servers")).json()
@@ -133,7 +133,7 @@ async def test_real_http_crud_reopen_and_safe_contract(peers, tmp_path, auth, ss
             error(retried, 409, "mcp_config_conflict")
             assert len(peer.records) == count
     with serving(tmp_path) as (url, _, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             assert (await client.get(endpoint)).json() == enabled.json()
             error(await client.delete(endpoint + "?revision=3"), 409, "mcp_config_conflict")
             deleted = await client.delete(endpoint + "?revision=4")
@@ -149,7 +149,7 @@ async def test_real_http_key_replacement_clear_and_failed_save_keep_old_values(p
     caplog.set_level(logging.DEBUG)
     peer = await peers(auth="bearer")
     with serving(tmp_path) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             record = await saved(client, peer)
             endpoint = PREFIX + "/servers/" + record["server_id"]
             old = app.state.task_host.mcp_service.store.get(record["server_id"])
@@ -180,7 +180,7 @@ async def test_real_http_key_replacement_clear_and_failed_save_keep_old_values(p
 async def test_api_cannot_forward_old_key_to_new_endpoint(peers, tmp_path):
     a, b = await peers(auth="bearer"), await peers(auth="bearer")
     with serving(tmp_path) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             record = await saved(client, a)
             sid = record["server_id"]
             before = app.state.task_host.mcp_service.store.get(sid)
@@ -198,7 +198,7 @@ async def test_api_cannot_forward_old_key_to_new_endpoint(peers, tmp_path):
 async def test_real_http_errors_no_candidate_persistence_or_key_echo(peers, tmp_path, mode, status, code):
     peer = await peers(mode=mode, auth="bearer")
     with serving(tmp_path, configure=lambda app: setattr(app.state.task_host.mcp_service, "probe_timeout", 0.5)) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             response = await client.post(PREFIX + "/probe", json={**candidate(peer), "secret_updates": {"api_key": SECRET}})
             error(response, status, code)
             assert (await client.get(PREFIX + "/servers")).json()["items"] == []
@@ -215,7 +215,7 @@ async def test_real_http_errors_no_candidate_persistence_or_key_echo(peers, tmp_
 async def test_real_http_input_security_and_json_request_limit(peers, tmp_path):
     peer = await peers()
     with serving(tmp_path) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             path = PREFIX + "/probe"
             body = candidate(peer)
             error(await client.post(path, json=body, headers={"Origin": "https://evil.invalid"}), 403, "origin_not_allowed")
@@ -244,7 +244,7 @@ async def test_real_http_stdio_arrays_environment_and_missing_executable(tmp_pat
         "connection": {"command": sys.executable, "args": ["-I", "-u", str(PEER), "generic", str(log)],
                        "env_names": ["MCP_TEST_TOKEN"]}}
     with serving(tmp_path) as (url, app, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             probe = await client.post(PREFIX + "/probe", json={**config, "secret_updates": {"env:MCP_TEST_TOKEN": SECRET}})
             assert probe.status_code == 200, probe.text
             assert probe.json()["connection"]["cwd"] == str(Path(sys.executable).parent)
@@ -282,7 +282,7 @@ async def test_real_http_incompatible_tool_metadata_remains_displayable(peers, t
                    {**template, "name": "sensitive", "inputSchema": {"type": "object", "description": SECRET}}]
     peer.tools[0]["description"] += " " + SECRET + " " + MODEL_SECRET
     with serving(tmp_path) as (url, _, store):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             config = {**candidate(peer), "secret_updates": {"api_key": SECRET}}
             probe = await client.post(PREFIX + "/probe", json=config)
             assert probe.status_code == 200, probe.text
@@ -304,7 +304,7 @@ async def test_real_http_incompatible_tool_metadata_remains_displayable(peers, t
 async def test_real_http_response_limit_failure_preserves_old_save(peers, tmp_path, monkeypatch):
     peer = await peers()
     with serving(tmp_path) as (url, app, _):
-        async with httpx.AsyncClient(base_url=url) as client:
+        async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
             record = await saved(client, peer)
             endpoint = PREFIX + "/servers/" + record["server_id"]
             before = app.state.task_host.mcp_service.store.get(record["server_id"])

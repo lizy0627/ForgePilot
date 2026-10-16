@@ -54,6 +54,7 @@ def test_chunk_id_is_stable_and_changes_with_content():
     first = chunk()
     assert chunk().chunk_id == first.chunk_id
     assert chunk(content=first.content + "# changed\n").chunk_id != first.chunk_id
+    assert chunk(file_hash="1" * 64).chunk_id != first.chunk_id
     with pytest.raises(ValidationError, match="chunk_id"):
         chunk(chunk_id="0" * 64)
     assert first.model_dump()["chunk_id"] == first.chunk_id
@@ -66,8 +67,10 @@ def test_rag_config_is_disabled_and_credentials_use_secret_boundary(monkeypatch)
     assert "api_key" not in config.model_dump_json()
     with pytest.raises(ValidationError, match="extra_forbidden"):
         RagConfig(api_key="must-not-be-plain-config")
-    with pytest.raises(ValidationError):
-        RagConfig(enabled=True)
+    literal_only = RagConfig(enabled=True)
+    assert literal_only.enabled and literal_only.embedding_model is None
+    assert (literal_only.literal_weight, literal_only.vector_weight,
+            literal_only.clangd_weight) == (0.35, 0.40, 0.25)
 
     protected = []
     monkeypatch.setattr(rag_config_module, "protect_secrets",

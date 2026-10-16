@@ -10,14 +10,16 @@ from .indexer import RepositoryIndexer
 from .integration import RagManager, RagRepositoryServices, repository_id_for
 from .admin import RagIndexCoordinator
 from .models import (CodeChunk, IndexFileState, IndexProgress, RetrievalQuery, RetrievedChunk,
-                     RetrievalResult, RagIndexStatus, make_chunk_id)
+                     RetrievalResult, RetrievalScoreTrace, RetrievalSourceTrace,
+                     RetrievalTrace, RagIndexStatus, make_chunk_id)
 from .retrieval import QueryBuilder, QueryTerms, RetrievalService
 from .store import RagFileStore, RagRunStore, create_rag_schema, create_rag_run_schema
 from .vector_store import QdrantVectorStore, VectorStore, vector_store_path
 
 __all__ = (
     "CodeChunk", "IndexFileState", "IndexProgress", "RetrievalQuery", "RetrievedChunk",
-    "RetrievalResult", "RagIndexStatus", "RepositoryIndexer", "RetrievalService",
+    "RetrievalResult", "RetrievalScoreTrace", "RetrievalSourceTrace", "RetrievalTrace",
+    "RagIndexStatus", "RepositoryIndexer", "RetrievalService",
     "RagManager", "RagRepositoryServices", "RagIndexCoordinator", "repository_id_for",
     "QueryBuilder", "QueryTerms",
     "RagConfig", "RagRuntimeAvailability", "RagRuntimeSettings", "RagFileStore",

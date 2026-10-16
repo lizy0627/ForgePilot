@@ -94,7 +94,17 @@ class Kernel:
 def write_json(path, value):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding='utf-8')
-    temporary.replace(path)
+    # Windows readers briefly hold a non-share-delete handle.  Runtime status
+    # updates must survive that harmless race rather than aborting the owner.
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def read_config(path):

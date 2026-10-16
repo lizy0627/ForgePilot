@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from forgepilot.errors import ForgePilotError
 from forgepilot.rag import RagConfig, RagFileStore, RepositoryIndexer
 from forgepilot.repository import Repository
 from forgepilot.sqlite_store import SqliteEventStore
@@ -331,5 +332,30 @@ async def test_explicit_file_dirty_remove_and_clear_operations(tmp_path):
         assert vectors.files == {}
         assert RagFileStore(events).list("repository-a") == []
         assert subject.get_status().status == "empty"
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_index_and_dirty_calls_cannot_bypass_configured_scope(tmp_path):
+    (tmp_path / "allowed.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "protected.py").write_text("SECRET = 2\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    scoped = RagConfig(
+        enabled=True, embedding_model="fixture",
+        embedding_base_url="https://provider.invalid/v1",
+        exclude=("protected.py",))
+    try:
+        subject = RepositoryIndexer(
+            "repository-a", repository(tmp_path), scoped,
+            embeddings, vectors, RagFileStore(events))
+        result = await subject.index_repository()
+        assert result.status == "ready"
+        assert set(vectors.files) == {("repository-a", "allowed.py")}
+        with pytest.raises(ForgePilotError, match="rag_file_excluded"):
+            await subject.index_file("protected.py")
+        with pytest.raises(ForgePilotError, match="rag_file_excluded"):
+            subject.mark_dirty("protected.py")
     finally:
         events.close()

@@ -73,7 +73,22 @@ def checked_arguments(entry):
         raise ForgePilotError("compile_database_invalid", "Invalid compilation arguments")
     # clangd must never load project-selected plugins, response files or virtual file overlays.
     # Reject these commands rather than silently changing their semantic meaning.
-    denied = ("-xclang", "-load", "-plugin", "-fplugin", "-fpass-plugin", "-mllvm", "-cc1", "-wrapper", "-ivfsoverlay", "--vfsoverlay",
+    # CMake's Windows clang driver emits two inert debug/link metadata options
+    # through -Xclang.  Permit only those exact forms; every other cc1 escape
+    # remains rejected because it can load plugins or alter filesystem inputs.
+    for index, argument in enumerate(args[1:], 1):
+        if argument.casefold() != "-xclang":
+            continue
+        if index + 1 >= len(args):
+            raise ForgePilotError("compile_database_unsupported", "Unsupported -Xclang option")
+        option = args[index + 1].casefold()
+        library = option.removeprefix("--dependent-lib=")
+        dependent_library = (option.startswith("--dependent-lib=") and bool(library)
+                             and all(character.isalnum() or character in "._-"
+                                     for character in library))
+        if option != "-gcodeview" and not dependent_library:
+            raise ForgePilotError("compile_database_unsupported", "Unsupported -Xclang option")
+    denied = ("-load", "-plugin", "-fplugin", "-fpass-plugin", "-mllvm", "-cc1", "-wrapper", "-ivfsoverlay", "--vfsoverlay",
               "-fmodules", "-fmodule", "-include-pch", "-emit", "-save-temps", "--config", "/clang:", "/yc", "/yu", "/fp")
     if any(a.startswith("@") or a.casefold().startswith(denied) or a in {"&&", "||", "|", ";", ">", "<"} for a in args[1:]):
         raise ForgePilotError("compile_database_unsupported", "Compilation command requires unsupported indirect/plugin/module options")

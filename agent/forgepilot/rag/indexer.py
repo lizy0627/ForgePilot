@@ -4,14 +4,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
-import fnmatch
 import inspect
 from pathlib import Path
 import re
 
 from ..errors import ForgePilotError
 from ..repository import Repository
-from .config import RagConfig
+from .config import RagConfig, rag_path_matches
 from .embedding import EmbeddingProvider
 from .models import (CodeChunk, IndexFileState, IndexProgress, checked_relative_path,
                      checked_repository_id)
@@ -118,6 +117,7 @@ class RepositoryIndexer:
         self.vector_store = vector_store
         self.file_store = file_store
         self._run_lock = asyncio.Lock()
+        self._refresh_tasks: dict[str, asyncio.Task] = {}
         states = self.file_store.list(self.repository_id)
         chunks = sum(state.chunk_count for state in states
                      if state.content_hash != _UNINDEXED_HASH)
@@ -136,16 +136,7 @@ class RepositoryIndexer:
         return self._status
 
     def _matches(self, path: str) -> bool:
-        folded = path.casefold()
-        name = Path(path).name.casefold()
-        included = any(fnmatch.fnmatchcase(folded, pattern.casefold())
-                       or fnmatch.fnmatchcase(name, pattern.casefold())
-                       for pattern in self.config.include)
-        excluded = any(fnmatch.fnmatchcase(folded, pattern.casefold())
-                       or any(fnmatch.fnmatchcase(part.casefold(), pattern.casefold())
-                              for part in Path(path).parts)
-                       for pattern in self.config.exclude)
-        return included and not excluded
+        return rag_path_matches(self.config, path)
 
     @staticmethod
     def _cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -188,11 +179,55 @@ class RepositoryIndexer:
 
     def mark_dirty(self, path: str) -> IndexFileState:
         normalized = checked_relative_path(self.repository.normalize_plan_path(path))
+        if not self._matches(normalized):
+            raise ForgePilotError("rag_file_excluded", "File is outside the configured RAG scope")
         previous = self.file_store.get(self.repository_id, normalized)
         state = self.file_store.upsert(self._state(normalized, "pending", previous))
         self._status = IndexProgress(
             repository_id=self.repository_id, status="pending", chunks=self._stored_chunks())
         return state
+
+    def schedule_refresh(self, path: str) -> bool:
+        """Coalesce a safe background refresh requested by stale-vector filtering."""
+        if not self.available:
+            return False
+        try:
+            normalized = checked_relative_path(self.repository.normalize_plan_path(path))
+            if not self._matches(normalized):
+                return False
+        except Exception:
+            return False
+        key = normalized.casefold()
+        current = self._refresh_tasks.get(key)
+        if current is not None and not current.done():
+            return False
+        task = asyncio.create_task(self._refresh_file(normalized))
+        self._refresh_tasks[key] = task
+
+        def finished(done: asyncio.Task) -> None:
+            if self._refresh_tasks.get(key) is done:
+                self._refresh_tasks.pop(key, None)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        return True
+
+    async def _refresh_file(self, path: str) -> None:
+        try:
+            self.repository._path(path)
+        except ForgePilotError as exc:
+            if exc.code != "repository_path":
+                return
+            try:
+                await self.remove_file(path)
+            except Exception:
+                return
+        else:
+            try:
+                await self.index_file(path)
+            except Exception:
+                return
 
     async def _embed(self, texts: list[str], cancel_event: asyncio.Event | None) -> list[list[float]]:
         self._cancelled(cancel_event)
@@ -348,6 +383,9 @@ class RepositoryIndexer:
             return self._status
         async with self._run_lock:
             normalized = checked_relative_path(self.repository.normalize_plan_path(path))
+            if not self._matches(normalized):
+                raise ForgePilotError(
+                    "rag_file_excluded", "File is outside the configured RAG scope")
             self._status = IndexProgress(
                 repository_id=self.repository_id, status="indexing", total_files=1,
                 chunks=self._stored_chunks())

@@ -7,18 +7,21 @@ instruction.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
+import inspect
 from pathlib import Path
 import re
 from typing import Literal
 
 from ..compile_database import CPP_SUFFIXES
 from ..repository import Repository
-from .config import RagConfig
+from .config import RagConfig, rag_path_matches
 from .embedding import EmbeddingProvider
-from .models import (RetrievalQuery, RetrievalResult, RetrievedChunk,
+from .models import (RetrievalQuery, RetrievalResult, RetrievalScoreTrace,
+                     RetrievalSourceTrace, RetrievalTrace, RetrievedChunk,
                      checked_relative_path, checked_repository_id)
 from .vector_store import VectorStore
 
@@ -154,12 +157,24 @@ class _Candidate:
     end_line: int
     symbol: str | None
     content: str
+    file_hash: str
     contributions: dict[str, float] = field(default_factory=dict)
+    ranks: dict[str, int] = field(default_factory=dict)
     reasons: set[str] = field(default_factory=set)
 
     @property
     def score(self) -> float:
         return sum(self.contributions.values())
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceOutcome:
+    source: Literal["literal", "vector", "clangd"]
+    status: Literal["available", "unavailable", "failed", "not_applicable"]
+    candidates: tuple[_Candidate, ...] = ()
+    reason: str | None = None
+    stale_count: int = 0
+    stale_paths: tuple[str, ...] = ()
 
 
 class RetrievalService:
@@ -168,7 +183,8 @@ class RetrievalService:
     def __init__(self, repository_id: str, repository: Repository, config: RagConfig,
                  embedding_provider: EmbeddingProvider | None,
                  vector_store: VectorStore | None, *, code_intelligence=None,
-                 file_store=None, rrf_k: int = 60) -> None:
+                 file_store=None, rrf_k: int = 60,
+                 stale_handler: Callable[[str], bool | None | Awaitable[bool | None]] | None = None) -> None:
         if type(rrf_k) is not int or not 1 <= rrf_k <= 10_000:
             raise ValueError("rrf_k must be an integer between 1 and 10000")
         self.repository_id = checked_repository_id(repository_id)
@@ -179,10 +195,17 @@ class RetrievalService:
         self.code_intelligence = code_intelligence
         self.file_store = file_store
         self.rrf_k = rrf_k
+        self.stale_handler = stale_handler
+        self._trace: ContextVar[RetrievalTrace | None] = ContextVar(
+            f"rag_retrieval_trace_{id(self)}", default=None)
 
     @property
     def available(self) -> bool:
         return self.config.enabled
+
+    @property
+    def last_trace(self) -> RetrievalTrace | None:
+        return self._trace.get()
 
     def build_query(self, task_text: str) -> QueryTerms:
         return QueryBuilder.build(task_text)
@@ -191,6 +214,8 @@ class RetrievalService:
                   snapshots: dict[str, tuple[str, str] | None]) -> tuple[str, str] | None:
         try:
             normalized = checked_relative_path(self.repository.normalize_plan_path(path))
+            if not rag_path_matches(self.config, normalized):
+                return None
         except Exception:
             return None
         if normalized in snapshots:
@@ -211,8 +236,13 @@ class RetrievalService:
         content = "\n".join(rows[line - 1:end_line])
         return content or None
 
-    def _rrf(self, rank: int) -> float:
-        return 1.0 / (self.rrf_k + rank)
+    def _rrf(self, source: Literal["literal", "vector", "clangd"], rank: int) -> float:
+        weight = {
+            "literal": self.config.literal_weight,
+            "vector": self.config.vector_weight,
+            "clangd": self.config.clangd_weight,
+        }[source]
+        return weight / (self.rrf_k + rank)
 
     @staticmethod
     def _language(path: str) -> str:
@@ -253,7 +283,7 @@ class RetrievalService:
         return path_match and (not languages or candidate.language.casefold() in languages)
 
     async def _literal(self, terms: QueryTerms, path_filters: Sequence[str],
-                       snapshots: dict[str, tuple[str, str] | None]) -> list[_Candidate]:
+                       snapshots: dict[str, tuple[str, str] | None]) -> _SourceOutcome:
         candidates = []
         suffixes = set(terms.extensions) if terms.extensions else None
         try:
@@ -283,29 +313,44 @@ class RetrievalService:
                         candidates.append(_Candidate(
                             path=checked_relative_path(path), language=self._language(path),
                             line=line, end_line=line, symbol=symbol, content=content,
-                            contributions={"literal": self._rrf(rank)},
+                            file_hash=snapshot[1],
+                            contributions={"literal": self._rrf("literal", rank)},
+                            ranks={"literal": rank},
                             reasons={f"literal_rank:{rank}"},
                         ))
                         if len(candidates) >= _SOURCE_LIMIT:
                             break
                 if len(candidates) >= _SOURCE_LIMIT:
                     break
-            return candidates
+            return _SourceOutcome("literal", "available", tuple(candidates))
         except asyncio.CancelledError:
             raise
         except Exception:
-            return candidates
+            return _SourceOutcome(
+                "literal", "failed", tuple(candidates), "literal_failed")
 
     async def _vector(self, task_text: str,
-                      snapshots: dict[str, tuple[str, str] | None]) -> list[_Candidate]:
-        if self.embedding_provider is None or self.vector_store is None:
-            return []
+                      snapshots: dict[str, tuple[str, str] | None]) -> _SourceOutcome:
+        if self.embedding_provider is None:
+            return _SourceOutcome("vector", "unavailable", reason="embedding_unavailable")
+        if self.vector_store is None:
+            return _SourceOutcome("vector", "unavailable", reason="qdrant_unavailable")
         try:
             # The complete task text is intentionally embedded as-is. Query
             # Builder terms are only for deterministic literal/boost logic.
-            vector = await self.embedding_provider.embed_query(task_text)
-            raw = await self.vector_store.search(
-                self.repository_id, vector, limit=_SOURCE_LIMIT)
+            try:
+                vector = await self.embedding_provider.embed_query(task_text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return _SourceOutcome("vector", "failed", reason="embedding_failed")
+            try:
+                raw = await self.vector_store.search(
+                    self.repository_id, vector, limit=_SOURCE_LIMIT)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return _SourceOutcome("vector", "failed", reason="qdrant_failed")
             checked = []
             for item in raw:
                 try:
@@ -318,14 +363,20 @@ class RetrievalService:
                 -item.score, item.chunk.path.casefold(), item.chunk.start_line,
                 item.chunk.end_line, item.chunk.chunk_id))
             candidates = []
+            stale_paths = []
+            stale_count = 0
             for result in checked[:_SOURCE_LIMIT]:
                 chunk = result.chunk
+                if not rag_path_matches(self.config, chunk.path):
+                    continue
                 if self.file_store is not None:
                     state = self.file_store.get(self.repository_id, chunk.path)
                     if state is not None and state.status != "indexed":
                         continue
                 snapshot = self._snapshot(chunk.path, snapshots)
                 if snapshot is None or snapshot[1] != chunk.file_hash:
+                    stale_count += 1
+                    stale_paths.append(chunk.path)
                     continue
                 content = self._line_content(snapshot[0], chunk.start_line, chunk.end_line)
                 if content is None:
@@ -335,21 +386,28 @@ class RetrievalService:
                     path=chunk.path, language=chunk.language,
                     line=chunk.start_line, end_line=chunk.end_line,
                     symbol=chunk.symbol, content=content,
-                    contributions={"vector": self._rrf(rank)},
+                    file_hash=snapshot[1],
+                    contributions={"vector": self._rrf("vector", rank)},
+                    ranks={"vector": rank},
                     reasons={f"vector_rank:{rank}"},
                 ))
-            return candidates
+            return _SourceOutcome(
+                "vector", "available", tuple(candidates),
+                stale_count=stale_count,
+                stale_paths=_unique(stale_paths, limit=_SOURCE_LIMIT))
         except asyncio.CancelledError:
             raise
         except Exception:
             # Embedding and Qdrant are optional. Their failure cannot prevent
             # current literal/clangd evidence from being returned.
-            return []
+            return _SourceOutcome("vector", "failed", reason="vector_failed")
 
     async def _clangd(self, terms: QueryTerms, path_filters: Sequence[str],
-                      snapshots: dict[str, tuple[str, str] | None]) -> list[_Candidate]:
-        if self.code_intelligence is None or not terms.symbols:
-            return []
+                      snapshots: dict[str, tuple[str, str] | None]) -> _SourceOutcome:
+        if not terms.symbols:
+            return _SourceOutcome("clangd", "not_applicable", reason="no_symbol_query")
+        if self.code_intelligence is None:
+            return _SourceOutcome("clangd", "unavailable", reason="clangd_unavailable")
         symbol = terms.symbols[0]
         try:
             location = None
@@ -368,7 +426,7 @@ class RetrievalService:
                     break
             if (location is None or not isinstance(location[0], str)
                     or type(location[1]) is not int):
-                return []
+                return _SourceOutcome("clangd", "available")
 
             common = dict(path=location[0], line=location[1], column=location[2],
                           max_results=_SOURCE_LIMIT)
@@ -380,16 +438,29 @@ class RetrievalService:
             )
             combined = []
             seen = set()
+            fallback_reasons = []
+            semantic_responses = 0
             for relation, response in (("definition", definition), ("reference", references)):
                 if isinstance(response, BaseException):
+                    fallback_reasons.append("clangd_failed")
                     continue
                 payload = json.loads(response)
+                if payload.get("source") != "clangd" or payload.get("semantic") is False:
+                    fallback_reasons.append(str(payload.get("fallback_reason") or "clangd_unavailable"))
+                    continue
+                semantic_responses += 1
                 source_rows = payload.get("locations", [])
-                if not source_rows:
-                    source_rows = payload.get("text_matches", [])
+                if not isinstance(source_rows, list):
+                    fallback_reasons.append("clangd_failed")
+                    continue
+                source_rows = sorted(
+                    (row for row in source_rows if isinstance(row, dict)),
+                    key=lambda row: (
+                        str(row.get("path", "")).casefold(),
+                        row.get("line") if type(row.get("line")) is int else 2**31,
+                        row.get("end_line") if type(row.get("end_line")) is int else 2**31,
+                    ))
                 for row in source_rows:
-                    if not isinstance(row, dict):
-                        continue
                     path, line = row.get("path"), row.get("line")
                     end_line = row.get("end_line", line)
                     if (not isinstance(path, str) or type(line) is not int
@@ -417,14 +488,22 @@ class RetrievalService:
                     path=checked_relative_path(path), language=self._language(path),
                     line=line, end_line=end_line,
                     symbol=symbol, content=content,
-                    contributions={"clangd": self._rrf(rank)},
+                    file_hash=snapshot[1],
+                    contributions={"clangd": self._rrf("clangd", rank)},
+                    ranks={"clangd": rank},
                     reasons={f"clangd_{relation}", f"clangd_rank:{rank}"},
                 ))
-            return candidates
+            if not semantic_responses:
+                reason = sorted(fallback_reasons)[0] if fallback_reasons else "clangd_unavailable"
+                return _SourceOutcome("clangd", "unavailable", reason=reason)
+            if fallback_reasons:
+                return _SourceOutcome(
+                    "clangd", "failed", tuple(candidates), sorted(fallback_reasons)[0])
+            return _SourceOutcome("clangd", "available", tuple(candidates))
         except asyncio.CancelledError:
             raise
         except Exception:
-            return []
+            return _SourceOutcome("clangd", "failed", reason="clangd_failed")
 
     @staticmethod
     def _combine_exact(candidates: Sequence[_Candidate]) -> list[_Candidate]:
@@ -439,6 +518,8 @@ class RetrievalService:
             for source, score in candidate.contributions.items():
                 current.contributions[source] = max(
                     score, current.contributions.get(source, 0.0))
+            for source, rank in candidate.ranks.items():
+                current.ranks[source] = min(rank, current.ranks.get(source, rank))
             current.reasons.update(candidate.reasons)
         return list(combined.values())
 
@@ -471,6 +552,8 @@ class RetrievalService:
                 for source, score in candidate.contributions.items():
                     current.contributions[source] = max(
                         score, current.contributions.get(source, 0.0))
+                for source, rank in candidate.ranks.items():
+                    current.ranks[source] = min(rank, current.ranks.get(source, rank))
                 current.reasons.update(candidate.reasons)
                 snapshot = self._snapshot(current.path, snapshots)
                 if snapshot is not None:
@@ -553,14 +636,61 @@ class RetrievalService:
         normalized = plain | {f"{source}:{rank}" for source, rank in ranks.items()}
         return tuple(sorted(normalized))[:32]
 
+    async def _trigger_stale_updates(self, paths: Sequence[str]) -> int:
+        if self.stale_handler is None:
+            return 0
+        triggered = 0
+        for path in _unique(paths, limit=_SOURCE_LIMIT):
+            try:
+                value = self.stale_handler(path)
+                if inspect.isawaitable(value):
+                    value = await value
+                if value is not False:
+                    triggered += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+        return triggered
+
     @staticmethod
-    def _pack(candidates: Sequence[_Candidate], *, limit: int,
+    def _trace_status(outcomes: Sequence[_SourceOutcome], stale_count: int) -> str:
+        return ("degraded" if stale_count or any(
+            outcome.status in {"unavailable", "failed"} for outcome in outcomes)
+                else "ready")
+
+    def _score_trace(self, candidate: _Candidate) -> tuple[RetrievalScoreTrace, ...]:
+        weights = {
+            "literal": self.config.literal_weight,
+            "vector": self.config.vector_weight,
+            "clangd": self.config.clangd_weight,
+        }
+        order = {"literal": 0, "vector": 1, "clangd": 2}
+        traces = []
+        for source, contribution in sorted(
+                candidate.contributions.items(), key=lambda item: (order.get(item[0], 10), item[0])):
+            rank = candidate.ranks.get(source)
+            weight = weights.get(source, 1.0)
+            traces.append(RetrievalScoreTrace(
+                source=source,
+                rank=rank,
+                weight=weight,
+                rrf=(None if rank is None else 1.0 / (self.rrf_k + rank)),
+                contribution=contribution,
+            ))
+        return tuple(traces)
+
+    def _pack(self, candidates: Sequence[_Candidate], *, limit: int,
               max_chars: int) -> list[RetrievalResult]:
         results = []
         used = 0
+        per_file: dict[str, int] = {}
         for candidate in candidates:
             if len(results) >= limit or used >= max_chars:
                 break
+            file_key = candidate.path.casefold()
+            if per_file.get(file_key, 0) >= self.config.retrieval_max_chunks_per_file:
+                continue
             remaining = max_chars - used
             content = candidate.content
             end_line = candidate.end_line
@@ -572,15 +702,21 @@ class RetrievalService:
             if not content:
                 break
             results.append(RetrievalResult(
+                repository_id=self.repository_id,
                 path=candidate.path,
                 line=candidate.line,
                 end_line=end_line,
                 symbol=candidate.symbol,
                 score=candidate.score,
                 reasons=RetrievalService._bounded_reasons(reasons),
+                file_hash=candidate.file_hash,
+                sources=tuple(source for source in ("literal", "vector", "clangd")
+                              if source in candidate.contributions),
+                score_trace=self._score_trace(candidate),
                 content=content,
             ))
             used += len(content)
+            per_file[file_key] = per_file.get(file_key, 0) + 1
         return results
 
     async def retrieve(self, task: str | RetrievalQuery, *,
@@ -618,18 +754,55 @@ class RetrievalService:
         terms = self.build_query(query.query)
         snapshots: dict[str, tuple[str, str] | None] = {}
         literal_task = (self._literal(terms, normalized_filters, snapshots)
-                        if mode != "vector" else asyncio.sleep(0, result=[]))
+                        if mode != "vector" else asyncio.sleep(
+                            0, result=_SourceOutcome(
+                                "literal", "not_applicable", reason="mode_excluded")))
         vector_task = (self._vector(query.query, snapshots)
-                       if mode != "lexical" else asyncio.sleep(0, result=[]))
+                       if mode != "lexical" else asyncio.sleep(
+                           0, result=_SourceOutcome(
+                               "vector", "not_applicable", reason="mode_excluded")))
         clangd_task = (self._clangd(terms, normalized_filters, snapshots)
-                       if mode != "vector" else asyncio.sleep(0, result=[]))
+                       if mode != "vector" else asyncio.sleep(
+                           0, result=_SourceOutcome(
+                               "clangd", "not_applicable", reason="mode_excluded")))
         literal, vector, clangd = await asyncio.gather(
             literal_task, vector_task, clangd_task)
-        filtered = [candidate for candidate in (*literal, *vector, *clangd)
+        outcomes = (literal, vector, clangd)
+        stale_count = sum(outcome.stale_count for outcome in outcomes)
+        triggered = await self._trigger_stale_updates(
+            tuple(path for outcome in outcomes for path in outcome.stale_paths))
+        filtered = [candidate for outcome in outcomes for candidate in outcome.candidates
                     if self._matches_filters(
                         candidate, normalized_filters, normalized_languages)]
         candidates = self._merge_overlaps(filtered, snapshots)
         self._boost(candidates, terms, normalized_plans)
-        return self._pack(
+        results = self._pack(
             self._ranked(candidates), limit=query.top_k,
             max_chars=query.context_max_chars)
+        events = []
+        for outcome in outcomes:
+            if outcome.status in {"unavailable", "failed"} and outcome.reason:
+                events.append(outcome.reason)
+        if stale_count:
+            events.append("stale_chunk_filtered")
+            events.append("incremental_update_triggered" if triggered
+                          else "incremental_update_unavailable")
+        usable = {outcome.source for outcome in outcomes if outcome.status == "available"}
+        if usable == {"literal"}:
+            events.append("literal_only")
+        self._trace.set(RetrievalTrace(
+            mode=mode,
+            status=self._trace_status(outcomes, stale_count),
+            sources=tuple(RetrievalSourceTrace(
+                source=outcome.source,
+                status=outcome.status,
+                candidate_count=len(outcome.candidates),
+                reason=outcome.reason,
+            ) for outcome in outcomes),
+            events=_unique(events, limit=32),
+            stale_chunk_filtered=stale_count,
+            incremental_update_triggered=triggered,
+            result_count=len(results),
+            context_chars=sum(len(result.content) for result in results),
+        ))
+        return results

@@ -193,8 +193,10 @@ class TaskService:
                 try:
                     indexed = (await rag_services.indexer.index_repository() if claimed
                                else rag_services.indexer.get_status())
-                    self._runtime.rag_index_available = (
-                        indexed.status in {"ready", "degraded"} and indexed.chunks > 0)
+                    # Literal/clangd retrieval remains usable without a vector
+                    # index, including embedding/Qdrant/index failures.
+                    self._runtime.rag_index_available = getattr(
+                        rag_services.retrieval, "available", True)
                     self.trace.emit(context.task_id, "rag_status", {
                         "status": indexed.status if claimed else "busy",
                         "total_files": indexed.total_files,
@@ -206,7 +208,8 @@ class TaskService:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    self._runtime.rag_index_available = False
+                    self._runtime.rag_index_available = getattr(
+                        rag_services.retrieval, "available", True)
                     self.trace.emit(context.task_id, "rag_status", {
                         "status": "degraded", "error_code": "rag_index_failed",
                     })

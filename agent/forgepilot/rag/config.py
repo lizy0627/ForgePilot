@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import fnmatch
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -18,6 +20,7 @@ DEFAULT_INCLUDE = (
     "*.py", "*.pyi", "*.js", "*.jsx", "*.ts", "*.tsx", "*.java", "*.cs",
     "*.go", "*.rs", "*.swift", "*.kt", "*.kts", "*.rb", "*.php", "*.lua",
     "*.sql", "*.sh", "*.ps1", "*.qml", "*.cmake", "CMakeLists.txt",
+    "*.json", "*.md",
 )
 EMBEDDING_SECRET_NAME = "rag_embedding_api_key"
 
@@ -50,6 +53,10 @@ class RagConfig(BaseModel):
     embedding_batch_size: int = Field(default=16, ge=1, le=256)
     retrieval_top_k: int = Field(default=8, ge=1, le=100)
     context_max_chars: int = Field(default=24_000, ge=1, le=1_000_000)
+    retrieval_max_chunks_per_file: int = Field(default=3, ge=1, le=10)
+    literal_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    vector_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    clangd_weight: float = Field(default=0.25, ge=0.0, le=1.0)
 
     @field_validator("include", "exclude", mode="before")
     @classmethod
@@ -86,8 +93,10 @@ class RagConfig(BaseModel):
 
     @model_validator(mode="after")
     def enabled_connection(self):
-        if self.enabled and (not self.embedding_model or not self.embedding_base_url):
-            raise ValueError("Enabled RAG requires an embedding model and base URL")
+        if bool(self.embedding_model) != bool(self.embedding_base_url):
+            raise ValueError("Embedding model and base URL must be configured together")
+        if self.literal_weight + self.vector_weight + self.clangd_weight <= 0:
+            raise ValueError("At least one retrieval source weight must be positive")
         return self
 
 
@@ -111,6 +120,25 @@ class RagRuntimeAvailability:
     status: Literal["available", "unavailable"]
     settings: RagRuntimeSettings | None = None
     reason: Literal["disabled", "not_configured", "invalid_configuration"] | None = None
+    config: RagConfig | None = None
+
+
+def rag_path_matches(config: RagConfig, path: str) -> bool:
+    """Apply configured index/retrieval scope to one normalized relative path."""
+    folded = path.casefold()
+    name = Path(path).name.casefold()
+    included = any(
+        fnmatch.fnmatchcase(folded, pattern.casefold())
+        or fnmatch.fnmatchcase(name, pattern.casefold())
+        for pattern in config.include
+    )
+    excluded = any(
+        fnmatch.fnmatchcase(folded, pattern.casefold())
+        or any(fnmatch.fnmatchcase(part.casefold(), pattern.casefold())
+               for part in Path(path).parts)
+        for pattern in config.exclude
+    )
+    return included and not excluded
 
 
 def protect_embedding_api_key(value: str) -> bytes:
@@ -143,6 +171,11 @@ def rag_config_from_args(args) -> RagConfig:
             embedding_batch_size=args.embedding_batch_size,
             retrieval_top_k=args.retrieval_top_k,
             context_max_chars=args.context_max_chars,
+            retrieval_max_chunks_per_file=getattr(
+                args, "retrieval_max_chunks_per_file", 3),
+            literal_weight=getattr(args, "rag_literal_weight", 0.35),
+            vector_weight=getattr(args, "rag_vector_weight", 0.40),
+            clangd_weight=getattr(args, "rag_clangd_weight", 0.25),
         )
     except ValidationError:
         raise ForgePilotError("rag_config", "Invalid RAG configuration or limits") from None
@@ -154,6 +187,8 @@ def rag_runtime_from_args(args, *, api_key: str | None = None) -> RagRuntimeSett
     if not args.rag_enabled:
         return None
     config = rag_config_from_args(args)
+    if not config.embedding_model or not config.embedding_base_url:
+        return None
     # Desktop startup obtains FORGEPILOT_API_KEY from its existing current-user
     # DPAPI file. A distinct key may be injected at runtime, but is never a
     # config.json/CLI field.
@@ -166,15 +201,17 @@ def rag_runtime_from_args(args, *, api_key: str | None = None) -> RagRuntimeSett
 def rag_runtime_availability_from_args(args, *, api_key: str | None = None) -> RagRuntimeAvailability:
     """Return an inert unavailable state instead of breaking the established Agent startup."""
     if not args.rag_enabled:
-        return RagRuntimeAvailability("unavailable", reason="disabled")
-    if not args.embedding_model or not args.embedding_base_url:
-        return RagRuntimeAvailability("unavailable", reason="not_configured")
+        return RagRuntimeAvailability("unavailable", reason="disabled", config=RagConfig())
     try:
+        config = rag_config_from_args(args)
+        if not config.embedding_model or not config.embedding_base_url:
+            return RagRuntimeAvailability(
+                "unavailable", reason="not_configured", config=config)
         settings = rag_runtime_from_args(args, api_key=api_key)
     except ForgePilotError as exc:
         reason = "not_configured" if exc.code == "rag_secret_unavailable" else "invalid_configuration"
-        return RagRuntimeAvailability("unavailable", reason=reason)
-    return RagRuntimeAvailability("available", settings=settings)
+        return RagRuntimeAvailability("unavailable", reason=reason, config=locals().get("config"))
+    return RagRuntimeAvailability("available", settings=settings, config=config)
 
 
 def add_rag_arguments(parser):
@@ -188,3 +225,7 @@ def add_rag_arguments(parser):
     parser.add_argument("--embedding-batch-size", type=int, default=16)
     parser.add_argument("--retrieval-top-k", type=int, default=8)
     parser.add_argument("--context-max-chars", type=int, default=24_000)
+    parser.add_argument("--retrieval-max-chunks-per-file", type=int, default=3)
+    parser.add_argument("--rag-literal-weight", type=float, default=0.35)
+    parser.add_argument("--rag-vector-weight", type=float, default=0.40)
+    parser.add_argument("--rag-clangd-weight", type=float, default=0.25)

@@ -10,9 +10,11 @@ import pytest
 
 from forgepilot.errors import ForgePilotError
 from forgepilot.rag import (OpenAICompatibleEmbeddingProvider, QdrantVectorStore,
-                            add_rag_arguments, embedding_provider_from_runtime,
+                            RagFileStore, RagManager, add_rag_arguments,
+                            embedding_provider_from_runtime,
                             rag_runtime_availability_from_args, vector_store_path)
 from forgepilot.rag.models import CodeChunk
+from forgepilot.sqlite_store import SqliteEventStore
 
 
 FILE_HASH = hashlib.sha256(b"complete file").hexdigest()
@@ -152,6 +154,14 @@ def test_disabled_or_unconfigured_rag_returns_explicit_unavailable(monkeypatch):
     provider = embedding_provider_from_runtime(disabled)
     assert provider.status == "unavailable" and provider.reason == "disabled"
     assert embedding_provider_from_runtime(missing).reason == "not_configured"
+
+    events = SqliteEventStore()
+    try:
+        manager = RagManager(missing, RagFileStore(events), vector_store=object())
+        assert manager.enabled and not manager.index_available
+        assert manager.reason == "not_configured"
+    finally:
+        events.close()
 
     monkeypatch.setenv("FORGEPILOT_DATABASE", "D:/app-data-fixture/tasks.sqlite3")
     assert vector_store_path() == Path("D:/app-data-fixture/qdrant")

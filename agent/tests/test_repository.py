@@ -251,7 +251,9 @@ async def test_denied_paths(cpp_repo, rg_exe, git_exe, path):
 
 @pytest.mark.asyncio
 async def test_sensitive_generated_and_linked_files_are_never_exposed(cpp_repo, tmp_path, rg_exe, git_exe):
-    for rel in [".env", "SECRETS.json", "build/cache.cpp", "agent.venv/lib/x.cpp", ".ssh/key.cpp", "client/CMakeUserPresets.json"]:
+    for rel in [".env", "SECRETS.json", "build/cache.cpp", "agent.venv/lib/x.cpp",
+                ".ssh/key.cpp", "client/CMakeUserPresets.json",
+                "hidden_tests/oracle.cpp", ".hidden-tests/private.cpp"]:
         file = cpp_repo / rel
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text("DO_NOT_EXPOSE", encoding="utf-8")
@@ -266,7 +268,8 @@ async def test_sensitive_generated_and_linked_files_are_never_exposed(cpp_repo, 
         link.symlink_to(outside, target_is_directory=True)
     registry = await registry_for(cpp_repo, rg_exe, git_exe)
     listed = await registry.execute("list_files", {})
-    assert "external" not in listed.output and "cache.cpp" not in listed.output
+    assert ("external" not in listed.output and "cache.cpp" not in listed.output
+            and "oracle.cpp" not in listed.output and "private.cpp" not in listed.output)
     searched = await registry.execute("search_code", {"query": "DO_NOT_EXPOSE"})
     assert searched.success and json.loads(searched.output)["matches"] == []
     denied = await registry.execute("read_file", {"path": "external/external.cpp"})

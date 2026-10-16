@@ -33,7 +33,9 @@ class RagManager:
                  file_store: RagFileStore, *, embedding_provider=None, vector_store=None,
                  vector_path: str | Path | None = None) -> None:
         settings = runtime.settings if isinstance(runtime, RagRuntimeAvailability) else runtime
-        self.config = settings.config if settings is not None else RagConfig()
+        self.config = (settings.config if settings is not None else
+                       runtime.config if isinstance(runtime, RagRuntimeAvailability)
+                       and runtime.config is not None else RagConfig())
         self.file_store = file_store
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
@@ -43,7 +45,8 @@ class RagManager:
         if not self.config.enabled:
             return
         if self.embedding_provider is None:
-            availability = embedding_provider_from_runtime(settings)
+            availability = embedding_provider_from_runtime(
+                runtime if isinstance(runtime, RagRuntimeAvailability) else settings)
             self.embedding_provider = availability.provider
             if not availability.available:
                 self.reason = availability.reason or "initialization_failed"
@@ -73,7 +76,7 @@ class RagManager:
         retrieval = RetrievalService(
             repository_id, repository, self.config, self.embedding_provider,
             self.vector_store, code_intelligence=code_intelligence,
-            file_store=self.file_store)
+            file_store=self.file_store, stale_handler=indexer.schedule_refresh)
         return RagRepositoryServices(indexer=indexer, retrieval=retrieval)
 
     def begin_index(self, repository_id: str) -> bool:

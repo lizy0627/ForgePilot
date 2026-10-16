@@ -322,6 +322,15 @@ def test_database_command_cannot_load_indirect_code(argument):
         checked_arguments({"arguments": ["clang++", argument, "main.cpp"]})
 
 
+def test_database_allows_only_cmake_windows_clang_debug_metadata():
+    safe = ["clang++", "-Xclang", "-gcodeview", "-Xclang",
+            "--dependent-lib=msvcrtd", "-c", "main.cpp"]
+    assert checked_arguments({"arguments": safe}) == safe
+    for unsafe in ("-load", "-plugin=evil", "--dependent-lib=bad/value"):
+        with pytest.raises(ForgePilotError, match="compile_database_unsupported"):
+            checked_arguments({"arguments": ["clang++", "-Xclang", unsafe, "main.cpp"]})
+
+
 @pytest.mark.asyncio
 async def test_tool_strict_validation_boundary_and_output_limits(symbol_repo):
     registry = ToolRegistry(); register_symbol_tools(registry, CodeIntelligence(symbol_repo))

@@ -110,7 +110,8 @@ async def test_retrieve_tool_schema_structured_output_and_registry_controls():
     payload = json.loads(result.output)
     assert result.success and payload["content_is_untrusted"] is True
     assert set(payload["results"][0]) == {
-        "path", "line", "end_line", "symbol", "score", "reasons", "content"}
+        "repository_id", "path", "line", "end_line", "symbol", "score",
+        "reasons", "file_hash", "sources", "score_trace", "content"}
     request, options = retrieval.calls[0]
     assert request.top_k == 3
     assert options == {
@@ -159,6 +160,25 @@ async def test_analysis_auto_retrieval_injects_at_most_six_untrusted_results():
     assert event.data["status"] == "ready" and event.data["result_count"] == 1
     assert injection not in json.dumps(event.data)
     assert injection not in json.dumps([event.data for event in trace.events])
+
+
+@pytest.mark.asyncio
+async def test_automatic_retrieval_redacts_credentials_before_context_or_trace():
+    secret = "private-retrieval-password"
+    retrieval = FakeRetrieval(content=f"password={secret}\ndef target_symbol(): pass")
+    llm = ScriptedLLM([reply("safe answer")])
+    trace = MemoryTrace()
+    runtime = AgentRuntime(llm, ToolRegistry(), trace)
+    runtime.retrieval_service = retrieval
+    runtime.rag_index_available = True
+
+    result = await runtime.run(TaskContext("fixture", "Fix target_symbol"))
+
+    assert result.state == TaskState.COMPLETED
+    serialized_messages = json.dumps(llm.requests, ensure_ascii=False)
+    serialized_trace = json.dumps([event.data for event in trace.events], ensure_ascii=False)
+    assert secret not in serialized_messages and secret not in serialized_trace
+    assert "[REDACTED]" in serialized_messages
 
 
 @pytest.mark.asyncio

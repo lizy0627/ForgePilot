@@ -26,6 +26,8 @@ EXCLUDED = (
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".uv-cache",
     "build", "build-*", "cmake-build-*", "cmakefiles", "out", "bin", "obj", "dist",
     "node_modules", ".vs", ".idea", ".ssh", ".aws", ".azure", "logs",
+    ".hidden-tests", ".hidden_tests", "hidden-tests", "hidden_tests",
+    "__hidden_tests__", ".forgepilot-tests",
     ".env*", "*secret*", "*credential*", "*.pem", "*.key", "*.p12", "*.pfx",
     "id_rsa*", "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "config.local.*",
     "cmakeuserpresets.json", "local-env.cmd", "*.exe", "*.dll", "*.obj", "*.pdb",
