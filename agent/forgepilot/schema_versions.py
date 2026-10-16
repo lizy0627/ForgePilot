@@ -1,0 +1,21 @@
+"""Single source of truth for SQLite schema version ownership."""
+from enum import IntEnum, unique
+
+
+@unique
+class SchemaVersion(IntEnum):
+    TASK_HISTORY = 1
+    CONVERSATIONS = 2
+    MEMORY = 3
+    MCP_SERVERS = 4
+    MCP_CALL_RECORDS = 5
+    RAG_FILES = 6
+    RAG_INDEX_LIFECYCLE = 7
+
+
+CURRENT_SCHEMA_VERSION = max(SchemaVersion)
+
+
+def requires_upgrade_backup(version: int) -> bool:
+    """Return whether an existing supported database will be migrated."""
+    return 1 <= version < int(CURRENT_SCHEMA_VERSION)

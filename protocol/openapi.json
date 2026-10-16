@@ -2320,6 +2320,21 @@
             ],
             "title": "Last Indexed At"
           },
+          "operation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "index",
+                  "clear"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
+          },
           "operation_id": {
             "anyOf": [
               {
@@ -2472,6 +2487,21 @@
               }
             ],
             "title": "Last Indexed At"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "index",
+                  "clear"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
           },
           "operation_id": {
             "anyOf": [

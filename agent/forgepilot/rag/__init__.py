@@ -12,7 +12,7 @@ from .admin import RagIndexCoordinator
 from .models import (CodeChunk, IndexFileState, IndexProgress, RetrievalQuery, RetrievedChunk,
                      RetrievalResult, RagIndexStatus, make_chunk_id)
 from .retrieval import QueryBuilder, QueryTerms, RetrievalService
-from .store import RagFileStore, create_rag_schema
+from .store import RagFileStore, RagRunStore, create_rag_schema, create_rag_run_schema
 from .vector_store import QdrantVectorStore, VectorStore, vector_store_path
 
 __all__ = (
@@ -22,7 +22,8 @@ __all__ = (
     "QueryBuilder", "QueryTerms",
     "RagConfig", "RagRuntimeAvailability", "RagRuntimeSettings", "RagFileStore",
     "EmbeddingProvider", "EmbeddingProviderAvailability", "OpenAICompatibleEmbeddingProvider",
-    "QdrantVectorStore", "VectorStore", "create_rag_schema", "make_chunk_id", "vector_store_path",
+    "QdrantVectorStore", "VectorStore", "create_rag_schema", "create_rag_run_schema",
+    "RagRunStore", "make_chunk_id", "vector_store_path",
     "add_rag_arguments", "embedding_provider_from_runtime", "rag_config_from_args",
     "rag_runtime_availability_from_args", "rag_runtime_from_args",
     "protect_embedding_api_key", "unprotect_embedding_api_key",

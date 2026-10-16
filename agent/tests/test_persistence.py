@@ -17,6 +17,8 @@ from forgepilot.errors import ForgePilotError
 from forgepilot.recording import now, snapshot_context, project_events, TaskJournal
 from forgepilot.security import Redactor
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
+import forgepilot.sqlite_store as sqlite_store_module
 from forgepilot.task_service import TaskService
 from forgepilot.task_host import TaskHost
 from forgepilot.trace import TraceEvent
@@ -382,13 +384,30 @@ def test_initialize_reopen_three_tables_and_version(tmp_path):
     path=tmp_path/"history.sqlite3"
     for _ in range(2):
         store=SqliteEventStore(path)
-        assert store._db.execute("PRAGMA user_version").fetchone()[0]==6
-        assert {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}=={"tasks","task_events","tool_calls","conversations","conversation_requests","conversation_messages","conversation_summaries","memories","mcp_servers","mcp_migrations","rag_files"}
+        assert store._db.execute("PRAGMA user_version").fetchone()[0]==7
+        assert {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}=={"tasks","task_events","tool_calls","conversations","conversation_requests","conversation_messages","conversation_summaries","memories","mcp_servers","mcp_migrations","rag_files","rag_index_runs"}
         assert store._db.execute("PRAGMA foreign_keys").fetchone()[0]==1
         store.close()
     with sqlite3.connect(path) as db: db.execute("PRAGMA user_version=99")
     with pytest.raises(ForgePilotError,match="storage_version"): SqliteEventStore(path)
     with sqlite3.connect(path) as db: assert db.execute("PRAGMA user_version").fetchone()[0]==99
+
+
+def test_schema_version_ledger_has_unique_contiguous_ownership():
+    versions = [int(version) for version in SchemaVersion]
+    assert versions == list(range(1, int(CURRENT_SCHEMA_VERSION) + 1))
+    assert SchemaVersion.RAG_FILES == 6
+    assert SchemaVersion.RAG_INDEX_LIFECYCLE == CURRENT_SCHEMA_VERSION == 7
+    assert not requires_upgrade_backup(0)
+    assert all(requires_upgrade_backup(version) for version in versions[:-1])
+    assert not requires_upgrade_backup(int(CURRENT_SCHEMA_VERSION))
+
+
+def test_schema_ledger_cannot_advance_without_a_migration(monkeypatch):
+    monkeypatch.setattr(sqlite_store_module, "CURRENT_SCHEMA_VERSION", 8)
+    with pytest.raises(ForgePilotError, match="migration path") as error:
+        SqliteEventStore()
+    assert error.value.code == "storage_version"
 
 
 def test_writer_lock_prevents_false_recovery(tmp_path):

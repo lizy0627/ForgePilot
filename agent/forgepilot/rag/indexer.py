@@ -261,6 +261,11 @@ class RepositoryIndexer:
     async def _remove_one(self, path: str) -> int:
         previous = self.file_store.get(self.repository_id, path)
         try:
+            # Persist intent before deleting vectors. If the process stops after
+            # the external mutation but before the row delete, restart reports a
+            # retryable pending index instead of a false ready state.
+            if previous is not None:
+                self.file_store.upsert(self._state(path, "pending", previous))
             removed = await self.vector_store.delete_file(self.repository_id, path)
             self.file_store.delete(self.repository_id, path)
             return removed
@@ -323,6 +328,7 @@ class RepositoryIndexer:
                     self._cancelled(cancel_event)
                     try:
                         await self._remove_one(path)
+                        self._cancelled(cancel_event)
                         outcome = "indexed"
                     except Exception:
                         outcome = "failed"

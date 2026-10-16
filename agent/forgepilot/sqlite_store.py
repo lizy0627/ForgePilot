@@ -18,7 +18,8 @@ from .trace import TraceEvent
 from .conversation_store import ConversationStore
 from .memory_store import MemoryStore
 from .mcp_store import create_mcp_schema
-from .rag.store import create_rag_schema
+from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
+from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
 from uuid import uuid4
 
@@ -94,7 +95,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
 
     def _migrate(self):
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version in {1,2,3,4,5} and self.path != ':memory:':
+        if requires_upgrade_backup(version) and self.path != ':memory:':
             # Backup includes committed WAL pages and precedes both migration and recovery.
             backup = self.path + f'.v{version}-backup-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid4().hex[:8] + '.sqlite3'
             with sqlite3.connect(backup) as destination:
@@ -103,7 +104,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
                     raise ForgePilotError('storage_backup', '数据库备份校验失败，未执行升级。')
         with self._transaction():
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 6:
+            if version > int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError("storage_version", "Database schema is newer than this application")
             if version == 0:
                 if self._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone():
@@ -130,23 +131,30 @@ class SqliteEventStore(ConversationStore, MemoryStore):
                 ]
                 for statement in statements:
                     self._db.execute(statement)
-                self._db.execute("PRAGMA user_version=1")
-            if version < 2:
+                self._db.execute(f"PRAGMA user_version={int(SchemaVersion.TASK_HISTORY)}")
+            if version < SchemaVersion.CONVERSATIONS:
                 self._conversation_schema()
-                self._db.execute("PRAGMA user_version=2")
-            if version < 3:
+                self._db.execute(f"PRAGMA user_version={int(SchemaVersion.CONVERSATIONS)}")
+            if version < SchemaVersion.MEMORY:
                 self._memory_schema()
-                self._db.execute('PRAGMA user_version=3')
-            if version < 4:
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.MEMORY)}')
+            if version < SchemaVersion.MCP_SERVERS:
                 create_mcp_schema(self._db)
-                self._db.execute('PRAGMA user_version=4')
-            if version < 5:
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.MCP_SERVERS)}')
+            if version < SchemaVersion.MCP_CALL_RECORDS:
                 self._db.execute("ALTER TABLE conversation_requests ADD COLUMN mcp_calls_json TEXT NOT NULL DEFAULT '[]'")
                 self._db.execute("CREATE TABLE mcp_migrations(name TEXT PRIMARY KEY, completed_at TEXT NOT NULL)")
-                self._db.execute('PRAGMA user_version=5')
-            if version < 6:
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.MCP_CALL_RECORDS)}')
+            if version < SchemaVersion.RAG_FILES:
                 create_rag_schema(self._db)
-                self._db.execute('PRAGMA user_version=6')
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.RAG_FILES)}')
+            if version < SchemaVersion.RAG_INDEX_LIFECYCLE:
+                create_rag_run_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.RAG_INDEX_LIFECYCLE)}')
+            migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
+            if migrated != int(CURRENT_SCHEMA_VERSION):
+                raise ForgePilotError(
+                    "storage_version", "Database migration path does not reach the current schema")
 
     def _json(self, value):
         return json.dumps(self.redactor.data(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
@@ -264,6 +272,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
 
     def _recover(self):
         with self._transaction():
+            recover_rag_runs(self._db)
             for row in self._db.execute("SELECT * FROM tasks WHERE closed=0").fetchall():
                 stamp = datetime.now(timezone.utc).isoformat()
                 snapshot = json.loads(row["snapshot_json"])

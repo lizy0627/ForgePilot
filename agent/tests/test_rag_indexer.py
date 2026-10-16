@@ -35,6 +35,8 @@ class MemoryVectors:
     def __init__(self):
         self.files = {}
         self.replacements = []
+        self.fail_clear = False
+        self.fail_delete_paths = set()
 
     async def replace_file(self, repository_id, path, chunks, vectors):
         await asyncio.sleep(0)
@@ -45,9 +47,14 @@ class MemoryVectors:
         return len(chunks)
 
     async def delete_file(self, repository_id, path):
-        return len(self.files.pop((repository_id, path), []))
+        removed = len(self.files.pop((repository_id, path), []))
+        if path in self.fail_delete_paths:
+            raise RuntimeError("delete interrupted after vector mutation")
+        return removed
 
     async def clear_repository(self, repository_id):
+        if self.fail_clear:
+            raise RuntimeError("vector backend detail must not escape")
         keys = [key for key in self.files if key[0] == repository_id]
         removed = sum(len(self.files.pop(key)) for key in keys)
         return removed
@@ -128,6 +135,57 @@ async def test_only_changed_file_is_rebuilt_and_deleted_file_is_removed(tmp_path
         assert removed.total_files == 2  # one unchanged file plus one deletion
         assert ("repository-a", "b.py") not in vectors.files
         assert RagFileStore(events).get("repository-a", "b.py") is None
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_renamed_file_converges_as_scoped_delete_and_add(tmp_path):
+    original = tmp_path / "old_name.py"
+    renamed = tmp_path / "new_name.py"
+    original.write_text("VALUE = 'same content'\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    try:
+        subject = indexer(tmp_path, "repository-a", events, embeddings, vectors)
+        await subject.index_repository()
+        original.rename(renamed)
+
+        result = await subject.index_repository()
+
+        assert result.status == "ready" and result.total_files == 2
+        assert ("repository-a", "old_name.py") not in vectors.files
+        assert ("repository-a", "new_name.py") in vectors.files
+        assert [state.path for state in RagFileStore(events).list("repository-a")] == ["new_name.py"]
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_delete_is_not_reported_ready_and_retry_converges(tmp_path):
+    kept = tmp_path / "kept.py"
+    removed = tmp_path / "removed.py"
+    kept.write_text("KEEP = 1\n", encoding="utf-8")
+    removed.write_text("REMOVE = 1\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    try:
+        subject = indexer(tmp_path, "repository-a", events, embeddings, vectors)
+        await subject.index_repository()
+        removed.unlink()
+        vectors.fail_delete_paths.add("removed.py")
+
+        interrupted = await subject.index_repository()
+
+        state = RagFileStore(events).get("repository-a", "removed.py")
+        assert interrupted.status == "degraded"
+        assert state is not None and state.status == "failed"
+        assert ("repository-a", "removed.py") not in vectors.files
+
+        vectors.fail_delete_paths.clear()
+        retried = await subject.index_repository()
+        assert retried.status == "ready"
+        assert RagFileStore(events).get("repository-a", "removed.py") is None
     finally:
         events.close()
 

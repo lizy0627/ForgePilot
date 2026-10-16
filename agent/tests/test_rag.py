@@ -152,13 +152,14 @@ def test_v5_upgrade_preserves_tasks_conversations_and_memories_and_is_repeatable
     store.close()
 
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE rag_index_runs")
         db.execute("DROP TABLE rag_files")
         db.execute("PRAGMA user_version=5")
 
     for _ in range(2):
         upgraded = SqliteEventStore(path)
         try:
-            assert upgraded._db.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert upgraded._db.execute("PRAGMA user_version").fetchone()[0] == 7
             assert upgraded.get(task["task_id"])["prompt"] == "legacy task payload"
             assert upgraded.conversation_detail(conversation["conversation_id"])["title"] == "legacy conversation"
             assert upgraded.memory_list()["items"][0]["content"] == memory["content"]
@@ -166,3 +167,22 @@ def test_v5_upgrade_preserves_tasks_conversations_and_memories_and_is_repeatable
         finally:
             upgraded.close()
     assert len(list(tmp_path.glob("*.v5-backup-*.sqlite3"))) == 1
+
+
+def test_v6_upgrade_adds_durable_rag_runs_with_a_single_verified_backup(tmp_path):
+    path = tmp_path / "v6.sqlite3"
+    SqliteEventStore(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE rag_index_runs")
+        db.execute("PRAGMA user_version=6")
+
+    for _ in range(2):
+        store = SqliteEventStore(path)
+        try:
+            assert store._db.execute("PRAGMA user_version").fetchone()[0] == 7
+            assert store._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rag_index_runs'"
+            ).fetchone()
+        finally:
+            store.close()
+    assert len(list(tmp_path.glob("*.v6-backup-*.sqlite3"))) == 1

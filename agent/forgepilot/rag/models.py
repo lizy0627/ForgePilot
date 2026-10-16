@@ -253,6 +253,11 @@ IndexRunStatus = Literal[
     "cancelled",
 ]
 
+PersistedRunStatus = Literal[
+    "indexing", "cancelling", "ready", "empty", "degraded", "failed", "cancelled",
+]
+IndexOperation = Literal["index", "clear"]
+
 
 class IndexProgress(_RagModel):
     """A content-free progress snapshot safe to expose to callers and logs."""
@@ -276,4 +281,55 @@ class IndexProgress(_RagModel):
             raise ValueError("processed cannot exceed total_files")
         if self.skipped + self.failed > self.processed:
             raise ValueError("skipped and failed must describe processed files")
+        return self
+
+
+class IndexRunRecord(_RagModel):
+    """Latest durable snapshot for one repository's index operation."""
+
+    repository_id: str
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    operation: IndexOperation
+    status: PersistedRunStatus
+    revision: int = Field(ge=1, le=2**63 - 1)
+    total_files: int = Field(default=0, ge=0, le=2**31 - 1)
+    processed: int = Field(default=0, ge=0, le=2**31 - 1)
+    skipped: int = Field(default=0, ge=0, le=2**31 - 1)
+    failed: int = Field(default=0, ge=0, le=2**31 - 1)
+    chunks: int = Field(default=0, ge=0, le=2**31 - 1)
+    error_code: str | None = Field(default=None, max_length=128)
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+    @field_validator("repository_id")
+    @classmethod
+    def repository_identity(cls, value):
+        return checked_repository_id(value)
+
+    @field_validator("error_code")
+    @classmethod
+    def bounded_error_code(cls, value):
+        if value is not None:
+            return _checked_text(value, name="error_code", maximum=128)
+        return value
+
+    @field_validator("started_at", "updated_at", "finished_at")
+    @classmethod
+    def timezone_required(cls, value):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("run timestamps must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def run_is_consistent(self):
+        if self.processed > self.total_files:
+            raise ValueError("processed cannot exceed total_files")
+        if self.skipped + self.failed > self.processed:
+            raise ValueError("skipped and failed must describe processed files")
+        terminal = self.status in {"ready", "empty", "degraded", "failed", "cancelled"}
+        if terminal != (self.finished_at is not None):
+            raise ValueError("only terminal runs have finished_at")
+        if self.updated_at < self.started_at:
+            raise ValueError("updated_at cannot precede started_at")
         return self

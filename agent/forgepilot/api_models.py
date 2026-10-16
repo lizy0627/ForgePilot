@@ -228,15 +228,20 @@ class CancelTask(RequestModel):
         return self
 
 
+def checked_rag_repository_path(value: str) -> str:
+    if (not value or len(value) > 4096 or value != value.strip()
+            or any(not character.isprintable() for character in value)):
+        raise ValueError("Repository path must be bounded text without control characters or surrounding whitespace")
+    return value
+
+
 class RagIndexRequest(RequestModel):
     repository_path: str = Field(min_length=1, max_length=4096)
 
     @field_validator("repository_path")
     @classmethod
     def valid_repository_path(cls, value):
-        if not value.strip() or "\x00" in value:
-            raise ValueError("Repository path must be nonblank and contain no NUL")
-        return value
+        return checked_rag_repository_path(value)
 
 
 class RagIndexStatusResponse(BaseModel):
@@ -258,6 +263,7 @@ class RagIndexStatusResponse(BaseModel):
     last_indexed_at: str | None = None
     running: bool
     operation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    operation: Literal["index", "clear"] | None = None
     revision: int = Field(ge=0)
     error_code: str | None = Field(default=None, max_length=128)
 

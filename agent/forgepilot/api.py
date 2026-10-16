@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException
 
 from .api_models import (ApproveTask, CancelTask, CreateTask, PlanFeedback, ErrorResponse,
                          TaskList, TaskResponse, TracePage, TraceDetail, RagIndexRequest,
-                         RagIndexStatusResponse, RagIndexDeleted)
+                         RagIndexStatusResponse, RagIndexDeleted, checked_rag_repository_path)
 from .errors import ForgePilotError
 from .task_host import TaskHost
 from .conversation_host import ConversationHost
@@ -41,8 +41,16 @@ ERROR_STATUS = {
     "mcp_capacity": 429, "mcp_timeout": 504, "mcp_disabled": 403, "mcp_storage": 503,
     "mcp_cancelled": 499,
     "rag_disabled": 409, "rag_index_busy": 409, "rag_index_not_running": 409,
-    "rag_unavailable": 503,
+    "rag_index_conflict": 409, "rag_index_state": 409,
+    "rag_unavailable": 503, "rag_storage": 503, "rag_index_clear_failed": 500,
 }
+
+
+def _checked_rag_query_path(value: str) -> str:
+    try:
+        return checked_rag_repository_path(value)
+    except ValueError:
+        raise ForgePilotError("invalid_request", "Request does not match the v1 schema") from None
 
 
 def error_response(code, message, status, *, details=None, task_id=None):
@@ -141,7 +149,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.get("/api/v1/rag/status", response_model=RagIndexStatusResponse, responses=errors)
     async def rag_index_status(repository_path: str = Query(min_length=1, max_length=4096)):
-        return await host.run_rag("status", repository_path)
+        return await host.run_rag("status", _checked_rag_query_path(repository_path))
 
     @app.post("/api/v1/rag/index/cancel", response_model=RagIndexStatusResponse,
               responses=errors)
@@ -150,7 +158,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.delete("/api/v1/rag/index", response_model=RagIndexDeleted, responses=errors)
     async def delete_rag_index(repository_path: str = Query(min_length=1, max_length=4096)):
-        return await host.run_rag("clear", repository_path)
+        return await host.run_rag("clear", _checked_rag_query_path(repository_path))
 
     @app.get("/api/v1/rag/index/events", responses={**errors,
         200: {"description": "Repository-scoped code index progress SSE snapshots",
@@ -159,7 +167,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     async def rag_index_events(request: Request,
                                repository_path: str = Query(min_length=1, max_length=4096),
                                last_event_id: str | None = Header(default=None)):
-        initial = await host.run_rag("status", repository_path)
+        initial = await host.run_rag("status", _checked_rag_query_path(repository_path))
         operation_id = initial.get("operation_id")
         if operation_id is None:
             return Response(status_code=204)
