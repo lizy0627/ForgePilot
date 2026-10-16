@@ -19,7 +19,9 @@ from forgepilot.cli import ConsoleInput, SafeArgumentParser
 from forgepilot.llm import OpenAICompatibleClient
 from forgepilot.presets import BuildConfig
 from forgepilot.process import executable, run_process
+from forgepilot.rag import RagConfig, RagFileStore, RagManager, RagRuntimeSettings
 from forgepilot.security import Redactor
+from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.task_service import TaskService
 from forgepilot.trace import MemoryTrace
 
@@ -85,6 +87,8 @@ async def approve(service, pending, task, mode, read_line):
 class Benchmark:
     def __init__(self, args, *, model_factory=None, read_line=None):
         self.args = args
+        if args.mode == "offline" and args.rag == "on":
+            raise ValueError("RAG-on Agent evaluation requires --mode real; offline scripts are not Agent quality evidence")
         self.dataset = DATA_ROOT
         self.tasks = load_tasks(self.dataset)
         if args.task:
@@ -103,6 +107,8 @@ class Benchmark:
         self.model_factory = model_factory
         self.read_line = read_line or ConsoleInput().read
         self.solutions = None
+        self.rag_manager = None
+        self.rag_store = None
         if args.mode == "offline":
             self.solutions = json.loads(asset(self.dataset, "offline-solutions.json").read_text(encoding="utf-8"))["solutions"]
         elif not all(config_presence().values()):
@@ -177,7 +183,8 @@ class Benchmark:
             config = None if task.analysis else BuildConfig(self.cmake, self.ctest, configure_preset="eval",
                 build_preset="eval-build", test_preset="eval-test", configure_timeout=120, build_timeout=180, test_timeout=60)
             service = TaskService(llm, rg_executable=self.rg, git_executable=self.git, trace=trace,
-                                  redactor=self.redactor, build_config=config)
+                                  redactor=self.redactor, build_config=config,
+                                  rag_manager=self.rag_manager)
             async def segment(operation):
                 nonlocal latency
                 started = perf_counter()
@@ -258,6 +265,25 @@ class Benchmark:
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
         output = Path(self.args.output_root).resolve() / (self.args.mode + "-" + run_id)
         output.mkdir(parents=True, exist_ok=False)
+        if self.args.rag == "on":
+            embedding_model = os.environ.get("FORGEPILOT_EMBEDDING_MODEL")
+            embedding_base_url = os.environ.get("FORGEPILOT_EMBEDDING_BASE_URL")
+            embedding_api_key = (os.environ.get("FORGEPILOT_EMBEDDING_API_KEY")
+                                 or os.environ.get("FORGEPILOT_API_KEY"))
+            if not embedding_model or not embedding_base_url or not embedding_api_key:
+                raise ValueError("RAG-on evaluation needs embedding model, base URL and runtime credential")
+            settings = RagRuntimeSettings(
+                config=RagConfig(
+                    enabled=True, embedding_model=embedding_model,
+                    embedding_base_url=embedding_base_url),
+                embedding_api_key=embedding_api_key)
+            self.rag_store = SqliteEventStore(output / "rag-state.sqlite3", redactor=self.redactor)
+            self.rag_manager = RagManager(
+                settings, RagFileStore(self.rag_store), vector_path=output / "qdrant")
+            if not self.rag_manager.index_available:
+                self.rag_store.close()
+                self.rag_store = None
+                raise ValueError("RAG-on evaluation could not initialize embeddings or Qdrant")
         sources = inventory(self.dataset)
         metadata = {"run_id": run_id, "mode": self.args.mode, "model": "offline-fixed-script" if self.args.mode == "offline" else (os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"]),
             "endpoint": None if self.args.mode == "offline" else os.environ["FORGEPILOT_BASE_URL"],
@@ -265,6 +291,7 @@ class Benchmark:
             "dataset_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
             "source_hashes": sources, "environment": await self.environment(), "approval_mode": self.args.approval,
             "configuration_presence": config_presence(), "real_llm_results_produced": self.args.mode == "real",
+            "rag": self.args.rag, "evaluation_type": "real_agent" if self.args.mode == "real" else "offline_agent_harness",
             "limits": {"agent_steps": 30, "repair_rounds": 3, "task_seconds": self.args.task_timeout,
                        "llm_seconds": self.args.llm_timeout, "temperature": "provider_default", "mcp": "disabled"}}
         rows = [empty_row(t) for t in self.tasks]
@@ -287,12 +314,18 @@ class Benchmark:
             metadata["real_llm_results_produced"] = self.args.mode == "real" and any(r.get("steps", 0) > 0 for r in rows)
             summary = write_reports(output, metadata, rows, self.redactor)
             print("Report: " + str(output / "report.md"), flush=True)
+            if self.rag_manager is not None:
+                await self.rag_manager.aclose()
+            if self.rag_store is not None:
+                self.rag_store.close()
         return output, rows, summary
 
 
 def parser():
     p = SafeArgumentParser(description="ForgePilot isolated 15-task benchmark; no automatic source permission bypass")
     p.add_argument("--mode", choices=("real", "offline"), default="real")
+    p.add_argument("--rag", choices=("off", "on"), default="off",
+                   help="Run the real Agent benchmark with code RAG disabled or enabled")
     p.add_argument("--approval", choices=("manual", "manifest"), default="manual")
     p.add_argument("--task", action="append", help="Select a task; repeat for a subset. Report denominators use selected tasks.")
     p.add_argument("--output-root", default=str(DATA_ROOT.parent / "logs/benchmark"))

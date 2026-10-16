@@ -1,6 +1,7 @@
 #include "AgentApiClient.h"
 #include "TaskController.h"
 #include "ConversationController.h"
+#include "RagController.h"
 #include "McpController.h"
 #include "JsonHttp.h"
 #include "Protocol.h"
@@ -77,6 +78,86 @@ public:
 class CommunicationTest : public QObject {
     Q_OBJECT
 private slots:
+    void ragControllerRequestsAndParsesStatus() {
+        Source source; int statusReads=0,indexPosts=0,deletes=0;
+        const QString repository="C:/fixture repo";
+        auto state=[&](QString status="ready",bool running=false,int revision=0) {
+            return QJsonObject{{"repository_id",QString(64,'a')},{"enabled",true},{"available",true},
+                {"status",status},{"total_files",2},{"processed",2},{"skipped",0},{"failed",0},
+                {"chunks",7},{"file_count",2},{"dirty_file_count",0},{"failed_file_count",0},
+                {"last_indexed_at","2026-10-15T08:00:00+00:00"},{"running",running},
+                {"operation_id",running?QJsonValue(QString(32,'b')):QJsonValue::Null},{"revision",revision},
+                {"error_code",QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/rag/status?")) { ++statusReads; Source::json(r,state()); }
+            else if(r.path=="/api/v1/rag/index" && r.method=="POST") {
+                ++indexPosts; QCOMPARE(r.body.value("repository_path").toString(),repository);
+                Source::json(r,state("ready",false,3),202);
+            } else if(r.path.startsWith("/api/v1/rag/index?") && r.method=="DELETE") {
+                ++deletes; auto empty=state("empty"); empty["file_count"]=0; empty["chunks"]=0;
+                empty["total_files"]=0; empty["processed"]=0; empty["deleted_files"]=2;
+                Source::json(r,empty);
+            } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"},{"message","missing"}}}},404);
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath(repository);
+        QTRY_COMPARE(statusReads,1); QTRY_COMPARE(rag.status(),QString("ready"));
+        QCOMPARE(rag.fileCount(),2); QCOMPARE(rag.chunkCount(),7); QCOMPARE(rag.lastIndexedAt(),QString("2026-10-15T08:00:00+00:00"));
+        rag.buildIndex(); QTRY_COMPARE(indexPosts,1); QTRY_VERIFY(!rag.busy()); QVERIFY(rag.error().isEmpty());
+        rag.deleteIndex(); QTRY_COMPARE(deletes,1); QTRY_COMPARE(rag.status(),QString("empty")); QCOMPARE(rag.fileCount(),0);
+        QVERIFY(source.requests.first().path.contains("repository_path=C:/fixture%20repo")
+                || source.requests.first().path.contains("repository_path=C%3A/fixture%20repo"));
+    }
+
+    void ragControllerCancelsRunningIndex() {
+        Source source; int cancellations=0;
+        const QString repository="C:/running";
+        auto state=[](QString status,bool running,int revision) {
+            return QJsonObject{{"repository_id",QString(64,'c')},{"enabled",true},{"available",true},
+                {"status",status},{"total_files",4},{"processed",1},{"skipped",0},{"failed",0},
+                {"chunks",2},{"file_count",1},{"dirty_file_count",0},{"failed_file_count",0},
+                {"last_indexed_at",QJsonValue::Null},{"running",running},
+                {"operation_id",QString(32,'d')},{"revision",revision},{"error_code",QJsonValue::Null}};
+        };
+        Request stream;
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/rag/status?")) Source::json(r,state("indexing",true,1));
+            else if(r.path.startsWith("/api/v1/rag/index/events?")) { stream=r; Source::stream(r,{},false); }
+            else if(r.path=="/api/v1/rag/index/cancel") {
+                ++cancellations; QCOMPARE(r.body.value("repository_path").toString(),repository);
+                Source::json(r,state("cancelled",false,2));
+            } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"},{"message","missing"}}}},404);
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath(repository);
+        QTRY_VERIFY(rag.running()); QTRY_VERIFY(stream.socket);
+        rag.cancelIndex(); QTRY_COMPARE(cancellations,1); QTRY_COMPARE(rag.status(),QString("cancelled"));
+        QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
+    }
+
+    void ragControllerAppliesProgressStream() {
+        Source source;
+        const QString operation=QString(32,'e');
+        auto state=[&](QString status,bool running,int revision,int processed) {
+            return QJsonObject{{"repository_id",QString(64,'f')},{"enabled",true},{"available",true},
+                {"status",status},{"total_files",3},{"processed",processed},{"skipped",0},{"failed",0},
+                {"chunks",processed},{"file_count",processed},{"dirty_file_count",0},{"failed_file_count",0},
+                {"last_indexed_at",QJsonValue::Null},{"running",running},
+                {"operation_id",operation},{"revision",revision},{"error_code",QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/rag/status?")) Source::json(r,state("indexing",true,1,0));
+            else if(r.path.startsWith("/api/v1/rag/index/events?")) {
+                const auto final=state("ready",false,2,3);
+                const auto bytes="id: "+operation.toUtf8()+":2\r\nevent: rag_index_progress\r\ndata: "
+                    +QJsonDocument(final).toJson(QJsonDocument::Compact)+"\r\n\r\n";
+                Source::stream(r,bytes);
+            } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"},{"message","missing"}}}},404);
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/stream");
+        QTRY_COMPARE(rag.status(),QString("ready")); QCOMPARE(rag.processed(),3);
+        QCOMPARE(rag.chunkCount(),3); QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
+    }
+
     void feedbackWireRequires202() {
         Source source;
         source.handle=[](const Request &r) { Source::json(r,snapshot(A,"planning"),r.body.value("plan_version").toInt()==7?202:200); };

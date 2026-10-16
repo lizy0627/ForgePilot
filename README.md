@@ -188,6 +188,7 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 - ripgrep：存在时用于更快的文本搜索；缺少时需要仓库搜索的工作功能会明确不可用，普通聊天不受影响。
 - CMake/CTest：只在客户端构建、测试和获批的工作任务中使用。缺失时相关操作失败并报告不可用，不影响普通聊天。
 - Ninja：仅在选择 Ninja 生成器时需要；Visual Studio preset 不依赖它。
+- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。架构、隐私边界、管理接口和评测方法见 [docs/code-rag.md](docs/code-rag.md)。
 
 ## 测试
 
@@ -211,6 +212,14 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 ```
 
 离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。
+
+代码检索可复现评测不会调用 LLM 或收费 Embedding，并与上述 Agent 评测分开报告：
+
+```powershell
+.\agent.venv\Scripts\python.exe .\eval\run_retrieval.py --mode all --repository .
+```
+
+真实 15 项 Agent 对比可在具备完整模型与 Embedding 配置时分别运行 `--mode real --rag off` 和 `--mode real --rag on`。不要把固定离线脚本或确定性检索指标写成真实 Agent 成功率。
 
 ### 普通问答性能基准与指标
 

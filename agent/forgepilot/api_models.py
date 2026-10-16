@@ -228,6 +228,44 @@ class CancelTask(RequestModel):
         return self
 
 
+class RagIndexRequest(RequestModel):
+    repository_path: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("repository_path")
+    @classmethod
+    def valid_repository_path(cls, value):
+        if not value.strip() or "\x00" in value:
+            raise ValueError("Repository path must be nonblank and contain no NUL")
+        return value
+
+
+class RagIndexStatusResponse(BaseModel):
+    repository_id: str = Field(min_length=64, max_length=64)
+    enabled: bool
+    available: bool
+    status: Literal[
+        "disabled", "unavailable", "empty", "pending", "indexing", "cancelling",
+        "ready", "degraded", "failed", "cancelled",
+    ]
+    total_files: int = Field(ge=0)
+    processed: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    chunks: int = Field(ge=0)
+    file_count: int = Field(ge=0)
+    dirty_file_count: int = Field(ge=0)
+    failed_file_count: int = Field(ge=0)
+    last_indexed_at: str | None = None
+    running: bool
+    operation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    revision: int = Field(ge=0)
+    error_code: str | None = Field(default=None, max_length=128)
+
+
+class RagIndexDeleted(RagIndexStatusResponse):
+    deleted_files: int = Field(ge=0)
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str

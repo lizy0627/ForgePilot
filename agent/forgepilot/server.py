@@ -17,11 +17,13 @@ from .settings import (add_build_arguments, add_connection_arguments, build_conf
                        add_storage_arguments, models_from_args)
 from .sqlite_store import SqliteEventStore
 from .task_service import TaskService
+from .repository import Repository
 from .chat_service import ChatService
 from .stream_metrics import close_metrics_logging, configure_metrics_logging
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments
-from .rag import add_rag_arguments, rag_runtime_availability_from_args
+from .rag import (RagFileStore, RagIndexCoordinator, RagManager, add_rag_arguments,
+                  rag_runtime_availability_from_args)
 
 
 def parser():
@@ -67,12 +69,11 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
         if not args.base_url or not key:
             raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
         models = models_from_args(args)
-        # Foundation only: expose an inert unavailable state for optional invalid/missing
-        # configuration. Indexing/retrieval orchestration is intentionally not wired yet.
-        rag_runtime_availability_from_args(args, api_key=key)
+        rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
         model_clients = OpenAIClientPool(args.base_url, key, timeout=args.timeout)
         if not 1 <= args.port <= 65535:
             raise ForgePilotError("server_config", "Port must be between 1 and 65535")
+        rag_manager = None
         def factory(trace):
             # Plain Q&A must start even when development tools are absent/misconfigured.
             rg, git = executable(args.rg, "rg"), executable(args.git, "git")
@@ -80,7 +81,8 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
             llm = model_clients.lease(models.task)
             return TaskService(llm, rg_executable=rg, git_executable=git, trace=trace,
                                redactor=redactor, build_config=config,
-                               code_intelligence_config=code_intelligence_from_args(args))
+                               code_intelligence_config=code_intelligence_from_args(args),
+                               rag_manager=rag_manager)
         def chat_factory():
             return ChatService(model_clients.lease(models.chat),
                 rg_executable=args.rg,git_executable=args.git,redactor=redactor,
@@ -100,10 +102,28 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
         try:
             store=SqliteEventStore(args.database,redactor=redactor)
             try:
+                vector_path = (Path(store.path).resolve().parent / "qdrant"
+                               if store.path != ":memory:" else None)
+                rag_manager = RagManager(
+                    rag_runtime, RagFileStore(store), vector_path=vector_path)
+                async def open_rag_repository(repository_path):
+                    return await Repository.open(
+                        repository_path,
+                        # Repository indexing uses the existing bounded scanner;
+                        # resolving optional rg here would make disabled RAG
+                        # status fail before it can report "disabled".
+                        rg_executable=args.rg or "rg",
+                        git_executable=executable(args.git, "git"),
+                    )
+                rag_coordinator = RagIndexCoordinator(rag_manager, open_rag_repository)
+                async def close_resources():
+                    await rag_manager.aclose()
+                    await model_clients.aclose()
                 app = create_app(factory, store=store, chat_factory=chat_factory,
                                  summary_factory=summary_factory, mcp_disabled=args.disable_mcp,
                                  legacy_mcp_config=args.mcp_config,
-                                 model_client_closer=model_clients.aclose)
+                                 model_client_closer=close_resources,
+                                 rag_coordinator=rag_coordinator)
                 options = dict(host=args.host, port=args.port, workers=1,
                                access_log=False, log_level="warning", timeout_graceful_shutdown=10)
                 if stop_requested is None:

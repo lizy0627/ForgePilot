@@ -17,7 +17,7 @@ DEFAULT_INCLUDE = (
     "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp", "*.hxx",
     "*.py", "*.pyi", "*.js", "*.jsx", "*.ts", "*.tsx", "*.java", "*.cs",
     "*.go", "*.rs", "*.swift", "*.kt", "*.kts", "*.rb", "*.php", "*.lua",
-    "*.sql", "*.sh", "*.ps1", "*.cmake", "CMakeLists.txt",
+    "*.sql", "*.sh", "*.ps1", "*.qml", "*.cmake", "CMakeLists.txt",
 )
 EMBEDDING_SECRET_NAME = "rag_embedding_api_key"
 

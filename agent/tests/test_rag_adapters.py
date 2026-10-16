@@ -204,3 +204,18 @@ async def test_qdrant_dimension_mismatch_requires_rebuild_without_deleting_data(
         with pytest.raises(ForgePilotError, match="rag_index_rebuild_required.*rebuild"):
             await store.search("repository-a", [1.0, 0.0])
         assert await store.count("repository-a") == 1
+
+
+@pytest.mark.asyncio
+async def test_qdrant_file_replacement_removes_stale_chunks(tmp_path):
+    async with QdrantVectorStore(tmp_path / "vectors") as store:
+        old_first = chunk(content="old first")
+        old_second = chunk(content="old second")
+        await store.upsert_chunks(
+            [old_first, old_second], [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]])
+
+        replacement = chunk(content="new only")
+        assert await store.replace_file(
+            "repository-a", "src/main.py", [replacement], [[1.0, 0.0, 0.0]]) == 1
+        results = await store.search("repository-a", [1.0, 0.0, 0.0], limit=10)
+        assert [result.chunk.content for result in results] == ["new only"]

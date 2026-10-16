@@ -2,5 +2,9 @@
 
 from .registry import Tool, ToolRegistry, ToolResult
 from .repository_tools import register_repository_tools
+from .retrieval_tools import register_retrieval_tool
 
-__all__ = ["Tool", "ToolRegistry", "ToolResult", "register_repository_tools"]
+__all__ = [
+    "Tool", "ToolRegistry", "ToolResult", "register_repository_tools",
+    "register_retrieval_tool",
+]

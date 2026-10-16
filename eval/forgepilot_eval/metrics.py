@@ -44,7 +44,8 @@ def write_reports(directory, metadata, rows, redactor):
     (directory / "results.csv").write_text(buf.getvalue(), encoding="utf-8-sig", newline="")
     def cell(value):
         return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ").replace("<", "&lt;").replace(">", "&gt;")
-    lines = ["# ForgePilot Benchmark report", "", f"Mode: **{metadata['mode']}**. Model: {cell(metadata['model'])}.", "",
+    rag = metadata.get("rag", "off")
+    lines = ["# ForgePilot Benchmark report", "", f"Mode: **{metadata['mode']}**. Model: {cell(metadata['model'])}. RAG: **{cell(rag)}**.", "",
         "OFFLINE results validate the evaluator and fixed scripts; they are not real LLM performance." if metadata["mode"] == "offline" else
         "One real-model run only; these observations do not establish stable success rates.", "",
         f"Run: {metadata['run_id']}; started: {metadata['started_at']}; finished: {metadata.get('finished_at', 'in progress')}", "",

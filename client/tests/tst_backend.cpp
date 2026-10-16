@@ -1,8 +1,10 @@
 #include "TaskController.h"
 #include "ConversationController.h"
+#include "RagController.h"
 #include "ClientUi.h"
 #include "HttpFixture.h"
 #include <QGuiApplication>
+#include <QDir>
 #include <QJsonDocument>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
@@ -124,6 +126,22 @@ class BackendTest : public QObject {
     }
 private slots:
     void initTestCase() { configureClientUi(*qobject_cast<QGuiApplication*>(QCoreApplication::instance())); }
+    void codeIndexMinimalPanel() {
+        TaskController tasks; RagController rag;
+        QQmlEngine engine;
+        const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
+        QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
+        QScopedPointer<QObject> panel(component.createWithInitialProperties({
+            {"controller",QVariant::fromValue(&tasks)},{"rag",QVariant::fromValue(&rag)}}));
+        QVERIFY2(panel,qPrintable(component.errorString()));
+        auto *indexPanel=panel->findChild<QObject*>("codeIndexPanel");
+        auto *build=panel->findChild<QObject*>("buildCodeIndexButton");
+        auto *remove=panel->findChild<QObject*>("deleteCodeIndexButton");
+        QVERIFY(indexPanel); QVERIFY(build); QVERIFY(remove);
+        QVERIFY(!build->property("enabled").toBool());
+        QVERIFY(!remove->property("enabled").toBool());
+    }
+
     void feedbackQmlStateIsolation() {
         Source source; QJsonObject current=snapshot(); Request pending,stream;
         int posts=0,gets=0;
@@ -340,6 +358,9 @@ private slots:
         QTRY_VERIFY(settingsButton->property("hovered").toBool());
         QVERIFY(buttonBackground->property("color").value<QColor>()!=idleColor);
         QVERIFY(click("settingsButton")); QTest::qWait(100);
+        QVERIFY(find("codeIndexPanel"));
+        QVERIFY(find("buildCodeIndexButton"));
+        QVERIFY(!find("buildCodeIndexButton")->property("enabled").toBool());
         if(!output.isEmpty()) QVERIFY(window->grabWindow().save(output+"/settings.png"));
         QTest::keyClick(window,Qt::Key_Escape);
         // Exercise Qt's folder dialog lifecycle and the product's accepted binding with the test fallback dialog.

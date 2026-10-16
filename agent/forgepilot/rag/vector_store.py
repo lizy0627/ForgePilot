@@ -37,6 +37,9 @@ class VectorStore(Protocol):
                             vectors: Sequence[Sequence[float]]) -> int: ...
     async def search(self, repository_id: str, query_vector: Sequence[float], *,
                      limit: int = 8) -> list[RetrievedChunk]: ...
+    async def replace_file(self, repository_id: str, path: str,
+                           chunks: Sequence[CodeChunk],
+                           vectors: Sequence[Sequence[float]]) -> int: ...
     async def delete_file(self, repository_id: str, path: str) -> int: ...
     async def clear_repository(self, repository_id: str) -> int: ...
     async def count(self, repository_id: str) -> int: ...
@@ -193,6 +196,84 @@ class QdrantVectorStore:
         async with self._lock:
             self._ensure_open()
             return await self._call(self._upsert_chunks, checked_chunks, checked_vectors)
+
+    def _replace_file(self, repository_id: str, path: str, chunks: list[CodeChunk],
+                      vectors: list[list[float]]) -> int:
+        """Replace one file while the async lock keeps searches from observing both versions."""
+        condition = self._file_filter(repository_id, path)
+        if not chunks:
+            self._delete(condition)
+            return 0
+        self._ensure_dimension(len(vectors[0]), create=True)
+        points = [qmodels.PointStruct(
+            id=str(uuid5(_POINT_NAMESPACE, chunk.chunk_id)),
+            vector=vector,
+            payload=self._payload(chunk),
+        ) for chunk, vector in zip(chunks, vectors, strict=True)]
+        old_points = []
+        offset = None
+        if self._client.collection_exists(self.collection_name):
+            while True:
+                page, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=condition,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                old_points.extend(page)
+                if offset is None:
+                    break
+        try:
+            # Remove the old file before publishing the replacement. Searches
+            # share the same lock, so they observe either version but never a
+            # mixed set. A process interruption can leave the file absent, not
+            # with two valid versions; the failed row is retried next run.
+            self._delete(condition)
+            self._client.upsert(self.collection_name, points=points, wait=True)
+            return len(points)
+        except BaseException:
+            # Best-effort compensation retains the previously searchable file if
+            # a multi-operation Local Mode replacement fails part way through.
+            try:
+                self._delete(condition)
+                if old_points:
+                    self._client.upsert(
+                        self.collection_name,
+                        points=[qmodels.PointStruct(
+                            id=point.id, vector=point.vector, payload=point.payload,
+                        ) for point in old_points],
+                        wait=True,
+                    )
+            except Exception:
+                pass
+            raise
+
+    async def replace_file(self, repository_id: str, path: str,
+                           chunks: Sequence[CodeChunk],
+                           vectors: Sequence[Sequence[float]]) -> int:
+        self._ensure_open()
+        repository_id = checked_repository_id(repository_id)
+        path = checked_relative_path(path)
+        if (isinstance(chunks, (str, bytes)) or not isinstance(chunks, Sequence)
+                or isinstance(vectors, (str, bytes)) or not isinstance(vectors, Sequence)):
+            raise ForgePilotError("rag_vector_input", "Chunks and vectors must be sequences")
+        checked_chunks = [CodeChunk.model_validate(chunk) for chunk in chunks]
+        checked_vectors = [self._vector(vector) for vector in vectors]
+        if len(checked_chunks) != len(checked_vectors):
+            raise ForgePilotError("rag_vector_input", "Each chunk requires exactly one vector")
+        if any(chunk.repository_id != repository_id or chunk.path != path
+               for chunk in checked_chunks):
+            raise ForgePilotError("rag_vector_input", "Replacement chunks must belong to one file")
+        if checked_vectors:
+            dimension = len(checked_vectors[0])
+            if any(len(vector) != dimension for vector in checked_vectors):
+                raise ForgePilotError("rag_vector_input", "All vectors in a batch must have one dimension")
+        async with self._lock:
+            self._ensure_open()
+            return await self._call(
+                self._replace_file, repository_id, path, checked_chunks, checked_vectors)
 
     def _search(self, repository_id: str, vector: list[float], limit: int) -> list[RetrievedChunk]:
         if not self._ensure_dimension(len(vector), create=False):

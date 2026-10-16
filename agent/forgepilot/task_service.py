@@ -12,7 +12,7 @@ from .git import GitRepository
 from .repository import Repository
 from .runtime import AgentRuntime, transition
 from .security import Redactor
-from .tools import ToolRegistry, register_repository_tools
+from .tools import ToolRegistry, register_repository_tools, register_retrieval_tool
 from .tools.change_tools import register_change_tools
 from .trace import TraceSink
 from .build import BuildPipeline
@@ -32,7 +32,7 @@ class TaskService:
                  trace: TraceSink, redactor: Redactor | None = None,
                  build_config: BuildConfig | None = None,
                  code_intelligence_config: CodeIntelligenceConfig | None = None,
-                 mcp_config: MCPConfig | None = None) -> None:
+                 mcp_config: MCPConfig | None = None, rag_manager=None) -> None:
         self.llm = llm
         self.rg_executable = rg_executable
         self.git_executable = git_executable
@@ -40,6 +40,7 @@ class TaskService:
         self.build_config = build_config
         self.code_intelligence_config = code_intelligence_config
         self.mcp_config = mcp_config
+        self.rag_manager = rag_manager
         self._mcp = None
         self.redactor = redactor or getattr(llm, "redactor", Redactor())
         self._active: asyncio.Task | None = None
@@ -110,9 +111,27 @@ class TaskService:
             self._runtime = AgentRuntime(self.llm, registry, self.trace, redactor=self.redactor,
                                          repository=repository, mcp_manager=self.mcp_manager)
             runtime_for_symbols = self._runtime
-            register_symbol_tools(registry, CodeIntelligence(repository, self.code_intelligence_config,
+            intelligence = CodeIntelligence(repository, self.code_intelligence_config,
                 selected_directory=lambda: runtime_for_symbols.build_pipeline.binary_dir
-                    if runtime_for_symbols.build_pipeline is not None else None))
+                    if runtime_for_symbols.build_pipeline is not None else None)
+            register_symbol_tools(registry, intelligence)
+            rag_services = None
+            if self.rag_manager is not None and self.rag_manager.enabled:
+                try:
+                    rag_services = self.rag_manager.for_repository(
+                        repository, code_intelligence=intelligence)
+                    if rag_services is not None:
+                        self._runtime.retrieval_service = rag_services.retrieval
+                        register_retrieval_tool(
+                            registry, rag_services.retrieval,
+                            planned_files=lambda: (
+                                [file.path for file in self._context.plan.files_to_modify]
+                                if self._context is not None and self._context.plan is not None else ()),
+                        )
+                except Exception:
+                    self.trace.emit(context.task_id, "rag_status", {
+                        "status": "degraded", "error_code": "rag_initialization_failed",
+                    })
             if modify:
                 self._lock = RepositoryLock(repository.root)
                 self._lock.acquire()
@@ -131,7 +150,20 @@ class TaskService:
                     runtime.ensure_write(path)
                 self._changes = ChangeSet(repository, ensure_write, self.trace, context.task_id)
                 self._runtime.changes = self._changes
-                register_change_tools(registry, git, self._changes)
+                def mark_rag_dirty(path):
+                    if rag_services is None or not rag_services.indexer.available:
+                        return
+                    try:
+                        state = rag_services.indexer.mark_dirty(path)
+                        self.trace.emit(context.task_id, "rag_file_dirty", {
+                            "path": state.path, "status": state.status,
+                        })
+                    except Exception:
+                        self.trace.emit(context.task_id, "rag_status", {
+                            "status": "degraded", "error_code": "rag_dirty_failed",
+                        })
+                register_change_tools(
+                    registry, git, self._changes, on_changed=mark_rag_dirty)
                 if self.build_config is not None:
                     self._changes.content_guard = ensure_validation_integrity
                     def ensure_build(phase):
@@ -153,6 +185,34 @@ class TaskService:
                 except ForgePilotError as exc:
                     status = {"status": "unavailable", "error": self.redactor.text(str(exc))}
                 self.trace.emit(context.task_id, "mcp_status", status)
+            if rag_services is not None:
+                begin_index = getattr(self.rag_manager, "begin_index", None)
+                finish_index = getattr(self.rag_manager, "finish_index", None)
+                claimed = (begin_index(rag_services.indexer.repository_id)
+                           if begin_index is not None else True)
+                try:
+                    indexed = (await rag_services.indexer.index_repository() if claimed
+                               else rag_services.indexer.get_status())
+                    self._runtime.rag_index_available = (
+                        indexed.status in {"ready", "degraded"} and indexed.chunks > 0)
+                    self.trace.emit(context.task_id, "rag_status", {
+                        "status": indexed.status if claimed else "busy",
+                        "total_files": indexed.total_files,
+                        "processed": indexed.processed,
+                        "skipped": indexed.skipped,
+                        "failed": indexed.failed,
+                        "chunks": indexed.chunks,
+                    })
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._runtime.rag_index_available = False
+                    self.trace.emit(context.task_id, "rag_status", {
+                        "status": "degraded", "error_code": "rag_index_failed",
+                    })
+                finally:
+                    if claimed and finish_index is not None:
+                        finish_index(rag_services.indexer.repository_id)
             result = await self._runtime.run(context, planning=planning, prepare_context=prepare_context,background=background)
             # UI/adapters receive snapshots, never the mutable authorization state.
             return deepcopy(result)

@@ -1,6 +1,7 @@
 #include "TaskController.h"
 #include "ConversationController.h"
 #include "McpController.h"
+#include "RagController.h"
 #include "ClientUi.h"
 #include <QCommandLineParser>
 #include <QGuiApplication>
@@ -22,8 +23,14 @@ int main(int argc, char* argv[])
     controller.setBaseUrl(QUrl(parser.value("server")));
     ConversationController conversations(&controller);
     McpController mcp(&controller);
+    RagController rag;
+    rag.setBaseUrl(controller.baseUrl());
+    QObject::connect(&controller, &TaskController::baseUrlChanged, &rag,
+                     [&] { rag.setBaseUrl(controller.baseUrl()); });
+    QObject::connect(&controller, &TaskController::repositoryPathChanged, &rag,
+                     [&] { rag.setRepositoryPath(controller.repositoryPath()); });
     QQmlApplicationEngine engine;
-    engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)}});
+    engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("ForgePilot", "Main");
     return app.exec();

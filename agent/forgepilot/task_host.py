@@ -45,7 +45,8 @@ class _Task:
 
 
 class TaskHost:
-    def __init__(self, service_factory, *, store=None, max_tasks=32, mcp_disabled=False, legacy_mcp_config=None):
+    def __init__(self, service_factory, *, store=None, max_tasks=32, mcp_disabled=False,
+                 legacy_mcp_config=None, rag_coordinator=None):
         self.factory = service_factory
         self.store = store if store is not None else SqliteEventStore()
         self.max_tasks = max_tasks
@@ -59,6 +60,7 @@ class TaskHost:
         self.mcp_service = MCPService(self.store)  # No connection/decryption at startup.
         self.mcp_disabled = mcp_disabled
         self.legacy_mcp_config = legacy_mcp_config
+        self.rag_coordinator = rag_coordinator
         self._mcp_active = set()  # Worker-loop owned; includes resource cleanup.
 
     async def start(self):
@@ -161,6 +163,21 @@ class TaskHost:
             if not future.cancelled():
                 future.exception()  # Retrieve a late failure without exposing it.
             raise
+
+    async def run_rag(self, operation, *args):
+        if self.rag_coordinator is None:
+            raise ForgePilotError("rag_unavailable", "Code indexing is not configured")
+        if operation not in {"start", "status", "cancel", "clear"}:
+            raise ForgePilotError("rag_unavailable", "Unknown code indexing operation")
+        return await self._submit(getattr(self.rag_coordinator, operation)(*args))
+
+    async def rag_snapshot(self, repository_id):
+        if self.rag_coordinator is None:
+            raise ForgePilotError("rag_unavailable", "Code indexing is not configured")
+
+        async def read():
+            return self.rag_coordinator.snapshot(repository_id)
+        return await self._submit(read())
 
     def _snapshot(self, entry):
         context = entry.service.snapshot(persist_diff=True) or entry.initial_context
@@ -455,6 +472,8 @@ class TaskHost:
 
     async def _shutdown(self, *, close_resources=None):
         self._stopping = True
+        if self.rag_coordinator is not None:
+            await self.rag_coordinator.close()
         checks = list(self._mcp_active)
         for check in checks:
             if not check.cancelling():

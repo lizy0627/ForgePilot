@@ -174,6 +174,53 @@ class RetrievedChunk(_RagModel):
         return value
 
 
+class RetrievalResult(_RagModel):
+    """Ranked repository evidence; ``content`` is always untrusted source data."""
+
+    path: str
+    line: int = Field(ge=1, le=2**31 - 1)
+    end_line: int = Field(ge=1, le=2**31 - 1)
+    symbol: str | None = Field(default=None, max_length=512)
+    score: float
+    reasons: tuple[str, ...] = Field(min_length=1, max_length=32)
+    content: str = Field(min_length=1, max_length=1_048_576, repr=False)
+
+    @field_validator("path")
+    @classmethod
+    def relative_path(cls, value):
+        return checked_relative_path(value)
+
+    @field_validator("symbol")
+    @classmethod
+    def symbol_text(cls, value):
+        if value is not None:
+            return _checked_text(value, name="symbol", maximum=512)
+        return value
+
+    @field_validator("score")
+    @classmethod
+    def finite_score(cls, value):
+        if not math.isfinite(value):
+            raise ValueError("score must be finite")
+        return value
+
+    @field_validator("reasons")
+    @classmethod
+    def bounded_reasons(cls, values):
+        if any(not value or len(value) > 128 or value != value.strip() or "\0" in value
+               for value in values):
+            raise ValueError("reasons must be bounded nonblank text")
+        if len(set(values)) != len(values):
+            raise ValueError("reasons must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def lines_are_ordered(self):
+        if self.end_line < self.line:
+            raise ValueError("end_line must be greater than or equal to line")
+        return self
+
+
 class RagIndexStatus(_RagModel):
     repository_id: str
     status: Literal["disabled", "empty", "indexing", "ready", "degraded", "failed"] = "disabled"
@@ -198,4 +245,35 @@ class RagIndexStatus(_RagModel):
     def counts_are_consistent(self):
         if self.failed_file_count > self.file_count:
             raise ValueError("failed_file_count cannot exceed file_count")
+        return self
+
+
+IndexRunStatus = Literal[
+    "disabled", "idle", "pending", "indexing", "ready", "empty", "degraded", "failed",
+    "cancelled",
+]
+
+
+class IndexProgress(_RagModel):
+    """A content-free progress snapshot safe to expose to callers and logs."""
+
+    repository_id: str
+    status: IndexRunStatus = "idle"
+    total_files: int = Field(default=0, ge=0, le=2**31 - 1)
+    processed: int = Field(default=0, ge=0, le=2**31 - 1)
+    skipped: int = Field(default=0, ge=0, le=2**31 - 1)
+    failed: int = Field(default=0, ge=0, le=2**31 - 1)
+    chunks: int = Field(default=0, ge=0, le=2**31 - 1)
+
+    @field_validator("repository_id")
+    @classmethod
+    def repository_identity(cls, value):
+        return checked_repository_id(value)
+
+    @model_validator(mode="after")
+    def counts_are_consistent(self):
+        if self.processed > self.total_files:
+            raise ValueError("processed cannot exceed total_files")
+        if self.skipped + self.failed > self.processed:
+            raise ValueError("skipped and failed must describe processed files")
         return self

@@ -42,10 +42,26 @@ class EditArguments(Arguments):
         return self
 
 
-def register_change_tools(registry, git, changes):
+def register_change_tools(registry, git, changes, *, on_changed=None):
     async def diff():
         return json.dumps(changes.diff(), ensure_ascii=False)
+    async def write_file(path, content):
+        output = await changes.write_file(path, content)
+        if on_changed is not None:
+            try:
+                on_changed(json.loads(output)["path"])
+            except Exception:
+                pass
+        return output
+    async def edit_file(path, edits):
+        output = await changes.edit_file(path, edits)
+        if on_changed is not None:
+            try:
+                on_changed(json.loads(output)["path"])
+            except Exception:
+                pass
+        return output
     registry.register(FunctionTool("git_status", "Read current Git status, including pre-existing user changes; excludes protected paths.", Arguments, git.status))
     registry.register(FunctionTool("git_diff", "Show only this task's Agent changes relative to original byte snapshots, plus restore/conflict status.", Arguments, diff))
-    registry.register(FunctionTool("write_file", "Write complete UTF-8 text to an approved file during modifying. Read existing files with read_file before overwriting; after a first-write conflict, read again and regenerate the change. New scope requires another human-approved plan. Never delete or commit.", WriteArguments, changes.write_file))
-    registry.register(FunctionTool("edit_file", "Prefer for local changes to an existing approved UTF-8 file after read_file. Supply 1-8 unique exact old_text/new_text pairs; all match the pre-call content and ranges must not overlap. Preserve indentation; LF snippets also match CRLF files. After a first-write conflict, read again and regenerate edits. Never creates files; new scope requires human approval.", EditArguments, changes.edit_file))
+    registry.register(FunctionTool("write_file", "Write complete UTF-8 text to an approved file during modifying. Read existing files with read_file before overwriting; retrieved RAG context is not a current-file read. After a first-write conflict, read again and regenerate the change. New scope requires another human-approved plan. Never delete or commit.", WriteArguments, write_file))
+    registry.register(FunctionTool("edit_file", "Prefer for local changes to an existing approved UTF-8 file after read_file; retrieved RAG context is not a current-file read. Supply 1-8 unique exact old_text/new_text pairs; all match the pre-call content and ranges must not overlap. Preserve indentation; LF snippets also match CRLF files. After a first-write conflict, read again and regenerate edits. Never creates files; new scope requires human approval.", EditArguments, edit_file))

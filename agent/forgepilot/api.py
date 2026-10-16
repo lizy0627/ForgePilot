@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import json
 import sqlite3
 from time import monotonic
 from urllib.parse import urlsplit
@@ -11,7 +12,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException
 
-from .api_models import ApproveTask, CancelTask, CreateTask, PlanFeedback, ErrorResponse, TaskList, TaskResponse, TracePage, TraceDetail
+from .api_models import (ApproveTask, CancelTask, CreateTask, PlanFeedback, ErrorResponse,
+                         TaskList, TaskResponse, TracePage, TraceDetail, RagIndexRequest,
+                         RagIndexStatusResponse, RagIndexDeleted)
 from .errors import ForgePilotError
 from .task_host import TaskHost
 from .conversation_host import ConversationHost
@@ -37,6 +40,8 @@ ERROR_STATUS = {
     "unknown_mcp_server": 404, "mcp_catalog_changed": 409, "mcp_config_conflict": 409,
     "mcp_capacity": 429, "mcp_timeout": 504, "mcp_disabled": 403, "mcp_storage": 503,
     "mcp_cancelled": 499,
+    "rag_disabled": 409, "rag_index_busy": 409, "rag_index_not_running": 409,
+    "rag_unavailable": 503,
 }
 
 
@@ -51,8 +56,9 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_retention_seconds=60.0,
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
-               model_client_closer=None):
-    host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled, legacy_mcp_config=legacy_mcp_config)
+               model_client_closer=None, rag_coordinator=None):
+    host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
+                    legacy_mcp_config=legacy_mcp_config, rag_coordinator=rag_coordinator)
     conversations = ConversationHost(host,chat_factory,summary_factory=summary_factory,
         stream_retention_seconds=conversation_stream_retention_seconds,
         stream_max_subscribers=conversation_stream_max_subscribers)
@@ -127,6 +133,71 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     def list_tasks(limit: int = Query(default=20,ge=1,le=100), before: str | None = Query(default=None,max_length=512),
                    conversation_id: str | None = Query(default=None,max_length=36)):
         return host.store.list_page(limit,before,conversation_id)
+
+    @app.post("/api/v1/rag/index", response_model=RagIndexStatusResponse,
+              status_code=202, responses=errors)
+    async def start_rag_index(body: RagIndexRequest):
+        return await host.run_rag("start", body.repository_path)
+
+    @app.get("/api/v1/rag/status", response_model=RagIndexStatusResponse, responses=errors)
+    async def rag_index_status(repository_path: str = Query(min_length=1, max_length=4096)):
+        return await host.run_rag("status", repository_path)
+
+    @app.post("/api/v1/rag/index/cancel", response_model=RagIndexStatusResponse,
+              responses=errors)
+    async def cancel_rag_index(body: RagIndexRequest):
+        return await host.run_rag("cancel", body.repository_path)
+
+    @app.delete("/api/v1/rag/index", response_model=RagIndexDeleted, responses=errors)
+    async def delete_rag_index(repository_path: str = Query(min_length=1, max_length=4096)):
+        return await host.run_rag("clear", repository_path)
+
+    @app.get("/api/v1/rag/index/events", responses={**errors,
+        200: {"description": "Repository-scoped code index progress SSE snapshots",
+              "content": {"text/event-stream": {"schema": {"type": "string"}}}},
+        204: {"description": "No active or newer index progress"}})
+    async def rag_index_events(request: Request,
+                               repository_path: str = Query(min_length=1, max_length=4096),
+                               last_event_id: str | None = Header(default=None)):
+        initial = await host.run_rag("status", repository_path)
+        operation_id = initial.get("operation_id")
+        if operation_id is None:
+            return Response(status_code=204)
+        cursor = 0
+        if last_event_id:
+            prefix, separator, revision = last_event_id.partition(":")
+            if (separator != ":" or prefix != operation_id or not revision.isascii()
+                    or not revision.isdecimal()):
+                raise ForgePilotError("invalid_event_id", "Last-Event-ID format is invalid")
+            cursor = int(revision)
+            if cursor > initial["revision"]:
+                raise ForgePilotError("event_cursor_ahead", "Event cursor is ahead of index progress")
+        if not initial["running"] and cursor >= initial["revision"]:
+            return Response(status_code=204)
+
+        async def stream():
+            snapshot = initial
+            last_heartbeat = monotonic()
+            yield "retry: 1000\n\n"
+            while True:
+                revision = snapshot["revision"]
+                if revision > cursor_state[0]:
+                    event_id = f"{snapshot['operation_id']}:{revision}"
+                    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+                    yield f"id: {event_id}\nevent: rag_index_progress\ndata: {payload}\n\n"
+                    cursor_state[0] = revision
+                if not snapshot["running"] or await request.is_disconnected():
+                    return
+                await asyncio.sleep(min(0.25, heartbeat_seconds))
+                snapshot = await host.rag_snapshot(snapshot["repository_id"])
+                if monotonic() - last_heartbeat >= heartbeat_seconds:
+                    yield ": heartbeat\n\n"
+                    last_heartbeat = monotonic()
+
+        cursor_state = [cursor]
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
 
     @app.post('/api/v1/conversations',status_code=201,response_model=ConversationDetail,responses=errors)
     def new_conversation(body: CreateConversation):

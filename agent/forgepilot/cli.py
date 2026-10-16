@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
 from queue import Empty, Queue
 import sys
 from threading import Thread
@@ -21,7 +22,8 @@ from .recording import TaskJournal
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments, mcp_from_args
 from .settings import task_model_from_args
-from .rag import add_rag_arguments, rag_runtime_availability_from_args
+from .rag import (RagFileStore, RagManager, add_rag_arguments,
+                  rag_runtime_availability_from_args)
 
 
 class SafeArgumentParser(argparse.ArgumentParser):
@@ -126,11 +128,12 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
     service = None
     store = None
     trace = None
+    rag_manager = None
     try:
         if not args.base_url or not key:
             raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
         task_model = task_model_from_args(args)
-        rag_runtime_availability_from_args(args, api_key=key)
+        rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
         rg = executable(args.rg, "rg")
         git = executable(args.git, "git")
         build_config = None
@@ -139,11 +142,15 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
         async with OpenAICompatibleClient(args.base_url, key, task_model,
                                           timeout=args.timeout, transport=transport) as llm:
             store = SqliteEventStore(args.database, redactor=redactor)
+            vector_path = (Path(store.path).resolve().parent / "qdrant"
+                           if store.path != ":memory:" else None)
+            rag_manager = RagManager(
+                rag_runtime, RagFileStore(store), vector_path=vector_path)
             trace = TaskJournal(store, lambda: service.snapshot(persist_diff=True), redactor, on_event=display_event)
             service = TaskService(llm, rg_executable=rg, git_executable=git,
                                   trace=trace, redactor=redactor, build_config=build_config,
                                   code_intelligence_config=code_intelligence_from_args(args),
-                                  mcp_config=mcp_from_args(args))
+                                  mcp_config=mcp_from_args(args), rag_manager=rag_manager)
             reader = read_line or ConsoleInput().read
             run = service.analyze if args.analysis_only else service.plan if args.plan_only else service.start
             result = await run(args.repository_path, args.prompt)
@@ -195,6 +202,8 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
             service.close()
         if trace is not None:
             trace.flush()
+        if rag_manager is not None:
+            await rag_manager.aclose()
         if store is not None:
             store.close()
 

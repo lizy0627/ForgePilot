@@ -10,6 +10,7 @@ ApplicationWindow {
     required property var controller
     required property var conversations
     property var mcp: null
+    property var rag: null
     property bool developmentTest: false
     property bool detailsExpanded: false
     property bool sidebarExpanded: true
@@ -192,7 +193,7 @@ ApplicationWindow {
         width: Math.min(800, window.width - 48); height: Math.min(640, window.height - 48)
         onOpened: { if (window.mcp) window.mcp.open() }
         onClosed: { if (window.mcp) window.mcp.close() }
-        contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp }
+        contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag }
         footer: DialogButtonBox { ActionButton { objectName: "closeSettingsButton"; text: "完成"; enabled: !window.mcp || window.mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }
     }
     Loader { active: !!window.mcp; sourceComponent: Component { McpServerDialog { mcp: window.mcp } } }

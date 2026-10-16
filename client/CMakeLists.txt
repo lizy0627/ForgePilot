@@ -20,6 +20,7 @@ add_library(ForgePilotCommunication STATIC
     src/ConversationStreamClient.h src/ConversationStreamClient.cpp
     src/TaskController.h src/TaskController.cpp src/TaskPresentation.cpp
     src/ConversationController.h src/ConversationController.cpp
+    src/RagController.h src/RagController.cpp
     src/MemoryController.h src/MemoryController.cpp
     src/McpController.h src/McpController.cpp
     src/RecordListModel.h src/RecordListModel.cpp

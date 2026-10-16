@@ -69,6 +69,23 @@ jobs:
             agent/tests/test_mcp_runtime.py `
             agent/tests/test_mcp_service.py
 
+      - name: Run deterministic code RAG tests and retrieval evaluation
+        shell: pwsh
+        run: |
+          & .\agent.venv\Scripts\python.exe -m pytest -q `
+            agent/tests/test_rag.py `
+            agent/tests/test_rag_adapters.py `
+            agent/tests/test_rag_indexer.py `
+            agent/tests/test_rag_retrieval.py `
+            agent/tests/test_rag_agent.py `
+            agent/tests/test_rag_api.py `
+            agent/tests/test_retrieval_evaluator.py
+          & .\agent.venv\Scripts\python.exe .\eval\run_retrieval.py `
+            --mode all `
+            --repository . `
+            --json-out .\artifacts\retrieval-eval.json `
+            --markdown-out .\artifacts\retrieval-eval.md
+
       - name: Export and verify protocol contracts
         shell: pwsh
         run: |

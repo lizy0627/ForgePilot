@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "name": "ForgePilot code retrieval benchmark v1",
+  "tasks": [
+    {
+      "id": "exact-repository-indexer",
+      "query": "Find the RepositoryIndexer class and index_repository implementation.",
+      "expected_paths": ["agent/forgepilot/rag/indexer.py"],
+      "expected_symbols": ["RepositoryIndexer", "index_repository"],
+      "category": "exact_symbol"
+    },
+    {
+      "id": "exact-retrieval-service",
+      "query": "Where is RetrievalService.retrieve implemented?",
+      "expected_paths": ["agent/forgepilot/rag/retrieval.py"],
+      "expected_symbols": ["RetrievalService", "retrieve"],
+      "category": "exact_symbol"
+    },
+    {
+      "id": "exact-rag-coordinator",
+      "query": "Locate RagIndexCoordinator and its start method.",
+      "expected_paths": ["agent/forgepilot/rag/admin.py"],
+      "expected_symbols": ["RagIndexCoordinator", "start"],
+      "category": "exact_symbol"
+    },
+    {
+      "id": "exact-retrieve-tool",
+      "query": "Find register_retrieval_tool and retrieve_code_context.",
+      "expected_paths": ["agent/forgepilot/tools/retrieval_tools.py"],
+      "expected_symbols": ["register_retrieval_tool", "retrieve_code_context"],
+      "category": "exact_symbol"
+    },
+    {
+      "id": "semantic-stale-vectors",
+      "query": "Which code refuses cached chunks when the current source digest has changed?",
+      "expected_paths": ["agent/forgepilot/rag/retrieval.py"],
+      "category": "semantic_natural_language"
+    },
+    {
+      "id": "semantic-optional-degradation",
+      "query": "Where does optional semantic search fail open so ordinary repository work can continue?",
+      "expected_paths": ["agent/forgepilot/rag/integration.py", "agent/forgepilot/rag/retrieval.py"],
+      "category": "semantic_natural_language"
+    },
+    {
+      "id": "semantic-index-transaction",
+      "query": "How is a source digest committed only after replacement vectors are durable?",
+      "expected_paths": ["agent/forgepilot/rag/indexer.py"],
+      "category": "semantic_natural_language"
+    },
+    {
+      "id": "semantic-sqlite-state",
+      "query": "Where are per-repository indexed file hashes, chunk counts, and retry states persisted?",
+      "expected_paths": ["agent/forgepilot/rag/store.py"],
+      "category": "semantic_natural_language"
+    },
+    {
+      "id": "cross-write-dirty",
+      "query": "Trace how a successful write_file or edit_file operation marks that path dirty for RAG.",
+      "expected_paths": ["agent/forgepilot/tools/change_tools.py", "agent/forgepilot/task_service.py"],
+      "expected_symbols": ["mark_dirty"],
+      "category": "cross_file_call"
+    },
+    {
+      "id": "cross-analysis-retrieval",
+      "query": "Trace the task startup path that prepares repository RAG services and injects initial retrieval into analysis.",
+      "expected_paths": ["agent/forgepilot/task_service.py", "agent/forgepilot/runtime.py"],
+      "category": "cross_file_call"
+    },
+    {
+      "id": "cross-api-index",
+      "query": "Trace POST rag index from the FastAPI route into the background index coordinator.",
+      "expected_paths": ["agent/forgepilot/api.py", "agent/forgepilot/rag/admin.py"],
+      "category": "cross_file_call"
+    },
+    {
+      "id": "cross-server-manager",
+      "query": "Where are RagManager and RagIndexCoordinator constructed and passed into TaskHost?",
+      "expected_paths": ["agent/forgepilot/server.py", "agent/forgepilot/task_host.py"],
+      "expected_symbols": ["RagManager", "RagIndexCoordinator", "TaskHost"],
+      "category": "cross_file_call"
+    },
+    {
+      "id": "pair-retrieval-tests",
+      "query": "Find the RetrievalService implementation and the tests for RRF ranking, stale chunks, and degradation.",
+      "expected_paths": ["agent/forgepilot/rag/retrieval.py", "agent/tests/test_rag_retrieval.py"],
+      "expected_symbols": ["RetrievalService"],
+      "category": "implementation_test_association"
+    },
+    {
+      "id": "pair-indexer-tests",
+      "query": "Find RepositoryIndexer plus its incremental indexing and retry unit tests.",
+      "expected_paths": ["agent/forgepilot/rag/indexer.py", "agent/tests/test_rag_indexer.py"],
+      "expected_symbols": ["RepositoryIndexer"],
+      "category": "implementation_test_association"
+    },
+    {
+      "id": "pair-rag-api-tests",
+      "query": "Find the RAG index management API implementation and its conflict, cancel, and path safety tests.",
+      "expected_paths": ["agent/forgepilot/api.py", "agent/tests/test_rag_api.py"],
+      "category": "implementation_test_association"
+    },
+    {
+      "id": "pair-qt-controller-tests",
+      "query": "Find RagController and the Qt communication tests that parse index status and SSE progress.",
+      "expected_paths": ["client/src/RagController.cpp", "client/tests/tst_communication.cpp"],
+      "expected_symbols": ["RagController"],
+      "category": "implementation_test_association"
+    },
+    {
+      "id": "config-cmake-controller",
+      "query": "Which CMake target compiles RagController into the Qt communication library?",
+      "expected_paths": ["client/CMakeLists.txt"],
+      "expected_symbols": ["RagController"],
+      "category": "cmake_qml_config"
+    },
+    {
+      "id": "config-qml-settings",
+      "query": "Where is the compact code index settings panel with build, cancel, and delete controls?",
+      "expected_paths": ["client/panels/SettingsPanel.qml"],
+      "category": "cmake_qml_config"
+    },
+    {
+      "id": "config-qml-wiring",
+      "query": "Where does Main.qml pass the rag controller into SettingsPanel?",
+      "expected_paths": ["client/Main.qml"],
+      "expected_symbols": ["SettingsPanel"],
+      "category": "cmake_qml_config"
+    },
+    {
+      "id": "config-qt-components",
+      "query": "Find the Qt CMake configuration for Network Quick Qml QuickControls2 and tests.",
+      "expected_paths": ["client/CMakeLists.txt"],
+      "category": "cmake_qml_config"
+    },
+    {
+      "id": "zh-index-progress",
+      "query": "代码索引的文件数、Chunk 数、待更新数量、失败数量和进度显示在哪里？",
+      "expected_paths": ["client/panels/SettingsPanel.qml"],
+      "category": "chinese_requirement"
+    },
+    {
+      "id": "zh-delete-repository",
+      "query": "删除指定仓库的 RAG 索引但绝不能删除项目源码，这段后端逻辑在哪里？",
+      "expected_paths": ["agent/forgepilot/rag/admin.py"],
+      "category": "chinese_requirement"
+    },
+    {
+      "id": "zh-untrusted-context",
+      "query": "检索到的代码和注释必须作为不可信仓库数据，不能覆盖系统授权规则；提示词在哪里声明？",
+      "expected_paths": ["agent/forgepilot/runtime.py"],
+      "category": "chinese_requirement"
+    },
+    {
+      "id": "zh-embedding-privacy",
+      "query": "Embedding 请求的密钥、正文和向量如何避免进入日志，并限制批量请求？",
+      "expected_paths": ["agent/forgepilot/rag/embedding.py"],
+      "category": "chinese_requirement"
+    }
+  ]
+}
