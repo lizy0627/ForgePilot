@@ -2,6 +2,7 @@
 #include "Protocol.h"
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSet>
 
 TaskController::TaskController(QObject *parent) : QObject(parent)
 {
@@ -317,6 +318,13 @@ void TaskController::applyEvent(const QString &id, const QJsonObject &payload)
     } else if (event == "plan_created") {
         if (data.value("plan_version").toInt() >= planVersion()) {
             m_snapshot.insert("plan", data.value("plan")); m_snapshot.insert("plan_version", data.value("plan_version"));
+        }
+    } else if (event == "rag_usage") {
+        const auto status = data.value("rag_status").toString();
+        static const QSet<QString> allowed{"not_requested", "unavailable", "available", "used", "degraded"};
+        if (data.value("rag_used").isBool() && allowed.contains(status)) {
+            m_snapshot.insert("rag_used", data.value("rag_used"));
+            m_snapshot.insert("rag_status", status);
         }
     } else if (event == "build_started" || event=="test_started") {
         auto report=m_snapshot.value("build_result").toObject();

@@ -2,12 +2,14 @@ import "Theme.js" as Theme
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "RagUi.js" as RagUi
 
 ColumnLayout {
     id: root
     required property var controller
     property var mcp: null
     property var rag: null
+    onVisibleChanged: if (visible && rag && controller.repositoryPath) rag.refresh()
     TabBar {
         id: tabs; Layout.fillWidth: true
         NavigationTab { objectName: "connectionSettingsTab"; text: "连接" }
@@ -28,7 +30,33 @@ ColumnLayout {
             }
             Panel {
                 objectName: "codeIndexPanel"; Layout.fillWidth: true
-                title: "代码索引"; subtitle: root.rag && root.rag.enabled ? "已启用" : "未启用"
+                title: "代码索引"; subtitle: root.rag ? RagUi.statusLabel(root.rag.status) : "控制器不可用"
+                RowLayout {
+                    Layout.fillWidth: true
+                    Switch {
+                        objectName: "ragUseSwitch"
+                        text: "新任务使用 RAG"
+                        checked: !!root.rag && root.rag.useForTasks
+                        enabled: !!root.rag
+                        onToggled: if (root.rag) root.rag.useForTasks = checked
+                        Accessible.description: "只影响之后发送的工作任务，不会启动或停止后端，也不会删除索引。"
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        objectName: "codeIndexStatus"
+                        text: root.rag ? RagUi.statusLabel(root.rag.status) : "不可用"
+                        color: root.rag ? RagUi.statusColor(root.rag.status, root.rag.reachable) : Theme.muted
+                        font.bold: true; textFormat: Text.PlainText
+                    }
+                }
+                Label {
+                    objectName: "codeIndexStatusDetail"
+                    Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                    color: root.rag && (root.rag.status === "failed" || !!root.rag.error) ? Theme.danger
+                        : root.rag && root.rag.status === "degraded" ? Theme.warning : Theme.muted
+                    text: root.rag ? RagUi.statusDetail(root.rag.status, root.rag.statusErrorCode, root.rag.reachable)
+                        : "代码索引控制器不可用。"
+                }
                 Label {
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
                     color: root.rag && root.rag.available ? Theme.secondary : Theme.muted
@@ -62,7 +90,7 @@ ColumnLayout {
                     }
                     Item { Layout.fillWidth: true }
                     ActionButton {
-                        objectName: "deleteCodeIndexButton"; text: "删除索引"; flat: true
+                        objectName: "deleteCodeIndexButton"; text: "清空索引"; flat: true
                         enabled: !!root.rag && root.rag.fileCount > 0 && !root.rag.busy && !root.rag.running
                         onClicked: deleteIndexDialog.open()
                     }
@@ -72,6 +100,12 @@ ColumnLayout {
                     text: root.rag ? root.rag.error : ""; textFormat: Text.PlainText
                     color: Theme.danger; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; maximumLineCount: 2
                 }
+                RowLayout {
+                    visible: !!root.rag && !!root.rag.error; Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    ActionButton { text: "忽略"; flat: true; onClicked: root.rag.clearError() }
+                    ActionButton { text: "重试"; flat: true; enabled: !!root.rag && !root.rag.busy; onClicked: if (root.rag) root.rag.refresh() }
+                }
             }
             Item { Layout.fillHeight: true }
         }
@@ -79,13 +113,13 @@ ColumnLayout {
     }
     Dialog {
         id: deleteIndexDialog; objectName: "deleteCodeIndexDialog"; modal: true
-        title: "删除代码索引？"; anchors.centerIn: parent
+        title: "清空代码索引？"; anchors.centerIn: parent
         width: Math.min(420, Math.max(280, root.width - 48))
         standardButtons: Dialog.Cancel
         contentItem: Label { text: "只会删除当前项目的检索索引，不会修改项目源码。"; wrapMode: Text.Wrap; textFormat: Text.PlainText }
         footer: DialogButtonBox {
             ActionButton { text: "取消"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-            ActionButton { objectName: "confirmDeleteCodeIndexButton"; text: "删除"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: if (root.rag) root.rag.deleteIndex() }
+            ActionButton { objectName: "confirmDeleteCodeIndexButton"; text: "清空"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: if (root.rag) root.rag.deleteIndex() }
         }
     }
 }

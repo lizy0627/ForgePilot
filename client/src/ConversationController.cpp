@@ -492,6 +492,7 @@ void ConversationController::sendMessage(const QString &prompt)
     QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},
                         {"mode",m_mode},{"prompt",prompt}};
     if(m_mode=="chat") pending["tool_mode"]=m_toolMode;
+    else pending["use_rag"]=m_useRag;
     m_pending.insert(pendingKey(),pending);
     postPending();
 }

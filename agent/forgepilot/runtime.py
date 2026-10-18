@@ -118,6 +118,8 @@ class AgentRuntime:
             results = await self.retrieval_service.retrieve(request)
             retrieval_trace = getattr(self.retrieval_service, "last_trace", None)
             trace_data = retrieval_trace.model_dump() if retrieval_trace is not None else {}
+            context.rag_used = True
+            context.rag_status = ("degraded" if trace_data.get("status") == "degraded" else "used")
             self.trace.emit(context.task_id, "rag_initial_retrieval", {
                 "status": trace_data.get("status", "ready"), "result_count": len(results),
                 "content_chars": sum(len(result.content) for result in results),
@@ -142,6 +144,7 @@ class AgentRuntime:
         except asyncio.CancelledError:
             raise
         except Exception:
+            context.rag_status = "degraded"
             self.trace.emit(context.task_id, "rag_initial_retrieval", {
                 "status": "degraded", "error_code": "rag_retrieval_failed",
             })
@@ -817,6 +820,13 @@ class AgentRuntime:
 
     def _record_tool(self, context: TaskContext, meta: dict, result: ToolResult) -> None:
         data = self.redactor.data(result.model_dump())
+        if meta["name"] == "retrieve_code_context":
+            if data["success"]:
+                context.rag_used = True
+                if context.rag_status != "degraded":
+                    context.rag_status = "used"
+            else:
+                context.rag_status = "degraded"
         context.tool_results.append({**meta, **data})
         context.conversation.append({"role": "tool", "tool_call_id": meta["tool_call_id"],
                                      "content": json.dumps(data, ensure_ascii=False)})

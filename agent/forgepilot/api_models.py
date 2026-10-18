@@ -17,6 +17,7 @@ class RequestModel(BaseModel):
 class CreateTask(RequestModel):
     repository_path: str = Field(min_length=1, max_length=4096)
     prompt: str = Field(min_length=1, max_length=16_384)
+    use_rag: bool = True
 
     @field_validator("repository_path", "prompt")
     @classmethod
@@ -63,6 +64,7 @@ class ConversationRequest(RequestModel):
     mode: Literal['chat','task'] = 'chat'
     tool_mode: Literal['fast','web','project','auto'] = 'auto'
     prompt: str = Field(min_length=1,max_length=16_384)
+    use_rag: bool = True
 
     @field_validator('prompt')
     @classmethod
@@ -299,6 +301,9 @@ class TaskSummary(BaseModel):
     cancel_requested: bool = False
     last_event_id: str | None = None
     read_only: bool = False
+    rag_requested: bool = True
+    rag_used: bool = False
+    rag_status: Literal["not_requested", "unavailable", "available", "used", "degraded"] = "unavailable"
 
 
 class TaskResponse(TaskSummary):
@@ -352,7 +357,7 @@ class TraceDetail(BaseModel):
     data: dict
 
 
-EventName = Literal["task_state_changed", "message", "plan_created", "approval_required",
+EventName = Literal["task_state_changed", "message", "plan_created", "approval_required", "rag_usage",
     "tool_started", "tool_finished", "file_changed", "build_started", "build_finished",
     "test_started", "test_finished", "reflection", "task_completed", "task_failed"]
 

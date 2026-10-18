@@ -11,6 +11,9 @@ class TaskController : public QObject {
     Q_PROPERTY(QString repositoryPath READ repositoryPath WRITE setRepositoryPath NOTIFY repositoryPathChanged)
     Q_PROPERTY(QString taskId READ taskId NOTIFY taskChanged)
     Q_PROPERTY(QString state READ state NOTIFY taskChanged)
+    Q_PROPERTY(bool ragRequested READ ragRequested NOTIFY taskChanged)
+    Q_PROPERTY(bool ragUsed READ ragUsed NOTIFY taskChanged)
+    Q_PROPERTY(QString ragStatus READ ragStatus NOTIFY taskChanged)
     Q_PROPERTY(int planVersion READ planVersion NOTIFY taskChanged)
     Q_PROPERTY(QVariantMap plan READ plan NOTIFY taskChanged)
     Q_PROPERTY(QVariantMap snapshot READ snapshot NOTIFY taskChanged)
@@ -51,6 +54,9 @@ public:
     void setRepositoryPath(const QString &path);
     QString taskId() const { return m_taskId; }
     QString state() const { return m_snapshot.value("state").toString(); }
+    bool ragRequested() const { return m_snapshot.value("rag_requested").toBool(true); }
+    bool ragUsed() const { return m_snapshot.value("rag_used").toBool(); }
+    QString ragStatus() const { return m_snapshot.value("rag_status").toString("unavailable"); }
     int planVersion() const { return m_snapshot.value("plan_version").toInt(); }
     QVariantMap plan() const { return m_snapshot.value("plan").toObject().toVariantMap(); }
     QVariantMap snapshot() const { return m_snapshot.toVariantMap(); }

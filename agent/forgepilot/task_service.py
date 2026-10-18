@@ -79,18 +79,23 @@ class TaskService:
         return await self._run(repository_path, prompt, planning=True)
 
     async def start(self, repository_path: str, prompt: str, *, task_id: str | None = None,
-                    on_admitted=None, prepare_context=None, background=None) -> TaskContext:
+                    on_admitted=None, prepare_context=None, background=None,
+                    use_rag: bool = True) -> TaskContext:
         """Start a modification task; return at the first human review boundary."""
         return await self._run(repository_path, prompt, planning=True, modify=True,
-                               task_id=task_id, on_admitted=on_admitted, prepare_context=prepare_context,background=background)
+                               task_id=task_id, on_admitted=on_admitted, prepare_context=prepare_context,
+                               background=background, use_rag=use_rag)
 
     async def _run(self, repository_path: str, prompt: str, *, planning: bool, modify: bool = False,
-                   task_id: str | None = None, on_admitted=None, prepare_context=None, background=None) -> TaskContext:
+                   task_id: str | None = None, on_admitted=None, prepare_context=None, background=None,
+                   use_rag: bool = True) -> TaskContext:
         if self._active is not None or (self._context is not None and
                                        self._context.state in {TaskState.WAITING_APPROVAL, TaskState.MODIFYING, TaskState.PLANNING}):
             raise ForgePilotError("task_busy", "This service instance already has an active task")
         self._active = asyncio.current_task()
-        context = TaskContext(self.redactor.text(repository_path), self.redactor.text(prompt))
+        context = TaskContext(self.redactor.text(repository_path), self.redactor.text(prompt),
+                              rag_requested=use_rag,
+                              rag_status="unavailable" if use_rag else "not_requested")
         if task_id is not None:
             context.task_id = task_id  # Trusted adapter-generated identity; never an LLM field.
         self._context = context
@@ -116,11 +121,12 @@ class TaskService:
                     if runtime_for_symbols.build_pipeline is not None else None)
             register_symbol_tools(registry, intelligence)
             rag_services = None
-            if self.rag_manager is not None and self.rag_manager.enabled:
+            if use_rag and self.rag_manager is not None and self.rag_manager.enabled:
                 try:
                     rag_services = self.rag_manager.for_repository(
                         repository, code_intelligence=intelligence)
                     if rag_services is not None:
+                        context.rag_status = "available"
                         self._runtime.retrieval_service = rag_services.retrieval
                         register_retrieval_tool(
                             registry, rag_services.retrieval,
@@ -129,6 +135,7 @@ class TaskService:
                                 if self._context is not None and self._context.plan is not None else ()),
                         )
                 except Exception:
+                    context.rag_status = "degraded"
                     self.trace.emit(context.task_id, "rag_status", {
                         "status": "degraded", "error_code": "rag_initialization_failed",
                     })
@@ -205,9 +212,12 @@ class TaskService:
                         "failed": indexed.failed,
                         "chunks": indexed.chunks,
                     })
+                    if indexed.status in {"degraded", "failed"}:
+                        context.rag_status = "degraded"
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    context.rag_status = "degraded"
                     self._runtime.rag_index_available = getattr(
                         rag_services.retrieval, "available", True)
                     self.trace.emit(context.task_id, "rag_status", {

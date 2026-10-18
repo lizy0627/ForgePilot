@@ -25,10 +25,13 @@ int main(int argc, char* argv[])
     McpController mcp(&controller);
     RagController rag;
     rag.setBaseUrl(controller.baseUrl());
+    conversations.setUseRag(rag.useForTasks());
     QObject::connect(&controller, &TaskController::baseUrlChanged, &rag,
                      [&] { rag.setBaseUrl(controller.baseUrl()); });
     QObject::connect(&controller, &TaskController::repositoryPathChanged, &rag,
                      [&] { rag.setRepositoryPath(controller.repositoryPath()); });
+    QObject::connect(&rag, &RagController::useForTasksChanged, &conversations,
+                     [&] { conversations.setUseRag(rag.useForTasks()); });
     QQmlApplicationEngine engine;
     engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);

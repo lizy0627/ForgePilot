@@ -16,6 +16,7 @@ class ConversationController : public QObject {
     Q_PROPERTY(QString repositoryPath READ repositoryPath NOTIFY changed)
     Q_PROPERTY(QString mode READ mode WRITE setMode NOTIFY changed)
     Q_PROPERTY(QString toolMode READ toolMode WRITE setToolMode NOTIFY changed)
+    Q_PROPERTY(bool useRag READ useRag WRITE setUseRag NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY changed)
     Q_PROPERTY(QString answerStatus READ answerStatus NOTIFY changed)
@@ -53,6 +54,8 @@ public:
     void setMode(const QString &mode);
     QString toolMode() const { return m_toolMode; }
     void setToolMode(const QString &mode);
+    bool useRag() const { return m_useRag; }
+    void setUseRag(bool enabled) { if (m_useRag != enabled) { m_useRag = enabled; emit changed(); } }
     QString error() const { return m_error; }
     QString serverStatus() const { return m_serverStatus; }
     QString answerStatus() const { return m_answerStatus; }
@@ -162,7 +165,7 @@ private:
     bool m_deleteLoading=false,m_deleteActive=false,m_deleting=false;
     bool m_conversationStreamSupported=true,m_streamMetricsRecorded=false;
     qint64 m_before=0;
-    bool m_loading=false,m_historyLoading=false,m_creating=false,m_editing=false;
+    bool m_loading=false,m_historyLoading=false,m_creating=false,m_editing=false,m_useRag=true;
     bool m_pollingRequest=false;
     quint64 m_pollGeneration=0;
     QString m_finishedRequest;

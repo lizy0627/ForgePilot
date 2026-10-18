@@ -149,6 +149,7 @@ async def test_analysis_auto_retrieval_injects_at_most_six_untrusted_results():
     result = await runtime.run(context)
 
     assert result.state == TaskState.COMPLETED and not result.approved_files
+    assert result.rag_requested and result.rag_used and result.rag_status == "used"
     request = retrieval.calls[0][0]
     assert request.top_k == 6 and request.context_max_chars == 2_000
     messages = llm.requests[0]
@@ -212,10 +213,32 @@ async def test_rag_failure_is_trace_only_and_original_flow_completes():
 
     assert result.state == TaskState.COMPLETED
     assert result.final_result == "ordinary analysis"
+    assert not result.rag_used and result.rag_status == "degraded"
     event = next(event for event in trace.events
                  if event.kind == "rag_initial_retrieval")
     assert event.data == {
         "status": "degraded", "error_code": "rag_retrieval_failed"}
+
+
+@pytest.mark.asyncio
+async def test_per_task_rag_switch_skips_index_and_retrieval_without_affecting_flow(
+        cpp_repo, rg_exe, git_exe):
+    manager = FakeRagManager()
+    service = TaskService(
+        ScriptedLLM([reply("ordinary analysis")]),
+        rg_executable=rg_exe, git_executable=git_exe,
+        trace=MemoryTrace(), rag_manager=manager)
+    try:
+        result = await service._run(
+            str(cpp_repo), "Analyze target_symbol", planning=False, use_rag=False)
+        assert result.state == TaskState.COMPLETED
+        assert result.final_result == "ordinary analysis"
+        assert not result.rag_requested and not result.rag_used
+        assert result.rag_status == "not_requested"
+        assert manager.indexer.index_calls == 0
+        assert manager.retrieval.calls == []
+    finally:
+        service.close()
 
 
 @pytest.mark.asyncio

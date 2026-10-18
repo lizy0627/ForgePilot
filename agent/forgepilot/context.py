@@ -52,6 +52,10 @@ class TaskContext:
     validation_history: list[dict] = field(default_factory=list)
     last_validation_error: dict | None = None
     failure_kind: str | None = None
+    # Public, content-free evidence for the Qt "used in this task" indicator.
+    rag_requested: bool = True
+    rag_used: bool = False
+    rag_status: str = "unavailable"
 
     @property
     def token_usage(self) -> dict[str, int | None]:

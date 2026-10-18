@@ -135,7 +135,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)
     async def create_task(body: CreateTask):
-        return await host.create(body.repository_path, body.prompt)
+        return await host.create(body.repository_path, body.prompt, use_rag=body.use_rag)
 
     @app.get("/api/v1/tasks", response_model=TaskList, responses=errors)
     def list_tasks(limit: int = Query(default=20,ge=1,le=100), before: str | None = Query(default=None,max_length=512),
@@ -229,7 +229,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.post('/api/v1/conversations/{conversation_id}/requests',status_code=202,response_model=ConversationRequestState,responses=errors)
     async def conversation_request(conversation_id: str, body: ConversationRequest):
-        return await conversations.submit(conversation_id,body.request_id,body.mode,body.prompt,body.tool_mode)
+        return await conversations.submit(conversation_id,body.request_id,body.mode,body.prompt,body.tool_mode,body.use_rag)
 
     @app.get('/api/v1/memories',response_model=MemoryList,responses=errors)
     def memory_list(repository_path: str | None = Query(default=None,max_length=4096)):

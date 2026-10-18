@@ -31,11 +31,11 @@ class ConversationHost:
         self._stream_max_subscribers=stream_max_subscribers
         tasks.extra_active=lambda:len(self._answers)
 
-    async def submit(self,cid,rid,mode,prompt,tool_mode='auto'):
+    async def submit(self,cid,rid,mode,prompt,tool_mode='auto',use_rag=True):
         request_started=monotonic()
-        return await self.tasks._submit(self._submit(cid,rid,mode,prompt,tool_mode,request_started))
+        return await self.tasks._submit(self._submit(cid,rid,mode,prompt,tool_mode,use_rag,request_started))
 
-    async def _submit(self,cid,rid,mode,prompt,tool_mode,request_started):
+    async def _submit(self,cid,rid,mode,prompt,tool_mode,use_rag,request_started):
         if cid in self._deletions:
             raise ForgePilotError('conversation_deleting','对话正在删除，不能再发送请求。')
         retry=self.store.request_retry(cid,rid,mode,prompt)
@@ -50,7 +50,7 @@ class ConversationHost:
         request=self.store.begin_conversation_request(cid,rid,mode,prompt,notice)
         if mode=='task':
             try:
-                await self.tasks._create(request['repository_path'],prompt,request_id=rid,
+                await self.tasks._create(request['repository_path'],prompt,request_id=rid,use_rag=use_rag,
                     prepare_context=lambda:self._prepare_task_context(request),background=lambda:self.store.memory_background(cid,request['repository_path']))
             except Exception as exc:
                 if isinstance(exc, ForgePilotError) and exc.code == 'storage_unavailable':

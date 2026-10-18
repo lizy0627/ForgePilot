@@ -218,10 +218,11 @@ class TaskHost:
                 entry.service._runtime.cancel_requested = True
         return entry.persistence_error
 
-    async def create(self, repository_path, prompt):
-        return await self._submit(self._create(repository_path, prompt))
+    async def create(self, repository_path, prompt, *, use_rag=True):
+        return await self._submit(self._create(repository_path, prompt, use_rag=use_rag))
 
-    async def _create(self, repository_path, prompt, *, request_id=None, prepare_context=None, background=None):
+    async def _create(self, repository_path, prompt, *, request_id=None, prepare_context=None, background=None,
+                      use_rag=True):
         if self._stopping:
             raise ForgePilotError("server_stopping", "Server is shutting down")
         if len(self._tasks) + self.extra_active() >= self.max_tasks:
@@ -231,7 +232,8 @@ class TaskHost:
             error = ForgePilotError("repository_busy", "Another task owns this repository")
             error.task_id = self._repositories[key]
             raise error
-        context = TaskContext(repository_path, prompt)
+        context = TaskContext(repository_path, prompt, rag_requested=use_rag,
+                              rag_status="unavailable" if use_rag else "not_requested")
         trace = _Trace(lambda event: self._publish(entry, event))
         service = self.factory(trace)
         if hasattr(service, "configure_mcp"):
@@ -274,7 +276,8 @@ class TaskHost:
                 if initial:
                     await entry.service.start(entry.initial_context.repository_path, entry.initial_context.user_request,
                                               task_id=entry.initial_context.task_id, on_admitted=admitted,
-                                              prepare_context=prepare_context,background=background)
+                                              prepare_context=prepare_context,background=background,
+                                              use_rag=entry.initial_context.rag_requested)
                 elif entry.service.state == TaskState.PLANNING:
                     await entry.service.replan(entry.initial_context.task_id)
                 elif entry.service.state == TaskState.MODIFYING:
@@ -483,5 +486,9 @@ class TaskHost:
                                if not entry.closed), return_exceptions=True)
         await asyncio.gather(*(entry.running for entry in self._tasks.values() if entry.running is not None),
                              return_exceptions=True)
+        if self.rag_coordinator is not None:
+            # The coordinator first stops index runs and rejects new work. Shared
+            # embedding/vector resources close only after Agent tasks have joined.
+            await self.rag_coordinator.manager.aclose()
         if close_resources is not None:
             await close_resources()

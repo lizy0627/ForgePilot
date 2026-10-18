@@ -28,6 +28,28 @@ from forgepilot.process import executable
 from forgepilot.task_service import TaskService
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.chat_service import ChatService
+from forgepilot.rag import (RagConfig, RagFileStore, RagIndexCoordinator, RagManager,
+                            RagRuntimeSettings)
+from forgepilot.repository import Repository
+
+
+class FakeEmbeddingProvider:
+    """Deterministic integration fixture; never contacts an external service."""
+    name = "client-integration-fake-v1"
+
+    @staticmethod
+    def _vector(text):
+        vector = [0.0] * 64
+        for index, value in enumerate(text.encode("utf-8")):
+            vector[(value + index) % len(vector)] += 1.0
+        length = sum(value * value for value in vector) ** 0.5 or 1.0
+        return [value / length for value in vector]
+
+    async def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    async def embed_query(self, text):
+        return self._vector(text)
 
 
 class OfflineChatModel:
@@ -265,12 +287,20 @@ def main():
     config = BuildConfig(cmake, str(Path(cmake).with_name("ctest.exe")), generator="Visual Studio 17 2022", architecture="x64")
     database=output/("ui-history-"+uuid4().hex+".sqlite3")
     store=SqliteEventStore(database)
+    rag_settings=RagRuntimeSettings(config=RagConfig(enabled=True,embedding_model="fake",
+        embedding_base_url="https://fixture.invalid/v1"),embedding_api_key="fixture-only")
+    rag_manager=RagManager(rag_settings,RagFileStore(store),vector_path=output/"rag-vectors",
+        embedding_provider=FakeEmbeddingProvider())
+    async def open_rag_repository(path):
+        return await Repository.open(path,rg_executable=rg,git_executable=git)
+    rag_coordinator=RagIndexCoordinator(rag_manager,open_rag_repository)
     chat_captures=[]
     chat_factory=lambda: ChatService(OfflineChatModel(.6 if args.deletion else 0,chat_captures),rg_executable=rg,git_executable=git)
     feedback_gates=[]
     joint_captures=[]
     app = create_app(lambda trace: TaskService(OpenAICompatibleClient(**live_settings,timeout=120) if args.live_model else JointModel(feedback_gates,joint_captures) if args.scenario=='joint' else FeedbackModel(feedback_gates) if args.scenario=='feedback' else OfflineModel(),
-        rg_executable=rg, git_executable=git, trace=trace, build_config=config),store=store,chat_factory=chat_factory)
+        rg_executable=rg, git_executable=git, trace=trace, build_config=config),store=store,
+        chat_factory=chat_factory,rag_coordinator=rag_coordinator)
     if args.scenario in ('feedback', 'joint') and not args.live_model:
         @app.post('/_fixture/release-feedback')
         async def release_feedback():

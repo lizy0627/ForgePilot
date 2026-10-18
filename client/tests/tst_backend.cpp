@@ -127,7 +127,7 @@ class BackendTest : public QObject {
 private slots:
     void initTestCase() { configureClientUi(*qobject_cast<QGuiApplication*>(QCoreApplication::instance())); }
     void codeIndexMinimalPanel() {
-        TaskController tasks; RagController rag;
+        TaskController tasks; RagController rag; rag.setUseForTasks(false);
         QQmlEngine engine;
         const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
         QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
@@ -137,9 +137,52 @@ private slots:
         auto *indexPanel=panel->findChild<QObject*>("codeIndexPanel");
         auto *build=panel->findChild<QObject*>("buildCodeIndexButton");
         auto *remove=panel->findChild<QObject*>("deleteCodeIndexButton");
-        QVERIFY(indexPanel); QVERIFY(build); QVERIFY(remove);
+        auto *toggle=panel->findChild<QObject*>("ragUseSwitch");
+        auto *status=panel->findChild<QObject*>("codeIndexStatus");
+        QVERIFY(indexPanel); QVERIFY(build); QVERIFY(remove); QVERIFY(toggle); QVERIFY(status);
         QVERIFY(!build->property("enabled").toBool());
         QVERIFY(!remove->property("enabled").toBool());
+        QVERIFY(!toggle->property("checked").toBool());
+        QCOMPARE(status->property("text").toString(),QString("未启用"));
+    }
+
+    void ragQmlPresentationLogicIsExplicitAndSafe() {
+        QQmlEngine engine;
+        const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
+        QQmlComponent component(&engine);
+        component.setData(R"(
+            import QtQml
+            import "../panels/RagUi.js" as RagUi
+            QtObject {
+                property string used: RagUi.taskUsage(true, true, "used")
+                property string degraded: RagUi.taskUsage(true, false, "degraded")
+                property string disabled: RagUi.taskUsage(false, false, "not_requested")
+                property string unknownReason: RagUi.statusDetail("failed", "private_stack_value", true)
+            }
+        )",QUrl::fromLocalFile(clientRoot+"/tests/RagUiHarness.qml"));
+        QScopedPointer<QObject> logic(component.create());
+        QVERIFY2(logic,qPrintable(component.errorString()));
+        QCOMPARE(logic->property("used").toString(),QString("本次已使用 RAG"));
+        QCOMPARE(logic->property("degraded").toString(),QString("本次未使用 RAG（检索失败，已降级）"));
+        QCOMPARE(logic->property("disabled").toString(),QString("本次未使用 RAG（发送时开关已关闭）"));
+        QVERIFY(!logic->property("unknownReason").toString().contains("private_stack_value"));
+    }
+
+    void codeIndexProductionApiLifecycle() {
+        if(!qEnvironmentVariable("FORGEPILOT_RESTART_TASK_ID").isEmpty()
+                || !qEnvironmentVariable("FORGEPILOT_RESTART_DELETION").isEmpty())
+            QSKIP("Restart phase intentionally opens history without the fake RAG runtime.");
+        const auto url=qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL");
+        const auto repository=qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");
+        if(url.isEmpty() || repository.isEmpty()) QSKIP("Production API fixture is not active.");
+        RagController rag; rag.setBaseUrl(QUrl(url)); rag.setRepositoryPath(repository);
+        QTRY_VERIFY_WITH_TIMEOUT(rag.reachable(),5000);
+        QVERIFY(rag.enabled()); QVERIFY(rag.available());
+        rag.buildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!rag.busy() && !rag.running(),15000);
+        QCOMPARE(rag.status(),QString("ready")); QVERIFY(rag.fileCount()>0); QVERIFY(rag.chunkCount()>0);
+        rag.deleteIndex(); QTRY_VERIFY_WITH_TIMEOUT(!rag.busy(),10000);
+        QCOMPARE(rag.status(),QString("empty")); QCOMPARE(rag.fileCount(),0); QCOMPARE(rag.chunkCount(),0);
+        QVERIFY(QFileInfo::exists(repository+"/main.cpp"));
     }
 
     void feedbackQmlStateIsolation() {

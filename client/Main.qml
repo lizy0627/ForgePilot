@@ -191,7 +191,7 @@ ApplicationWindow {
         id: settingsDialog; objectName: "settingsDialog"; title: "设置"; modal: true; anchors.centerIn: parent
         closePolicy: !window.mcp || window.mcp.canCloseEditor ? Popup.CloseOnEscape | Popup.CloseOnPressOutside : Popup.NoAutoClose
         width: Math.min(800, window.width - 48); height: Math.min(640, window.height - 48)
-        onOpened: { if (window.mcp) window.mcp.open() }
+        onOpened: { if (window.mcp) window.mcp.open(); if (window.rag) window.rag.refresh() }
         onClosed: { if (window.mcp) window.mcp.close() }
         contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag }
         footer: DialogButtonBox { ActionButton { objectName: "closeSettingsButton"; text: "完成"; enabled: !window.mcp || window.mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }

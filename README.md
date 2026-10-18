@@ -188,7 +188,23 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 - ripgrep：存在时用于更快的文本搜索；缺少时需要仓库搜索的工作功能会明确不可用，普通聊天不受影响。
 - CMake/CTest：只在客户端构建、测试和获批的工作任务中使用。缺失时相关操作失败并报告不可用，不影响普通聊天。
 - Ninja：仅在选择 Ninja 生成器时需要；Visual Studio preset 不依赖它。
-- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。架构、隐私边界、管理接口和评测方法见 [docs/code-rag.md](docs/code-rag.md)。
+- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。设置页会分别显示 `已就绪 / 索引中 / 降级可用 / 索引失败 / 未启用`，支持更新、取消、清空和自动重连。“新任务使用 RAG”只影响之后发送的工作任务，不会启动后端、删除索引或改变已经运行的任务；工作详情会明确显示本次是否实际使用了 RAG。架构、隐私边界、管理接口和评测方法见 [docs/code-rag.md](docs/code-rag.md)。
+
+### 启用 Code RAG
+
+RAG 默认关闭。桌面启动器实际读取上文所示本机 `config.json` 的 `server_args`；在该数组加入以下非秘密参数，然后先停止再启动 ForgePilot：
+
+```json
+{
+  "server_args": [
+    "--enable-rag",
+    "--embedding-model", "你的 Embedding 模型标识",
+    "--embedding-base-url", "https://服务地址/v1"
+  ]
+}
+```
+
+不要把 Key 放进 `server_args`、JSON、命令行或仓库。默认复用启动器已有的 DPAPI 模型凭据；确需独立 Embedding Key 时，只在启动进程环境中提供 `FORGEPILOT_EMBEDDING_API_KEY`。模型、地址或凭据缺失时 UI 会如实显示未启用/不可用，任务继续使用原有文件工具；Embedding 或向量源运行中故障时降级到仍可用的 Literal/clangd 来源。
 
 ## 测试
 
@@ -218,6 +234,19 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 ```powershell
 .\agent.venv\Scripts\python.exe .\eval\run_retrieval.py --mode all --repository .
 ```
+
+真实 Embedding E2E 必须显式提供运行时配置；脚本会用临时 SQLite/Qdrant 建索引并执行 3 个 C++ 查询，输出文件数、Chunk 数、结果位置、延时和上下文字符量，不会把 Key、查询正文或代码正文写入报告。若配置缺失，它以退出码 3 明确跳过，不会伪报成功：
+
+```powershell
+$env:FORGEPILOT_EMBEDDING_MODEL = '真实模型标识'
+$env:FORGEPILOT_EMBEDDING_BASE_URL = 'https://真实服务/v1'
+$env:FORGEPILOT_EMBEDDING_API_KEY = Read-Host 'Embedding Key' -AsSecureString `
+  | ConvertFrom-SecureString -AsPlainText
+.\agent.venv\Scripts\python.exe .\eval\run_real_embedding.py --repository .
+Remove-Item Env:FORGEPILOT_EMBEDDING_API_KEY
+```
+
+若服务的 Embeddings 响应不提供统一 token usage，报告会将 `provider_token_usage` 记为 `null`，而不是猜测数值。自动化测试只使用 fake/deterministic Embedding；生产 API + Qt 的索引生命周期由 `Test-ClientIntegration.cmd` 覆盖。
 
 真实 15 项 Agent 对比可在具备完整模型与 Embedding 配置时分别运行 `--mode real --rag off` 和 `--mode real --rag on`。不要把固定离线脚本或确定性检索指标写成真实 Agent 成功率。
 

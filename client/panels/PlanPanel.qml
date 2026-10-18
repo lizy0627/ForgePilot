@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
+import "RagUi.js" as RagUi
 
 Rectangle {
     id: root
@@ -13,6 +14,15 @@ Rectangle {
             Layout.fillWidth: true
             Label { text: "修改方案"; font.bold: true; font.pixelSize: 16; Layout.fillWidth: true }
             Label { text: root.controller.planVersion ? "方案 v" + root.controller.planVersion : "尚未生成"; color: Theme.muted }
+        }
+        Label {
+            objectName: "taskRagUsage"
+            visible: !!root.controller.taskId
+            text: RagUi.taskUsage(root.controller.ragRequested, root.controller.ragUsed, root.controller.ragStatus)
+            textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.Wrap
+            color: root.controller.ragStatus === "degraded" || root.controller.ragStatus === "unavailable"
+                ? Theme.warning : root.controller.ragUsed ? Theme.accent : Theme.muted
+            font.pixelSize: 12
         }
         Label {
             objectName: "feedbackPlanningNotice"

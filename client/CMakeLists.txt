@@ -38,7 +38,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/ConversationPanel.qml panels/ConversationHistoryPanel.qml panels/PlanPanel.qml panels/TracePanel.qml panels/BuildPanel.qml
     panels/DiffPanel.qml panels/RepositoryPanel.qml panels/TaskHistoryPanel.qml panels/SettingsPanel.qml
     panels/McpSettingsPanel.qml panels/McpServerDialog.qml panels/McpToolsDialog.qml
-    panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js
+    panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml)
 
 # Ship the existing Qt Chinese catalogs inside the executables, independent of OS locale.

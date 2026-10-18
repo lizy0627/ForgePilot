@@ -158,6 +158,55 @@ private slots:
         QCOMPARE(rag.chunkCount(),3); QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
     }
 
+    void ragControllerRecoversFromBrokenStreamByPolling() {
+        Source source; int reads=0;
+        const QString operation=QString(32,'1');
+        auto state=[&](QString status,bool running,int revision) {
+            return QJsonObject{{"repository_id",QString(64,'2')},{"enabled",true},{"available",true},
+                {"status",status},{"total_files",2},{"processed",running?1:2},{"skipped",0},{"failed",running?0:1},
+                {"chunks",1},{"file_count",1},{"dirty_file_count",0},{"failed_file_count",running?0:1},
+                {"last_indexed_at",QJsonValue::Null},{"running",running},{"operation_id",operation},
+                {"revision",revision},{"error_code",running?QJsonValue::Null:QJsonValue("rag_index_interrupted")}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/rag/status?")) {
+                ++reads; Source::json(r,state(reads==1?"indexing":"failed",reads==1,reads));
+            } else if(r.path.startsWith("/api/v1/rag/index/events?")) {
+                QVERIFY(r.headers.toLower().contains("last-event-id: "+operation.toUtf8()+":1"));
+                Source::json(r,{{"error",QJsonObject{{"code","server_stopping"},{"message","safe"}}}},503);
+            }
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/restart");
+        QTRY_COMPARE_WITH_TIMEOUT(rag.status(),QString("failed"),3000);
+        QVERIFY(reads>=2); QCOMPARE(rag.statusErrorCode(),QString("rag_index_interrupted"));
+        QVERIFY(rag.reachable()); QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
+    }
+
+    void ragControllerRejectsMalformedStatusAndGuardsRepeatedActions() {
+        Source source; int posts=0; Request held;
+        auto valid=[] {
+            return QJsonObject{{"repository_id",QString(64,'3')},{"enabled",true},{"available",true},
+                {"status","empty"},{"total_files",0},{"processed",0},{"skipped",0},{"failed",0},
+                {"chunks",0},{"file_count",0},{"dirty_file_count",0},{"failed_file_count",0},
+                {"last_indexed_at",QJsonValue::Null},{"running",false},{"operation_id",QJsonValue::Null},
+                {"revision",0},{"error_code",QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/rag/status?")) Source::json(r,valid());
+            else if(r.path=="/api/v1/rag/index") { ++posts; held=r; }
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/repeat");
+        QTRY_COMPARE(rag.status(),QString("empty"));
+        rag.buildIndex(); rag.buildIndex(); rag.deleteIndex();
+        QTRY_COMPARE(posts,1); QVERIFY(rag.busy());
+        auto broken=valid(); broken["status"]="private-stack"; broken["error_code"]=QString(200,'x');
+        Source::json(held,broken,202); QTRY_VERIFY(!rag.busy());
+        QCOMPARE(rag.status(),QString("empty")); QCOMPARE(rag.error(),QString("代码索引状态响应格式无效。"));
+        QSignalSpy changed(&rag,&RagController::useForTasksChanged);
+        rag.setUseForTasks(false); rag.setUseForTasks(false);
+        QCOMPARE(changed.size(),1); QVERIFY(!rag.useForTasks());
+    }
+
     void feedbackWireRequires202() {
         Source source;
         source.handle=[](const Request &r) { Source::json(r,snapshot(A,"planning"),r.body.value("plan_version").toInt()==7?202:200); };
@@ -936,8 +985,9 @@ private slots:
             else Source::json(r,{{"conversation_id",r.path.endsWith(A.toUtf8())?A:B},{"title","对话"},{"messages",QJsonArray{}},{"repository_path","C:/fixture"}});
         };
         TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
-        c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.setMode("task"); c.sendMessage("修改代码");
-        QTRY_VERIFY(pending.socket); c.selectConversation(B); QTRY_VERIFY(!c.loading());
+        c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.setMode("task"); c.setUseRag(false); c.sendMessage("修改代码");
+        QTRY_VERIFY(pending.socket); QCOMPARE(pending.body.value("use_rag"),QJsonValue(false));
+        c.selectConversation(B); QTRY_VERIFY(!c.loading());
         Source::json(pending,{{"status","running"},{"task_id",A}});
         QTest::qWait(50); QCOMPARE(c.conversationId(),B); QCOMPARE(c.mode(),"chat"); QVERIFY(tasks.taskId().isEmpty()); QVERIFY(!c.active());
     }

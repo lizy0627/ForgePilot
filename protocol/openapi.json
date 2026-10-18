@@ -325,6 +325,11 @@
             ],
             "title": "Tool Mode",
             "type": "string"
+          },
+          "use_rag": {
+            "default": true,
+            "title": "Use Rag",
+            "type": "boolean"
           }
         },
         "required": [
@@ -520,6 +525,11 @@
             "minLength": 1,
             "title": "Repository Path",
             "type": "string"
+          },
+          "use_rag": {
+            "default": true,
+            "title": "Use Rag",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2940,6 +2950,28 @@
             "title": "Prompt",
             "type": "string"
           },
+          "rag_requested": {
+            "default": true,
+            "title": "Rag Requested",
+            "type": "boolean"
+          },
+          "rag_status": {
+            "default": "unavailable",
+            "enum": [
+              "not_requested",
+              "unavailable",
+              "available",
+              "used",
+              "degraded"
+            ],
+            "title": "Rag Status",
+            "type": "string"
+          },
+          "rag_used": {
+            "default": false,
+            "title": "Rag Used",
+            "type": "boolean"
+          },
           "read_only": {
             "default": false,
             "title": "Read Only",
@@ -3146,6 +3178,28 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "rag_requested": {
+            "default": true,
+            "title": "Rag Requested",
+            "type": "boolean"
+          },
+          "rag_status": {
+            "default": "unavailable",
+            "enum": [
+              "not_requested",
+              "unavailable",
+              "available",
+              "used",
+              "degraded"
+            ],
+            "title": "Rag Status",
+            "type": "string"
+          },
+          "rag_used": {
+            "default": false,
+            "title": "Rag Used",
+            "type": "boolean"
           },
           "read_only": {
             "default": false,
