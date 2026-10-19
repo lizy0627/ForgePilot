@@ -40,10 +40,17 @@ class EmbeddingProviderAvailability:
 
 
 class OpenAICompatibleEmbeddingProvider:
-    """A bounded client for the provider-neutral OpenAI ``/embeddings`` API."""
+    """A bounded OpenAI embeddings client with Ark multimodal compatibility."""
 
     _RESPONSE_LIMIT = 32 * 1_048_576
     _TEXT_LIMIT = 1_048_576
+    _ARK_MULTIMODAL_PREFIX = "doubao-embedding-vision-"
+    _ARK_MULTIMODAL_DIMENSIONS = 1_024
+    _ARK_MULTIMODAL_INSTRUCTIONS = (
+        "Target_modality: text.\n"
+        "Instruction:Represent the text for semantic retrieval\n"
+        "Query:"
+    )
 
     def __init__(self, base_url: str, api_key: str, model: str, *, batch_size: int = 16,
                  timeout: float = 60.0,
@@ -70,7 +77,9 @@ class OpenAICompatibleEmbeddingProvider:
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
             raise ForgePilotError("rag_embedding_config", "Embedding timeout must be in (0, 600] seconds")
 
-        self._url = str(url).rstrip("/") + "/embeddings"
+        self._ark_multimodal = model.startswith(self._ARK_MULTIMODAL_PREFIX)
+        endpoint = "/embeddings/multimodal" if self._ark_multimodal else "/embeddings"
+        self._url = str(url).rstrip("/") + endpoint
         self._api_key = api_key
         self.model = model
         self.batch_size = batch_size
@@ -111,9 +120,33 @@ class OpenAICompatibleEmbeddingProvider:
                   "Check the embedding endpoint, model and service availability")
         return ForgePilotError("rag_embedding_http", f"HTTP {status}. {reason}")
 
+    def _validate_vector(self, vector: object) -> Embedding:
+        if not isinstance(vector, list) or not vector:
+            raise ValueError("Invalid embedding item")
+        checked: Embedding = []
+        for value in vector:
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError("Invalid embedding value")
+            checked.append(float(value))
+        if self.dimension is None:
+            self.dimension = len(checked)
+        if len(checked) != self.dimension:
+            raise ForgePilotError(
+                "rag_embedding_dimension",
+                "Embedding service returned inconsistent dimensions; rebuild the RAG index",
+            )
+        return checked
+
     def _validate_response(self, raw: bytearray, expected: int) -> list[Embedding]:
         data = json.loads(raw)
-        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        if not isinstance(data, dict):
+            raise ValueError("Invalid embeddings response")
+        if self._ark_multimodal:
+            item = data.get("data")
+            if expected != 1 or not isinstance(item, dict):
+                raise ValueError("Invalid multimodal embeddings response")
+            return [self._validate_vector(item.get("embedding"))]
+        if not isinstance(data.get("data"), list):
             raise ValueError("Invalid embeddings response")
         items = data["data"]
         if len(items) != expected:
@@ -123,29 +156,14 @@ class OpenAICompatibleEmbeddingProvider:
             if not isinstance(item, dict) or type(item.get("index")) is not int:
                 raise ValueError("Invalid embedding item")
             index = item["index"]
-            vector = item.get("embedding")
-            if (not 0 <= index < expected or ordered[index] is not None
-                    or not isinstance(vector, list) or not vector):
+            if not 0 <= index < expected or ordered[index] is not None:
                 raise ValueError("Invalid embedding item")
-            checked: Embedding = []
-            for value in vector:
-                if type(value) not in (int, float) or not math.isfinite(value):
-                    raise ValueError("Invalid embedding value")
-                checked.append(float(value))
-            if self.dimension is None:
-                self.dimension = len(checked)
-            if len(checked) != self.dimension:
-                raise ForgePilotError(
-                    "rag_embedding_dimension",
-                    "Embedding service returned inconsistent dimensions; rebuild the RAG index",
-                )
-            ordered[index] = checked
+            ordered[index] = self._validate_vector(item.get("embedding"))
         if any(vector is None for vector in ordered):
             raise ValueError("Missing embedding item")
         return [vector for vector in ordered if vector is not None]
 
-    async def _embed_batch(self, texts: list[str]) -> list[Embedding]:
-        payload = {"model": self.model, "input": texts}
+    async def _send_request(self, payload: dict, expected: int) -> list[Embedding]:
         try:
             async with asyncio.timeout(self.timeout):
                 async with self._client.stream(
@@ -160,7 +178,7 @@ class OpenAICompatibleEmbeddingProvider:
                             raise ForgePilotError("rag_embedding_response_limit",
                                                   "Embedding response exceeds 32 MiB")
                         body.extend(chunk)
-            return self._validate_response(body, len(texts))
+            return self._validate_response(body, expected)
         except (TimeoutError, httpx.TimeoutException):
             raise ForgePilotError("rag_embedding_timeout", "Embedding request timed out") from None
         except ForgePilotError:
@@ -176,6 +194,24 @@ class OpenAICompatibleEmbeddingProvider:
             # Custom test/provider transports must not expose request bodies, URLs or secrets.
             raise ForgePilotError("rag_embedding_network",
                                   "Embedding transport failed; check service and network") from None
+
+    async def _embed_batch(self, texts: list[str]) -> list[Embedding]:
+        if self._ark_multimodal:
+            # Ark's multimodal endpoint returns one vector for one mixed-modal
+            # input, rather than one vector per string. Preserve the provider
+            # protocol by issuing one bounded text-only request per document.
+            result: list[Embedding] = []
+            for text in texts:
+                payload = {
+                    "model": self.model,
+                    "input": [{"type": "text", "text": text}],
+                    "encoding_format": "float",
+                    "dimensions": self._ARK_MULTIMODAL_DIMENSIONS,
+                    "instructions": self._ARK_MULTIMODAL_INSTRUCTIONS,
+                }
+                result.extend(await self._send_request(payload, 1))
+            return result
+        return await self._send_request({"model": self.model, "input": texts}, len(texts))
 
     async def embed_documents(self, texts: Sequence[str]) -> list[Embedding]:
         if isinstance(texts, (str, bytes)) or not isinstance(texts, Sequence):

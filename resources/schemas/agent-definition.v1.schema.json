@@ -1,0 +1,177 @@
+{
+  "$defs": {
+    "AgentLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_input_tokens": {
+          "maximum": 262144,
+          "minimum": 1,
+          "title": "Max Input Tokens",
+          "type": "integer"
+        },
+        "max_model_calls": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Model Calls",
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "maximum": 256,
+          "minimum": 0,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_model_calls",
+        "max_tool_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "timeout_seconds"
+      ],
+      "title": "AgentLimits",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/agent-definition.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Data-only Agent contract; it cannot name Python modules, callables, or entry points.",
+  "properties": {
+    "agent_id": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "capabilities": {
+      "default": [],
+      "items": {
+        "enum": [
+          "repository.read",
+          "repository.search",
+          "repository.symbols",
+          "repository.references",
+          "repository.rag",
+          "repository.patch",
+          "validation.read",
+          "mcp.read"
+        ],
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "display_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Display Name",
+      "type": "string"
+    },
+    "input_artifacts": {
+      "default": [],
+      "items": {
+        "enum": [
+          "TaskSpec",
+          "EvidenceBundle",
+          "ExecutionPlan",
+          "ChangeSet",
+          "ValidationReport",
+          "ReviewReport",
+          "DeliveryBundle"
+        ],
+        "type": "string"
+      },
+      "maxItems": 16,
+      "title": "Input Artifacts",
+      "type": "array"
+    },
+    "limits": {
+      "$ref": "#/$defs/AgentLimits"
+    },
+    "model_route": {
+      "enum": [
+        "orchestration",
+        "analysis",
+        "implementation",
+        "review",
+        "repair"
+      ],
+      "title": "Model Route",
+      "type": "string"
+    },
+    "output_artifacts": {
+      "items": {
+        "enum": [
+          "TaskSpec",
+          "EvidenceBundle",
+          "ExecutionPlan",
+          "ChangeSet",
+          "ValidationReport",
+          "ReviewReport",
+          "DeliveryBundle"
+        ],
+        "type": "string"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Output Artifacts",
+      "type": "array"
+    },
+    "prompt_version": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        "orchestrator",
+        "root_cause_analyst",
+        "impact_test_analyst",
+        "implementer",
+        "reviewer",
+        "repair"
+      ],
+      "title": "Role",
+      "type": "string"
+    },
+    "role_description": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "title": "Role Description",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "agent_id",
+    "display_name",
+    "role",
+    "role_description",
+    "prompt_version",
+    "model_route",
+    "output_artifacts",
+    "limits"
+  ],
+  "title": "AgentDefinition",
+  "type": "object"
+}

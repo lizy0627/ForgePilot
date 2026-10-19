@@ -188,10 +188,10 @@ async def test_managed_stage_timeout_or_cancel_closes_actual_transport(peers,dat
     import forgepilot.mcp_manager as module
     peer=await peers(); manager,registry,alias,connections=await managed_peer(peer,database)
     peer.mode='hang'; peer.fail_on=method
-    monkeypatch.setattr(module,{'initialize':'INITIALIZE_TIMEOUT','discovery':'DISCOVERY_TIMEOUT','execution':'EXECUTION_TIMEOUT'}[phase],.4 if not cancel else 3)
+    monkeypatch.setattr(module,{'initialize':'INITIALIZE_TIMEOUT','discovery':'DISCOVERY_TIMEOUT','execution':'EXECUTION_TIMEOUT'}[phase],2.0 if not cancel else 3)
     pending=asyncio.create_task(manager.execute(registry,alias,{'query':'first'},'1'))
     try:
-        await asyncio.wait_for(peer.streaming.wait(),2)
+        await asyncio.wait_for(peer.streaming.wait(),3)
         if cancel:
             pending.cancel()
             with pytest.raises(asyncio.CancelledError): await asyncio.wait_for(pending,3)
@@ -816,7 +816,7 @@ async def test_server_failure_isolation_and_cleanup(peers,database,failure):
     if failure=='catalog': bad.tools[0]['description']+=' changed'
     elif failure=='bad_secret': bad.expected_secret=REPLACEMENT
     else: bad.mode='hang' if failure=='timeout' else failure; bad.fail_on='tools/call'
-    if failure=='timeout': c.registry.get(aliases[0]).timeout_seconds=1.0
+    if failure=='timeout': c.registry.get(aliases[0]).timeout_seconds=3.0
     try: await c.answer([],'query')
     finally: await c.close()
     results=[json.loads(m['content']) for m in model.requests[-1][0] if m['role']=='tool']

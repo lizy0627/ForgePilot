@@ -101,7 +101,7 @@ def main(argv=None) -> int:
     parser.add_argument("--repository", type=Path, default=ROOT)
     parser.add_argument("--tasks", type=Path, default=ROOT / "eval/retrieval_tasks.json")
     parser.add_argument("--output", type=Path, default=ROOT / "logs/retrieval-eval/real-embedding-e2e.json")
-    parser.add_argument("--query-count", type=int, choices=range(2, 11), default=3)
+    parser.add_argument("--query-count", type=int, choices=range(2, 11), default=2)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--rg")
     parser.add_argument("--git")

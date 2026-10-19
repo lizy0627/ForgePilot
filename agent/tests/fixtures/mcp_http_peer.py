@@ -97,8 +97,12 @@ class HttpPeer:
         await writer.drain()
         self.streaming.set()
         if self.mode == "hang":
-            await reader.read()
-            self.disconnected.set()
+            try:
+                await reader.read()
+            finally:
+                # Both an orderly EOF and a TCP reset prove that the client
+                # reclaimed the real transport.
+                self.disconnected.set()
             return
         chunk = (":" + "x" * 8000 + delimiter).encode() if total else b"data: " + b"x" * 8000
         if total:
@@ -139,8 +143,10 @@ class HttpPeer:
             if method == "DELETE":
                 if self.mode == "delete_hang":
                     self.streaming.set()
-                    await reader.read()
-                    self.disconnected.set()
+                    try:
+                        await reader.read()
+                    finally:
+                        self.disconnected.set()
                 elif self.mode == "delete_drip":
                     self.streaming.set()
                     writer.write(b"HTTP/1.1 204 OK\r\nX-Long: ")

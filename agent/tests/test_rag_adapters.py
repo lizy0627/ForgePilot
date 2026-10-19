@@ -60,6 +60,43 @@ async def test_embedding_batches_preserve_order_and_validate_dimension():
 
 
 @pytest.mark.asyncio
+async def test_ark_multimodal_embedding_preserves_provider_contract():
+    requests = []
+
+    def handler(request):
+        assert request.url == httpx.URL(
+            "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal")
+        body = json.loads(request.content)
+        requests.append(body)
+        text = body["input"][0]["text"]
+        return httpx.Response(200, json={
+            "data": {"embedding": [float(len(text)), 1.0, 0.0]},
+            "model": body["model"],
+        })
+
+    async with OpenAICompatibleEmbeddingProvider(
+            "https://ark.cn-beijing.volces.com/api/v3", "private-key",
+            "doubao-embedding-vision-251215", batch_size=2,
+            transport=httpx.MockTransport(handler)) as provider:
+        vectors = await provider.embed_documents(["a", "bb", "ccc"])
+        query = await provider.embed_query("query")
+
+    assert vectors == [[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [3.0, 1.0, 0.0]]
+    assert query == [5.0, 1.0, 0.0]
+    assert provider.dimension == 3
+    assert [request["input"] for request in requests] == [
+        [{"type": "text", "text": "a"}],
+        [{"type": "text", "text": "bb"}],
+        [{"type": "text", "text": "ccc"}],
+        [{"type": "text", "text": "query"}],
+    ]
+    assert all(request["dimensions"] == 1024 for request in requests)
+    assert all(request["encoding_format"] == "float" for request in requests)
+    assert all(request["instructions"].startswith("Target_modality: text.")
+               for request in requests)
+
+
+@pytest.mark.asyncio
 async def test_embedding_rejects_dimension_changes_between_batches():
     calls = 0
 

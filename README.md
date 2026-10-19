@@ -235,7 +235,7 @@ RAG 默认关闭。桌面启动器实际读取上文所示本机 `config.json` �
 .\agent.venv\Scripts\python.exe .\eval\run_retrieval.py --mode all --repository .
 ```
 
-真实 Embedding E2E 必须显式提供运行时配置；脚本会用临时 SQLite/Qdrant 建索引并执行 3 个 C++ 查询，输出文件数、Chunk 数、结果位置、延时和上下文字符量，不会把 Key、查询正文或代码正文写入报告。若配置缺失，它以退出码 3 明确跳过，不会伪报成功：
+真实 Embedding E2E 必须显式提供运行时配置；脚本会用临时 SQLite/Qdrant 建索引并执行 2 个 C++ 查询，输出文件数、Chunk 数、结果位置、延时和上下文字符量，不会把 Key、查询正文或代码正文写入报告。若配置缺失，它以退出码 3 明确跳过，不会伪报成功：
 
 ```powershell
 $env:FORGEPILOT_EMBEDDING_MODEL = '真实模型标识'

@@ -17,6 +17,11 @@ def test_retrieval_manifest_has_confirmed_coverage_and_existing_paths():
     tasks = load_retrieval_tasks()
     root = Path(__file__).resolve().parents[2]
     assert len(tasks) >= 20
+    assert len([
+        task for task in tasks
+        if any(path.casefold().endswith((".cpp", ".h", ".hpp"))
+               for path in task.expected_paths)
+    ]) >= 2
     assert {task.category for task in tasks} == REQUIRED_CATEGORIES
     assert len({task.id for task in tasks}) == len(tasks)
     for task in tasks:

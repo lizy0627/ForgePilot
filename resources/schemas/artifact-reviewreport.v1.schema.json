@@ -1,0 +1,222 @@
+{
+  "$defs": {
+    "CriterionReview": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "evidence": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Evidence",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "met",
+            "not_met",
+            "not_verified"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "status",
+        "evidence"
+      ],
+      "title": "CriterionReview",
+      "type": "object"
+    },
+    "ReviewIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "issue_id": {
+          "maxLength": 32,
+          "pattern": "^RI-[1-9][0-9]*$",
+          "title": "Issue Id",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "required": [
+        "issue_id",
+        "description"
+      ],
+      "title": "ReviewIssue",
+      "type": "object"
+    },
+    "ReviewReport": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/CriterionReview"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "blocking_issues": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReviewIssue"
+          },
+          "maxItems": 128,
+          "title": "Blocking Issues",
+          "type": "array"
+        },
+        "non_blocking_suggestions": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Non Blocking Suggestions",
+          "type": "array"
+        },
+        "recommend_delivery": {
+          "title": "Recommend Delivery",
+          "type": "boolean"
+        },
+        "security_review": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Security Review",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "test_review": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Test Review",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "approve",
+            "request_changes",
+            "reject"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "acceptance_criteria",
+        "test_review",
+        "security_review",
+        "recommend_delivery",
+        "summary"
+      ],
+      "title": "ReviewReport",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/artifact-reviewreport.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "ReviewReport",
+      "default": "ReviewReport",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "content": {
+      "$ref": "#/$defs/ReviewReport"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "maxLength": 64,
+      "title": "Created At",
+      "type": "string"
+    },
+    "parent_artifact_ids": {
+      "default": [],
+      "items": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Parent Artifact Ids",
+      "type": "array"
+    },
+    "producer": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_node": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer Node",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "producer",
+    "producer_node",
+    "created_at",
+    "content_sha256",
+    "content"
+  ],
+  "title": "ReviewReportArtifact",
+  "type": "object"
+}

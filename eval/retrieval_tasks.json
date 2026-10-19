@@ -108,6 +108,13 @@
       "category": "implementation_test_association"
     },
     {
+      "id": "cross-qt-task-rag-status",
+      "query": "Trace how the Qt task controller exposes and updates rag_requested, rag_used, and rag_status from backend events.",
+      "expected_paths": ["client/src/TaskController.h", "client/src/TaskController.cpp"],
+      "expected_symbols": ["TaskController", "ragStatus"],
+      "category": "cross_file_call"
+    },
+    {
       "id": "config-cmake-controller",
       "query": "Which CMake target compiles RagController into the Qt communication library?",
       "expected_paths": ["client/CMakeLists.txt"],

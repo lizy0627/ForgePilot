@@ -1,0 +1,14 @@
+{
+  "files": {
+    "agent-definition.v1.schema.json": "98ed728508bfa8ee39d384189c09af8ad2e6ae99115287b78c97483d283a77a7",
+    "artifact-changeset.v1.schema.json": "efd3ec231f6df18cce2d8af83876012f62f821c004fab28cfc03cd960994a09d",
+    "artifact-deliverybundle.v1.schema.json": "57744203ffccc0366abab4e3feea2ab1d428092256da077ec83d3ca7f3787686",
+    "artifact-envelope.v1.schema.json": "be69637a343c7a262bd9b917b7603efe57c3dc354dd0a496e3498e30693b5a1a",
+    "artifact-evidencebundle.v1.schema.json": "71d5276d212883fdf20d3327752e18f53b9d2dced773b87f611307c5c2b2bf4b",
+    "artifact-executionplan.v1.schema.json": "d33940fb0accded16eb2dd4e6654328b5a78f7313a2a02f560e45cdabfdb88e3",
+    "artifact-reviewreport.v1.schema.json": "91ebe2b1757be94ee69ccc9b664cd6db0858035632ca0036ba5152c4fcbfd7aa",
+    "artifact-taskspec.v1.schema.json": "51880ac7adbcad29e041909aab47137dcf00ef0e838aaa9f0b6510af20fc7313",
+    "artifact-validationreport.v1.schema.json": "159e09f8f81bad4d622602ea98843feaa82d224bdf2ec7662ee615cc557970b6"
+  },
+  "schema_version": "1.0"
+}
