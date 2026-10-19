@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import RLock
-from typing import Literal, Protocol
+from typing import Iterable, Literal, Protocol
 
 from .models import (
     ArtifactContent, ArtifactEnvelope, ArtifactEnvelopeBase, ChangeSet, DeliveryBundle,
@@ -25,6 +25,51 @@ class ArtifactRelation:
     parent_artifact_id: str
     child_artifact_id: str
     relation: Literal["derived_from", "revision_of"]
+
+
+def validate_relationships(artifact: ArtifactEnvelope, parents: Iterable[ArtifactEnvelope]) -> tuple[ArtifactEnvelope, ...]:
+    """Validate immutable protocol relationships for every store implementation."""
+    parents = tuple(parents)
+    for parent in parents:
+        if parent.task_id != artifact.task_id:
+            raise ArtifactRelationshipError("Parent and child artifacts must belong to the same task")
+    if isinstance(artifact.content, ExecutionPlan):
+        specs = [parent for parent in parents if isinstance(parent.content, TaskSpec)]
+        if len(specs) != 1 or artifact.content.task_spec_artifact_id != specs[0].artifact_id:
+            raise ArtifactRelationshipError("ExecutionPlan requires its declared TaskSpec as one parent")
+        validate_plan_coverage(specs[0].content, artifact.content)
+    if isinstance(artifact.content, ChangeSet):
+        plans = [parent for parent in parents if isinstance(parent.content, ExecutionPlan)]
+        if len(plans) != 1 or artifact.content.execution_plan_artifact_id != plans[0].artifact_id:
+            raise ArtifactRelationshipError("ChangeSet requires its declared ExecutionPlan as one parent")
+        step_ids = {step.step_id for step in plans[0].content.steps}
+        criterion_ids = {
+            criterion_id for step in plans[0].content.steps
+            for criterion_id in step.acceptance_criteria_ids
+        }
+        for changed_file in artifact.content.files:
+            if not set(changed_file.plan_step_ids) <= step_ids:
+                raise ArtifactRelationshipError("ChangeSet references an unknown plan step")
+            if not set(changed_file.acceptance_criteria_ids) <= criterion_ids:
+                raise ArtifactRelationshipError("ChangeSet references an unknown acceptance criterion")
+    if isinstance(artifact.content, ReviewReport):
+        specs = [parent for parent in parents if isinstance(parent.content, TaskSpec)]
+        if len(specs) != 1:
+            raise ArtifactRelationshipError("ReviewReport requires exactly one TaskSpec parent")
+        validate_review_coverage(specs[0].content, artifact.content)
+    if isinstance(artifact.content, DeliveryBundle):
+        declared = {
+            artifact.content.change_set_artifact_id: ChangeSet,
+            artifact.content.validation_report_artifact_id: ValidationReport,
+            artifact.content.review_report_artifact_id: ReviewReport,
+        }
+        parent_by_id = {parent.artifact_id: parent for parent in parents}
+        if set(declared) - set(parent_by_id):
+            raise ArtifactRelationshipError("DeliveryBundle requires all declared reports as parents")
+        for parent_id, content_type in declared.items():
+            if not isinstance(parent_by_id[parent_id].content, content_type):
+                raise ArtifactRelationshipError("DeliveryBundle parent type does not match its declared reference")
+    return parents
 
 
 class ArtifactStore(Protocol):
@@ -53,45 +98,8 @@ class InMemoryArtifactStore:
                 parent = self._artifacts.get(parent_id)
                 if parent is None:
                     raise ArtifactNotFoundError(parent_id)
-                if parent.task_id != artifact.task_id:
-                    raise ArtifactRelationshipError("Parent and child artifacts must belong to the same task")
                 parents.append(parent)
-            if isinstance(artifact.content, ExecutionPlan):
-                specs = [parent for parent in parents if isinstance(parent.content, TaskSpec)]
-                if len(specs) != 1 or artifact.content.task_spec_artifact_id != specs[0].artifact_id:
-                    raise ArtifactRelationshipError("ExecutionPlan requires its declared TaskSpec as one parent")
-                validate_plan_coverage(specs[0].content, artifact.content)
-            if isinstance(artifact.content, ChangeSet):
-                plans = [parent for parent in parents if isinstance(parent.content, ExecutionPlan)]
-                if len(plans) != 1 or artifact.content.execution_plan_artifact_id != plans[0].artifact_id:
-                    raise ArtifactRelationshipError("ChangeSet requires its declared ExecutionPlan as one parent")
-                step_ids = {step.step_id for step in plans[0].content.steps}
-                criterion_ids = {
-                    criterion_id for step in plans[0].content.steps
-                    for criterion_id in step.acceptance_criteria_ids
-                }
-                for changed_file in artifact.content.files:
-                    if not set(changed_file.plan_step_ids) <= step_ids:
-                        raise ArtifactRelationshipError("ChangeSet references an unknown plan step")
-                    if not set(changed_file.acceptance_criteria_ids) <= criterion_ids:
-                        raise ArtifactRelationshipError("ChangeSet references an unknown acceptance criterion")
-            if isinstance(artifact.content, ReviewReport):
-                specs = [parent for parent in parents if isinstance(parent.content, TaskSpec)]
-                if len(specs) != 1:
-                    raise ArtifactRelationshipError("ReviewReport requires exactly one TaskSpec parent")
-                validate_review_coverage(specs[0].content, artifact.content)
-            if isinstance(artifact.content, DeliveryBundle):
-                declared = {
-                    artifact.content.change_set_artifact_id: ChangeSet,
-                    artifact.content.validation_report_artifact_id: ValidationReport,
-                    artifact.content.review_report_artifact_id: ReviewReport,
-                }
-                parent_by_id = {parent.artifact_id: parent for parent in parents}
-                if set(declared) - set(parent_by_id):
-                    raise ArtifactRelationshipError("DeliveryBundle requires all declared reports as parents")
-                for parent_id, content_type in declared.items():
-                    if not isinstance(parent_by_id[parent_id].content, content_type):
-                        raise ArtifactRelationshipError("DeliveryBundle parent type does not match its declared reference")
+            validate_relationships(artifact, parents)
             self._artifacts[artifact.artifact_id] = artifact
             self._relations.extend(ArtifactRelation(parent.artifact_id, artifact.artifact_id, "derived_from") for parent in parents)
 

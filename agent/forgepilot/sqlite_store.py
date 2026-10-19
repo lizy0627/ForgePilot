@@ -19,6 +19,8 @@ from .conversation_store import ConversationStore
 from .memory_store import MemoryStore
 from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
+from .mission_store import MissionRepository, create_mission_schema
+from .artifacts.sqlite_store import SqliteArtifactStore
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
 from uuid import uuid4
@@ -42,7 +44,7 @@ def database_path():
 
 
 class SqliteEventStore(ConversationStore, MemoryStore):
-    def __init__(self, path=":memory:", *, redactor=None):
+    def __init__(self, path=":memory:", *, redactor=None, artifact_root=None):
         self.path = str(path)
         self.redactor = redactor or Redactor()
         self._lock = RLock()
@@ -52,6 +54,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
         self._unavailable_requests: set[str] = set()
         self._lease = None
         self._db = None
+        self.migration_backup_path = None
         try:
             if self.path != ":memory:":
                 path = Path(path).resolve()
@@ -74,6 +77,10 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
             self._migrate()
+            self.artifacts = SqliteArtifactStore(self, artifact_root)
+            self.artifact_store = self.artifacts
+            self.missions = MissionRepository(self)
+            self.mission_repository = self.missions
             self._recover()
             self._recover_conversations()
         except BaseException as exc:
@@ -96,12 +103,14 @@ class SqliteEventStore(ConversationStore, MemoryStore):
     def _migrate(self):
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if requires_upgrade_backup(version) and self.path != ':memory:':
+            self._assert_integrity("source")
             # Backup includes committed WAL pages and precedes both migration and recovery.
             backup = self.path + f'.v{version}-backup-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid4().hex[:8] + '.sqlite3'
             with sqlite3.connect(backup) as destination:
                 self._db.backup(destination)
                 if destination.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                     raise ForgePilotError('storage_backup', '数据库备份校验失败，未执行升级。')
+            self.migration_backup_path = backup
         with self._transaction():
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
             if version > int(CURRENT_SCHEMA_VERSION):
@@ -151,10 +160,22 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.RAG_INDEX_LIFECYCLE:
                 create_rag_run_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.RAG_INDEX_LIFECYCLE)}')
+            if version < SchemaVersion.GRAPH_ARTIFACT_STORE:
+                create_mission_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_ARTIFACT_STORE)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(
                     "storage_version", "Database migration path does not reach the current schema")
+            self._assert_integrity("migrated")
+
+    def _assert_integrity(self, stage):
+        try:
+            rows = self._db.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.Error:
+            raise ForgePilotError("storage_integrity", f"Database {stage} integrity check failed") from None
+        if len(rows) != 1 or rows[0][0] != "ok":
+            raise ForgePilotError("storage_integrity", f"Database {stage} integrity check failed")
 
     def _json(self, value):
         return json.dumps(self.redactor.data(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)

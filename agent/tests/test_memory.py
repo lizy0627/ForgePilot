@@ -436,6 +436,10 @@ async def test_delete_conversation_waits_summary_cleanup_and_no_resurrection():
 def version_two(path):
     store=SqliteEventStore(path); cid=store.create_conversation()['conversation_id']; seed(store,cid,2); store.close()
     with sqlite3.connect(path) as db:
+        for table in ("security_events", "validation_runs", "workspace_records", "checkpoints",
+                      "model_calls", "approvals", "artifact_relations", "artifacts",
+                      "task_node_attempts", "task_graph_runs"):
+            db.execute(f'DROP TABLE "{table}"')
         db.execute('DROP TABLE rag_index_runs')
         db.execute('DROP TABLE rag_files')
         db.execute('DROP TABLE mcp_servers')
@@ -452,7 +456,7 @@ def test_v2_backup_migration_preserves_history_and_rollback(tmp_path,monkeypatch
     store=SqliteEventStore(path)
     try:
         assert len(store.conversation_detail(cid)['messages'])==4
-        assert store._db.execute('PRAGMA user_version').fetchone()[0]==7
+        assert store._db.execute('PRAGMA user_version').fetchone()[0]==8
         backups=list(tmp_path.glob('*.v2-backup-*.sqlite3')); assert len(backups)==1
         with sqlite3.connect(backups[0]) as db:
             assert db.execute('PRAGMA user_version').fetchone()[0]==2

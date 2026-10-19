@@ -11,6 +11,7 @@ class SchemaVersion(IntEnum):
     MCP_CALL_RECORDS = 5
     RAG_FILES = 6
     RAG_INDEX_LIFECYCLE = 7
+    GRAPH_ARTIFACT_STORE = 8
 
 
 CURRENT_SCHEMA_VERSION = max(SchemaVersion)
