@@ -5,6 +5,7 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..artifacts.canonical import content_sha256
 from ..artifacts.models import ArtifactTypeName, IDENTIFIER_PATTERN
 
 AGENT_SCHEMA_VERSION = "1.0"
@@ -80,6 +81,11 @@ class AgentDefinition(BaseModel):
     limits: AgentLimits
 
     _arrays = field_validator("input_artifacts", "output_artifacts", "capabilities", mode="before")(_tuple)
+
+    @property
+    def definition_hash(self) -> str:
+        """Canonical identity used by GraphRunner idempotency keys."""
+        return content_sha256(self.model_dump(mode="json"))
 
     @model_validator(mode="after")
     def enforce_policy(self):

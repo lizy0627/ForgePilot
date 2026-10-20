@@ -176,6 +176,113 @@ def create_mission_schema(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def create_graph_orchestrator_schema(db: sqlite3.Connection) -> None:
+    """Add the durable state/event boundary used by the serial GraphRunner.
+
+    Schema 8 shipped the mission and Artifact records. These tables are kept
+    intact; schema 9 adds the runtime projection and its ordered event log.
+    """
+    statements = (
+        """ALTER TABLE task_graph_runs ADD COLUMN definition_hash TEXT
+            CHECK(definition_hash IS NULL OR length(definition_hash) = 64)""",
+        """CREATE TABLE graph_node_states(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+            result_json TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,node_id))""",
+        """CREATE TABLE graph_run_inputs(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            artifact_id TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+            PRIMARY KEY(task_id,ordinal),
+            UNIQUE(task_id,artifact_id))""",
+        """CREATE TABLE graph_node_results(
+            task_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) = 64),
+            status TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            policy_action TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,node_id,attempt),
+            FOREIGN KEY(task_id,node_id,attempt)
+                REFERENCES task_node_attempts(task_id,node_id,attempt) ON DELETE CASCADE)""",
+        """CREATE UNIQUE INDEX graph_successful_idempotency_key
+            ON graph_node_results(idempotency_key) WHERE status='succeeded'""",
+        """CREATE TABLE graph_events(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL CHECK(sequence >= 1),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            event_type TEXT NOT NULL,
+            node_id TEXT,
+            attempt INTEGER,
+            state TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,sequence),
+            UNIQUE(task_id,revision))""",
+        "CREATE INDEX graph_events_task_revision ON graph_events(task_id,revision)",
+    )
+    for statement in statements:
+        db.execute(statement)
+
+
+def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
+    """Make abandoned running nodes explicit; execution is never silently resumed."""
+    stamp = stamp or _now()
+    tasks = db.execute(
+        "SELECT DISTINCT task_id FROM graph_node_states WHERE status='running' ORDER BY task_id"
+    ).fetchall()
+    for task_row in tasks:
+        task_id = task_row[0]
+        running = db.execute(
+            "SELECT node_id,attempt FROM graph_node_states WHERE task_id=? AND status='running' ORDER BY node_id",
+            (task_id,),
+        ).fetchall()
+        run = db.execute(
+            "SELECT current_revision FROM task_graph_runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if run is None:
+            continue
+        revision = run[0]
+        sequence = db.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)
+        ).fetchone()[0]
+        for node_id, attempt in running:
+            revision += 1
+            sequence += 1
+            payload = json.dumps(
+                {"from": "running", "to": "interrupted", "failure_kind": "application_interrupted"},
+                sort_keys=True, separators=(",", ":"),
+            )
+            db.execute(
+                "UPDATE graph_node_states SET status='interrupted',updated_at=? WHERE task_id=? AND node_id=?",
+                (stamp, task_id, node_id),
+            )
+            db.execute(
+                """UPDATE task_node_attempts SET status='interrupted',finished_at=?,error_code=?,error_summary=?
+                   WHERE task_id=? AND node_id=? AND attempt=? AND finished_at IS NULL""",
+                (stamp, "application_interrupted", "Previous process stopped during node execution",
+                 task_id, node_id, attempt),
+            )
+            db.execute(
+                """INSERT INTO graph_events(task_id,sequence,revision,event_type,node_id,attempt,state,payload_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (task_id, sequence, revision, "node_state_changed", node_id, attempt,
+                 "interrupted", payload, stamp),
+            )
+        db.execute(
+            "UPDATE task_graph_runs SET status='interrupted',current_revision=?,updated_at=? WHERE task_id=?",
+            (revision, stamp, task_id),
+        )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -533,4 +640,7 @@ class MissionRepository:
             raise ForgePilotError("storage_record", f"Invalid or duplicate {table} record") from None
 
 
-__all__ = ["MissionRepository", "create_mission_schema"]
+__all__ = [
+    "MissionRepository", "create_graph_orchestrator_schema", "create_mission_schema",
+    "recover_graph_runs",
+]

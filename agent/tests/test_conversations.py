@@ -1513,6 +1513,7 @@ def version_one_database(path):
     store.create(value['task_id'],value); store.publish(value['task_id'],value,[],closed=True); store.close()
     with sqlite3.connect(path) as db:
         for table in ['security_events','validation_runs','workspace_records','checkpoints',
+                      'graph_node_results','graph_node_states','graph_run_inputs','graph_events',
                       'model_calls','approvals','artifact_relations','artifacts',
                       'task_node_attempts','task_graph_runs']: db.execute('DROP TABLE '+table)
         for table in ['rag_index_runs','rag_files','mcp_migrations','mcp_servers','memories','conversation_summaries','conversation_messages','conversation_requests','conversations']: db.execute('DROP TABLE '+table)

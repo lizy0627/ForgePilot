@@ -1,0 +1,304 @@
+"""Serial GraphRunner with durable-before-visible state and result publication."""
+from __future__ import annotations
+
+from hashlib import sha256
+import json
+from time import monotonic
+from typing import Iterable
+
+from ..artifacts.store import ArtifactNotFoundError
+from ..errors import ForgePilotError
+from .graph import ValidatedGraph, validate_graph
+from .models import (
+    FailureKind, GraphDefinition, GraphEvent, GraphSnapshot, NodeMetrics, NodeResult,
+    NodeState, NodeStatus, PolicyAction, idempotency_key,
+)
+from .node_handlers import HandlerRegistry, NodeContext, NodeExecutionError
+from .policies import DefaultFailurePolicy, FailurePolicy
+from .store import GraphStore
+
+
+class GraphRunner:
+    """Executes at most one node at a time; handlers may be fake or deterministic."""
+
+    def __init__(self, event_store, handlers: HandlerRegistry, *,
+                 artifact_store=None, policy: FailurePolicy | None = None) -> None:
+        self.store = GraphStore(event_store)
+        self.handlers = handlers
+        self.artifacts = artifact_store or event_store.artifacts
+        self.policy = policy or DefaultFailurePolicy()
+
+    def run(self, task_id: str, graph: GraphDefinition, *,
+            input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
+        validated = validate_graph(graph)
+        requested_inputs = tuple(input_artifact_ids)
+        requested_hashes = self._validate_artifacts(task_id, requested_inputs)
+        try:
+            snapshot = self.store.snapshot(task_id)
+        except ForgePilotError as exc:
+            if exc.code != "unknown_graph":
+                raise
+            snapshot = self.store.create_run(
+                task_id, validated, inputs=tuple(zip(requested_inputs, requested_hashes)))
+        self._assert_definition(snapshot, validated)
+        stored_inputs = self.store.initial_inputs(task_id)
+        if requested_inputs and stored_inputs != tuple(zip(requested_inputs, requested_hashes)):
+            raise ForgePilotError("graph_inputs_changed", "Persisted graph inputs do not match")
+        initial_inputs = tuple(artifact_id for artifact_id, _ in stored_inputs)
+        actual_hashes = self._validate_artifacts(task_id, initial_inputs)
+        if actual_hashes != tuple(value for _, value in stored_inputs):
+            raise ForgePilotError("artifact_integrity", "Persisted graph input Artifact changed")
+
+        while True:
+            snapshot = self.store.snapshot(task_id)
+            if snapshot.status in {
+                    NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
+                return snapshot
+            by_id = {node.node_id: node for node in snapshot.nodes}
+            if any(node.status is NodeStatus.FAILED for node in snapshot.nodes):
+                return self.store.finish_graph(
+                    task_id, expected_revision=snapshot.revision, status=NodeStatus.FAILED)
+            if any(node.status is NodeStatus.CANCELLED for node in snapshot.nodes):
+                return self.store.cancel(task_id, expected_revision=snapshot.revision)
+
+            progressed = False
+            for node_id in validated.topological_order:
+                state = by_id[node_id]
+                if state.status is not NodeStatus.PENDING:
+                    continue
+                readiness = self._readiness(validated, node_id, by_id)
+                if readiness is None:
+                    continue
+                target = NodeStatus.READY if readiness else NodeStatus.SKIPPED
+                snapshot = self.store.transition(
+                    task_id, node_id, expected_revision=snapshot.revision,
+                    source=NodeStatus.PENDING, target=target,
+                    event_type="node_ready" if readiness else "node_skipped",
+                    payload={"reason": "dependencies_satisfied" if readiness
+                             else "edge_conditions_not_matched"},
+                )
+                by_id = {node.node_id: node for node in snapshot.nodes}
+                progressed = True
+
+            ready = next((node_id for node_id in validated.topological_order
+                          if by_id[node_id].status is NodeStatus.READY), None)
+            if ready is not None:
+                self._execute(task_id, validated, by_id[ready], initial_inputs,
+                              expected_revision=snapshot.revision)
+                continue
+
+            snapshot = self.store.snapshot(task_id)
+            if all(node.status in {NodeStatus.SUCCEEDED, NodeStatus.SKIPPED}
+                   for node in snapshot.nodes):
+                return self.store.finish_graph(
+                    task_id, expected_revision=snapshot.revision, status=NodeStatus.SUCCEEDED)
+            if any(node.status in {NodeStatus.AWAITING_HUMAN, NodeStatus.RETRYABLE,
+                                   NodeStatus.INTERRUPTED, NodeStatus.RUNNING}
+                   for node in snapshot.nodes):
+                return snapshot
+            if not progressed:
+                raise ForgePilotError("graph_stalled", "Graph has no runnable or terminal node")
+
+    def approve_human(self, task_id: str, graph: GraphDefinition, node_id: str, *,
+                      expected_revision: int, decision_summary: str = "Approved") -> GraphSnapshot:
+        validated = validate_graph(graph)
+        snapshot = self.store.snapshot(task_id)
+        self._assert_definition(snapshot, validated)
+        current = self._node(snapshot, node_id)
+        if current.status is not NodeStatus.AWAITING_HUMAN or current.result is None:
+            raise ForgePilotError("invalid_state", "Node is not awaiting a human decision")
+        result = NodeResult(
+            status=NodeStatus.SUCCEEDED,
+            output_artifact_ids=current.result.output_artifact_ids,
+            decision_summary=decision_summary,
+            next_route=current.result.next_route,
+            metrics=current.result.metrics,
+        )
+        self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result)
+        return self.run(task_id, graph)
+
+    def retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
+              expected_revision: int, input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
+        validated = validate_graph(graph)
+        snapshot = self.store.snapshot(task_id)
+        self._assert_definition(snapshot, validated)
+        current = self._node(snapshot, node_id)
+        if current.status is NodeStatus.INTERRUPTED:
+            snapshot = self.store.transition(
+                task_id, node_id, expected_revision=expected_revision,
+                source=NodeStatus.INTERRUPTED, target=NodeStatus.RETRYABLE,
+                event_type="node_retry_allowed", payload={"reason": "explicit_retry"},
+                graph_status=NodeStatus.RETRYABLE,
+            )
+            expected_revision = snapshot.revision
+            current = self._node(snapshot, node_id)
+        if current.status is not NodeStatus.RETRYABLE:
+            raise ForgePilotError("invalid_state", "Only retryable or interrupted nodes can retry")
+        self.store.transition(
+            task_id, node_id, expected_revision=expected_revision,
+            source=NodeStatus.RETRYABLE, target=NodeStatus.READY,
+            event_type="node_retry_started", payload={"reason": "explicit_retry"},
+        )
+        return self.run(task_id, graph, input_artifact_ids=input_artifact_ids)
+
+    def cancel(self, task_id: str, *, expected_revision: int) -> GraphSnapshot:
+        return self.store.cancel(task_id, expected_revision=expected_revision)
+
+    def events(self, task_id: str, *, after_sequence: int = 0) -> tuple[GraphEvent, ...]:
+        return self.store.graph_events(task_id, after_sequence=after_sequence)
+
+    @staticmethod
+    def _node(snapshot: GraphSnapshot, node_id: str) -> NodeState:
+        try:
+            return next(node for node in snapshot.nodes if node.node_id == node_id)
+        except StopIteration:
+            raise ForgePilotError("unknown_node", "Graph node does not exist") from None
+
+    @staticmethod
+    def _assert_definition(snapshot: GraphSnapshot, graph: ValidatedGraph) -> None:
+        if (snapshot.graph_id != graph.definition.graph_id
+                or snapshot.graph_version != graph.definition.version
+                or snapshot.definition_hash != graph.definition.definition_hash
+                or {node.node_id: node.node_type for node in snapshot.nodes}
+                != {node.node_id: node.node_type for node in graph.definition.nodes}):
+            raise ForgePilotError("graph_definition_changed", "Persisted graph definition does not match")
+
+    @staticmethod
+    def _readiness(graph: ValidatedGraph, node_id: str,
+                   states: dict[str, NodeState]) -> bool | None:
+        definition = graph.nodes[node_id]
+        dependencies = [states[item] for item in definition.dependencies]
+        if any(item.status not in {NodeStatus.SUCCEEDED, NodeStatus.SKIPPED}
+               for item in dependencies):
+            return None
+        incoming = graph.incoming_edges(node_id)
+        if not incoming:
+            return True
+        sources = [states[edge.source] for edge in incoming]
+        if any(source.status not in {NodeStatus.SUCCEEDED, NodeStatus.SKIPPED}
+               for source in sources):
+            return None
+        return any(edge.condition.matches(states[edge.source].result,
+                                          states[edge.source].status)
+                   for edge in incoming)
+
+    def _inputs(self, graph: ValidatedGraph, node_id: str,
+                states: dict[str, NodeState], initial: tuple[str, ...]) -> tuple[str, ...]:
+        result = list(initial)
+        for predecessor in graph.predecessors(node_id):
+            prior = states[predecessor].result
+            if prior:
+                result.extend(prior.output_artifact_ids)
+        return tuple(dict.fromkeys(result))
+
+    def _validate_artifacts(self, task_id: str, artifact_ids: tuple[str, ...]) -> tuple[str, ...]:
+        hashes = []
+        for artifact_id in artifact_ids:
+            artifact = self.artifacts.get(artifact_id)
+            if artifact.task_id != task_id:
+                raise ForgePilotError("artifact_scope", "Input Artifact belongs to another task")
+            hashes.append(artifact.content_sha256)
+        return tuple(hashes)
+
+    def _execute(self, task_id: str, graph: ValidatedGraph, state: NodeState,
+                 initial_inputs: tuple[str, ...], *, expected_revision: int) -> GraphSnapshot:
+        definition = graph.nodes[state.node_id]
+        states = {node.node_id: node for node in self.store.snapshot(task_id).nodes}
+        artifact_ids = self._inputs(graph, state.node_id, states, initial_inputs)
+        hashes = self._validate_artifacts(task_id, artifact_ids)
+        attempt = state.attempt + 1
+        key = idempotency_key(
+            task_id=task_id, node_id=state.node_id, attempt=attempt,
+            input_artifact_hashes=hashes,
+            agent_definition_hash=definition.effective_agent_definition_hash,
+            policy_hash=self.policy.definition_hash,
+        )
+        input_hash = sha256(json.dumps(sorted(hashes), separators=(",", ":")).encode()).hexdigest()
+        # A successful key is authoritative. In normal flow a succeeded state is
+        # observed before reaching here; the lookup also guards duplicate callers.
+        reused = self.store.successful_result(key)
+        if reused is not None:
+            raise ForgePilotError(
+                "graph_conflict", "Successful idempotency key conflicts with node projection")
+        self.store.transition(
+            task_id, state.node_id, expected_revision=expected_revision,
+            source=NodeStatus.READY, target=NodeStatus.RUNNING,
+            event_type="node_started", payload={"idempotency_key": key},
+            attempt=attempt, idempotency_key=key, input_hash=input_hash,
+            agent_id=definition.agent_id,
+        )
+        context = NodeContext(
+            task_id=task_id, node=definition, attempt=attempt,
+            input_artifact_ids=artifact_ids, input_artifact_hashes=hashes,
+            artifacts=self.artifacts,
+            is_cancelled=lambda: self.store.is_cancelled(task_id, state.node_id),
+        )
+        started = monotonic()
+        try:
+            result = self.handlers.resolve(definition)(context)
+            if not isinstance(result, NodeResult):
+                raise NodeExecutionError(
+                    FailureKind.MODEL_CONTRACT_VIOLATION,
+                    "Node handler returned an invalid result",
+                )
+        except NodeExecutionError as exc:
+            result = NodeResult(
+                status=NodeStatus.FAILED, failure_kind=exc.failure_kind,
+                error_summary=exc.summary,
+            )
+        except Exception:
+            result = NodeResult(
+                status=NodeStatus.FAILED, failure_kind=FailureKind.TOOL_TRANSIENT,
+                error_summary="Node handler raised an unexpected exception",
+            )
+        elapsed = max(0, int((monotonic() - started) * 1000))
+        result = result.with_duration(max(elapsed, result.metrics.duration_ms))
+
+        current = self.store.snapshot(task_id)
+        persisted = self._node(current, state.node_id)
+        if persisted.status is NodeStatus.CANCELLED:
+            return current
+        try:
+            self._validate_artifacts(task_id, result.output_artifact_ids)
+        except (ArtifactNotFoundError, ForgePilotError):
+            result = NodeResult(
+                status=NodeStatus.FAILED,
+                decision_summary=result.decision_summary,
+                failure_kind=FailureKind.MODEL_CONTRACT_VIOLATION,
+                error_summary="Node result references an unavailable or out-of-scope Artifact",
+                metrics=result.metrics,
+            )
+
+        policy_action = None
+        target = result.status
+        if result.status in {NodeStatus.FAILED, NodeStatus.RETRYABLE}:
+            policy_action = self.policy.action_for(result.failure_kind, attempt=attempt)
+            target = (NodeStatus.RETRYABLE if policy_action in {
+                PolicyAction.RETRY, PolicyAction.PAUSE} else NodeStatus.FAILED)
+            if result.status is not target or result.retryable != (target is NodeStatus.RETRYABLE):
+                result = NodeResult(
+                    status=target, output_artifact_ids=result.output_artifact_ids,
+                    decision_summary=result.decision_summary, next_route=result.next_route,
+                    retryable=target is NodeStatus.RETRYABLE, metrics=result.metrics,
+                    failure_kind=result.failure_kind, error_summary=result.error_summary,
+                )
+        graph_status = (NodeStatus.AWAITING_HUMAN if target is NodeStatus.AWAITING_HUMAN
+                        else NodeStatus.RETRYABLE if target is NodeStatus.RETRYABLE
+                        else NodeStatus.FAILED if target is NodeStatus.FAILED
+                        else NodeStatus.INTERRUPTED if target is NodeStatus.INTERRUPTED
+                        else NodeStatus.RUNNING)
+        payload = {
+            "idempotency_key": key,
+            "policy_action": policy_action.value if policy_action else None,
+            "failure_kind": result.failure_kind.value if result.failure_kind else None,
+            "metrics": result.to_dict()["metrics"],
+        }
+        return self.store.transition(
+            task_id, state.node_id, expected_revision=current.revision,
+            source=NodeStatus.RUNNING, target=target,
+            event_type="node_finished", payload=payload, graph_status=graph_status,
+            attempt=attempt, result=result, policy_action=policy_action,
+        )
+
+
+__all__ = ["GraphRunner"]

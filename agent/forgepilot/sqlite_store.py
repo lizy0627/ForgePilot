@@ -19,7 +19,10 @@ from .conversation_store import ConversationStore
 from .memory_store import MemoryStore
 from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
-from .mission_store import MissionRepository, create_mission_schema
+from .mission_store import (
+    MissionRepository, create_graph_orchestrator_schema, create_mission_schema,
+    recover_graph_runs,
+)
 from .artifacts.sqlite_store import SqliteArtifactStore
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
@@ -163,6 +166,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.GRAPH_ARTIFACT_STORE:
                 create_mission_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_ARTIFACT_STORE)}')
+            if version < SchemaVersion.GRAPH_ORCHESTRATOR:
+                create_graph_orchestrator_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_ORCHESTRATOR)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(
@@ -294,6 +300,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
     def _recover(self):
         with self._transaction():
             recover_rag_runs(self._db)
+            recover_graph_runs(self._db)
             for row in self._db.execute("SELECT * FROM tasks WHERE closed=0").fetchall():
                 stamp = datetime.now(timezone.utc).isoformat()
                 snapshot = json.loads(row["snapshot_json"])

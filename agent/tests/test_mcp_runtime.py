@@ -1113,13 +1113,14 @@ def test_v4_upgrade_records_default_backup_and_record_bounds(tmp_path):
     store.begin_conversation_request(cid,rid,'chat','old prompt',''); store.finish_conversation_request(rid,'completed','old answer'); store.close()
     with sqlite3.connect(path) as db:
         for table in ('security_events','validation_runs','workspace_records','checkpoints',
+                      'graph_node_results','graph_node_states','graph_run_inputs','graph_events',
                       'model_calls','approvals','artifact_relations','artifacts',
                       'task_node_attempts','task_graph_runs'):
             db.execute(f'DROP TABLE "{table}"')
         db.execute('DROP TABLE rag_index_runs'); db.execute('DROP TABLE rag_files'); db.execute('ALTER TABLE conversation_requests DROP COLUMN mcp_calls_json'); db.execute('DROP TABLE mcp_migrations'); db.execute('PRAGMA user_version=4')
     store=SqliteEventStore(path)
     try:
-        assert store._db.execute('PRAGMA user_version').fetchone()[0]==8
+        assert store._db.execute('PRAGMA user_version').fetchone()[0]==9
         assert store.conversation_mcp_tools(cid,rid)['items']==[]
         assert store.conversation_detail(cid)['messages'][-1]['content']=='old answer'
         backups=list(tmp_path.glob('*.v4-backup-*.sqlite3')); assert len(backups)==1
