@@ -316,6 +316,7 @@ def test_runner_reuses_artifact_store_and_persists_input_hash_boundary(tmp_path)
     definition = NodeDefinition(
         "agent", NodeType.AGENT, "agent", agent_id="implementer.v1",
         agent_definition_hash="c" * 64,
+        settings={"recovery_role": "deterministic"},
     )
     graph = GraphDefinition("artifact-boundary", 1, (definition,))
     runner = GraphRunner(store, HandlerRegistry({"agent": handler}))

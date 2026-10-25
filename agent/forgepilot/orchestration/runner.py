@@ -7,6 +7,7 @@ from time import monotonic
 from typing import Iterable
 
 from ..artifacts.store import ArtifactNotFoundError
+from ..artifacts.sqlite_store import ArtifactStorageError
 from ..errors import ForgePilotError
 from .graph import ValidatedGraph, validate_graph
 from .models import (
@@ -16,17 +17,23 @@ from .models import (
 from .node_handlers import HandlerRegistry, NodeContext, NodeExecutionError
 from .policies import DefaultFailurePolicy, FailurePolicy
 from .store import GraphStore
+from .recovery import RecoveryManager, recovery_role
 
 
 class GraphRunner:
     """Executes at most one node at a time; handlers may be fake or deterministic."""
 
     def __init__(self, event_store, handlers: HandlerRegistry, *,
-                 artifact_store=None, policy: FailurePolicy | None = None) -> None:
+                 artifact_store=None, policy: FailurePolicy | None = None,
+                 workspace_backend=None) -> None:
         self.store = GraphStore(event_store)
         self.handlers = handlers
         self.artifacts = artifact_store or event_store.artifacts
         self.policy = policy or DefaultFailurePolicy()
+        self.recovery = RecoveryManager(event_store, artifacts=self.artifacts,
+                                        workspace_backend=workspace_backend or getattr(event_store, "workspace_backend", None),
+                                        policy_hash=self.policy.definition_hash)
+        self.checkpoints = self.recovery.checkpoints
 
     def run(self, task_id: str, graph: GraphDefinition, *,
             input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
@@ -39,7 +46,8 @@ class GraphRunner:
             if exc.code != "unknown_graph":
                 raise
             snapshot = self.store.create_run(
-                task_id, validated, inputs=tuple(zip(requested_inputs, requested_hashes)))
+                task_id, validated, inputs=tuple(zip(requested_inputs, requested_hashes)),
+                policy_hash=self.policy.definition_hash)
         self._assert_definition(snapshot, validated)
         stored_inputs = self.store.initial_inputs(task_id)
         if requested_inputs and stored_inputs != tuple(zip(requested_inputs, requested_hashes)):
@@ -53,6 +61,9 @@ class GraphRunner:
             snapshot = self.store.snapshot(task_id)
             if snapshot.status in {
                     NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
+                return snapshot
+            if self.store.recovery_required(task_id) or any(
+                    node.status in {NodeStatus.INTERRUPTED, NodeStatus.RUNNING} for node in snapshot.nodes):
                 return snapshot
             by_id = {node.node_id: node for node in snapshot.nodes}
             if any(node.status is NodeStatus.FAILED for node in snapshot.nodes):
@@ -81,10 +92,22 @@ class GraphRunner:
                 progressed = True
 
             ready = next((node_id for node_id in validated.topological_order
-                          if by_id[node_id].status is NodeStatus.READY), None)
+                          if by_id[node_id].status is NodeStatus.READY
+                          and self._readiness(validated, node_id, by_id) is True), None)
             if ready is not None:
-                self._execute(task_id, validated, by_id[ready], initial_inputs,
-                              expected_revision=snapshot.revision)
+                with self.store.events_store._lock:
+                    active = getattr(self.store.events_store, "_graph_executing", None)
+                    if active is None:
+                        active = self.store.events_store._graph_executing = set()
+                    if task_id in active:
+                        return self.store.snapshot(task_id)
+                    active.add(task_id)
+                try:
+                    self._execute(task_id, validated, by_id[ready], initial_inputs,
+                                  expected_revision=snapshot.revision)
+                finally:
+                    with self.store.events_store._lock:
+                        active.discard(task_id)
                 continue
 
             snapshot = self.store.snapshot(task_id)
@@ -104,6 +127,10 @@ class GraphRunner:
         validated = validate_graph(graph)
         snapshot = self.store.snapshot(task_id)
         self._assert_definition(snapshot, validated)
+        if self.store.recovery_required(task_id):
+            raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm recovery before approval")
+        if snapshot.revision != expected_revision:
+            raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
         current = self._node(snapshot, node_id)
         if current.status is not NodeStatus.AWAITING_HUMAN or current.result is None:
             raise ForgePilotError("invalid_state", "Node is not awaiting a human decision")
@@ -114,7 +141,13 @@ class GraphRunner:
             next_route=current.result.next_route,
             metrics=current.result.metrics,
         )
-        self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result)
+        with self.store.events_store._lock:
+            if self.store.snapshot(task_id).revision != expected_revision:
+                raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
+            cp = self.recovery.record_completed(task_id, validated.nodes[node_id], current.attempt,
+                                                 result, approved=True)
+            self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result,
+                               checkpoint_id=cp.checkpoint_id if cp else None)
         return self.run(task_id, graph)
 
     def retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
@@ -123,15 +156,9 @@ class GraphRunner:
         snapshot = self.store.snapshot(task_id)
         self._assert_definition(snapshot, validated)
         current = self._node(snapshot, node_id)
-        if current.status is NodeStatus.INTERRUPTED:
-            snapshot = self.store.transition(
-                task_id, node_id, expected_revision=expected_revision,
-                source=NodeStatus.INTERRUPTED, target=NodeStatus.RETRYABLE,
-                event_type="node_retry_allowed", payload={"reason": "explicit_retry"},
-                graph_status=NodeStatus.RETRYABLE,
-            )
-            expected_revision = snapshot.revision
-            current = self._node(snapshot, node_id)
+        if (self.store.recovery_required(task_id) or current.status in {NodeStatus.INTERRUPTED, NodeStatus.RUNNING}
+                or recovery_role(validated.nodes[node_id]) in {"writer", "delivery"}):
+            raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm the recovery plan before retrying")
         if current.status is not NodeStatus.RETRYABLE:
             raise ForgePilotError("invalid_state", "Only retryable or interrupted nodes can retry")
         self.store.transition(
@@ -144,6 +171,17 @@ class GraphRunner:
     def cancel(self, task_id: str, *, expected_revision: int) -> GraphSnapshot:
         return self.store.cancel(task_id, expected_revision=expected_revision)
 
+    def prepare_recovery(self, task_id: str, graph: GraphDefinition):
+        validated = validate_graph(graph)
+        self._assert_definition(self.store.snapshot(task_id), validated)
+        return self.recovery.prepare(task_id, graph)
+
+    def confirm_recovery(self, task_id: str, graph: GraphDefinition, *, token: str,
+                         expected_revision: int) -> GraphSnapshot:
+        validated = validate_graph(graph)
+        self._assert_definition(self.store.snapshot(task_id), validated)
+        return self.recovery.confirm(task_id, graph, token=token, expected_revision=expected_revision)
+
     def events(self, task_id: str, *, after_sequence: int = 0) -> tuple[GraphEvent, ...]:
         return self.store.graph_events(task_id, after_sequence=after_sequence)
 
@@ -154,14 +192,16 @@ class GraphRunner:
         except StopIteration:
             raise ForgePilotError("unknown_node", "Graph node does not exist") from None
 
-    @staticmethod
-    def _assert_definition(snapshot: GraphSnapshot, graph: ValidatedGraph) -> None:
+    def _assert_definition(self, snapshot: GraphSnapshot, graph: ValidatedGraph) -> None:
         if (snapshot.graph_id != graph.definition.graph_id
                 or snapshot.graph_version != graph.definition.version
                 or snapshot.definition_hash != graph.definition.definition_hash
                 or {node.node_id: node.node_type for node in snapshot.nodes}
                 != {node.node_id: node.node_type for node in graph.definition.nodes}):
             raise ForgePilotError("graph_definition_changed", "Persisted graph definition does not match")
+        persisted = self.store.events_store.missions.get_graph_run(snapshot.task_id)
+        if persisted["policy_hash"] is not None and persisted["policy_hash"] != self.policy.definition_hash:
+            raise ForgePilotError("graph_policy_changed", "Persisted graph policy does not match")
 
     @staticmethod
     def _readiness(graph: ValidatedGraph, node_id: str,
@@ -205,7 +245,15 @@ class GraphRunner:
         definition = graph.nodes[state.node_id]
         states = {node.node_id: node for node in self.store.snapshot(task_id).nodes}
         artifact_ids = self._inputs(graph, state.node_id, states, initial_inputs)
+        frozen = self.store.frozen_inputs(task_id, state.node_id, state.attempt)
+        if frozen is not None:
+            artifact_ids = tuple(artifact_id for artifact_id, _ in frozen)
         hashes = self._validate_artifacts(task_id, artifact_ids)
+        if frozen is not None and hashes != tuple(value for _, value in frozen):
+            raise ForgePilotError("artifact_integrity", "Frozen retry inputs changed")
+        baseline = None
+        if recovery_role(definition) == "writer":
+            baseline = self.recovery.writer_preflight(task_id)
         attempt = state.attempt + 1
         key = idempotency_key(
             task_id=task_id, node_id=state.node_id, attempt=attempt,
@@ -213,7 +261,7 @@ class GraphRunner:
             agent_definition_hash=definition.effective_agent_definition_hash,
             policy_hash=self.policy.definition_hash,
         )
-        input_hash = sha256(json.dumps(sorted(hashes), separators=(",", ":")).encode()).hexdigest()
+        input_hash = sha256(json.dumps(list(zip(artifact_ids, hashes)), separators=(",", ":")).encode()).hexdigest()
         # A successful key is authoritative. In normal flow a succeeded state is
         # observed before reaching here; the lookup also guards duplicate callers.
         reused = self.store.successful_result(key)
@@ -226,6 +274,7 @@ class GraphRunner:
             event_type="node_started", payload={"idempotency_key": key},
             attempt=attempt, idempotency_key=key, input_hash=input_hash,
             agent_id=definition.agent_id,
+            input_artifacts=tuple(zip(artifact_ids, hashes)),
         )
         context = NodeContext(
             task_id=task_id, node=definition, attempt=attempt,
@@ -246,6 +295,10 @@ class GraphRunner:
                 status=NodeStatus.FAILED, failure_kind=exc.failure_kind,
                 error_summary=exc.summary,
             )
+        except ArtifactStorageError:
+            # Keep the claimed attempt unfinished for inspection. A storage
+            # failure cannot be downgraded into a model/tool retry.
+            raise ForgePilotError("graph_storage", "Artifact persistence failed during node execution") from None
         except Exception:
             result = NodeResult(
                 status=NodeStatus.FAILED, failure_kind=FailureKind.TOOL_TRANSIENT,
@@ -293,12 +346,22 @@ class GraphRunner:
             "failure_kind": result.failure_kind.value if result.failure_kind else None,
             "metrics": result.to_dict()["metrics"],
         }
-        return self.store.transition(
-            task_id, state.node_id, expected_revision=current.revision,
-            source=NodeStatus.RUNNING, target=target,
-            event_type="node_finished", payload=payload, graph_status=graph_status,
-            attempt=attempt, result=result, policy_action=policy_action,
-        )
+        with self.store.events_store._lock:
+            current = self.store.snapshot(task_id)
+            persisted = self._node(current, state.node_id)
+            if persisted.status is NodeStatus.CANCELLED:
+                return current
+            if (persisted.status is not NodeStatus.RUNNING or persisted.attempt != attempt
+                    or self.store.recovery_required(task_id)):
+                raise ForgePilotError("graph_conflict", "Node changed before checkpoint publication")
+            cp = self.recovery.record_completed(task_id, definition, attempt, result, baseline=baseline)
+            return self.store.transition(
+                task_id, state.node_id, expected_revision=current.revision,
+                source=NodeStatus.RUNNING, target=target,
+                event_type="node_finished", payload=payload, graph_status=graph_status,
+                attempt=attempt, result=result, policy_action=policy_action,
+                checkpoint_id=cp.checkpoint_id if cp else None,
+            )
 
 
 __all__ = ["GraphRunner"]

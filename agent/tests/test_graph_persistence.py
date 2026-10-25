@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from hashlib import sha256
 
 import pytest
 
@@ -12,6 +13,8 @@ from forgepilot.orchestration import (
 )
 from forgepilot.orchestration.node_handlers import HandlerRegistry
 from forgepilot.orchestration.store import GraphStore
+from forgepilot.orchestration.models import idempotency_key
+from forgepilot.orchestration.policies import DefaultFailurePolicy
 from forgepilot.security import Redactor
 from forgepilot.sqlite_store import SqliteEventStore
 
@@ -35,7 +38,9 @@ def test_reopen_marks_running_attempt_interrupted_and_explicit_retry_resumes(tmp
     durable.transition(
         "task-recovery", "work", expected_revision=ready.revision,
         source=NodeStatus.READY, target=NodeStatus.RUNNING,
-        attempt=1, idempotency_key="a" * 64, input_hash="b" * 64,
+        attempt=1, idempotency_key=idempotency_key(task_id="task-recovery", node_id="work", attempt=1,
+            input_artifact_hashes=(), agent_definition_hash=graph().nodes[0].effective_agent_definition_hash,
+            policy_hash=DefaultFailurePolicy().definition_hash), input_hash=sha256(b"[]").hexdigest(),
     )
     first.close()
 
@@ -54,8 +59,12 @@ def test_reopen_marks_running_attempt_interrupted_and_explicit_retry_resumes(tmp
         assert recovery_event.state is NodeStatus.INTERRUPTED
         assert recovery_event.payload["failure_kind"] == "application_interrupted"
 
-        done = runner.retry(
-            "task-recovery", graph(), "work", expected_revision=recovered.revision)
+        with pytest.raises(ForgePilotError, match="confirm"):
+            runner.retry("task-recovery", graph(), "work", expected_revision=recovered.revision)
+        plan = runner.prepare_recovery("task-recovery", graph())
+        assert plan.blocked_reason is None
+        runner.confirm_recovery("task-recovery", graph(), token=plan.token, expected_revision=plan.revision)
+        done = runner.run("task-recovery", graph())
         assert done.status is NodeStatus.SUCCEEDED
         assert done.nodes[0].attempt == 2
     finally:

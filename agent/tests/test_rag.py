@@ -15,6 +15,7 @@ from forgepilot.errors import ForgePilotError
 import forgepilot.rag.config as rag_config_module
 from forgepilot.recording import now, snapshot_context
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 
 
 FILE_HASH = hashlib.sha256(b"complete file").hexdigest()
@@ -155,7 +156,7 @@ def test_v5_upgrade_preserves_tasks_conversations_and_memories_and_is_repeatable
     store.close()
 
     with sqlite3.connect(path) as db:
-        for table in ("security_events", "validation_runs", "workspace_records", "checkpoints",
+        for table in ("security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",
                       "task_node_attempts", "task_graph_runs"):
@@ -167,7 +168,7 @@ def test_v5_upgrade_preserves_tasks_conversations_and_memories_and_is_repeatable
     for _ in range(2):
         upgraded = SqliteEventStore(path)
         try:
-            assert upgraded._db.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert upgraded._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
             assert upgraded.get(task["task_id"])["prompt"] == "legacy task payload"
             assert upgraded.conversation_detail(conversation["conversation_id"])["title"] == "legacy conversation"
             assert upgraded.memory_list()["items"][0]["content"] == memory["content"]
@@ -181,7 +182,7 @@ def test_v6_upgrade_adds_durable_rag_runs_with_a_single_verified_backup(tmp_path
     path = tmp_path / "v6.sqlite3"
     SqliteEventStore(path).close()
     with sqlite3.connect(path) as db:
-        for table in ("security_events", "validation_runs", "workspace_records", "checkpoints",
+        for table in ("security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",
                       "task_node_attempts", "task_graph_runs"):
@@ -192,7 +193,7 @@ def test_v6_upgrade_adds_durable_rag_runs_with_a_single_verified_backup(tmp_path
     for _ in range(2):
         store = SqliteEventStore(path)
         try:
-            assert store._db.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert store._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
             assert store._db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rag_index_runs'"
             ).fetchone()

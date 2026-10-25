@@ -8,6 +8,9 @@ from .models import (
 )
 from .policies import DefaultFailurePolicy, FailurePolicy
 from .runner import GraphRunner
+from .checkpoint import CheckpointRecord, CheckpointStore
+from .recovery import RecoveryManager, RecoveryPlan
+from .workspace import WorkspaceBackend, WorkspaceSnapshot
 
 __all__ = [
     "DefaultFailurePolicy", "EdgeCondition", "EdgeDefinition", "FailureKind", "FailurePolicy",
@@ -15,4 +18,6 @@ __all__ = [
     "GraphValidationError", "NodeDefinition", "NodeMetrics", "NodeResult",
     "NodeState", "NodeStatus", "NodeType", "PolicyAction", "TransitionError",
     "validate_graph",
+    "CheckpointRecord", "CheckpointStore", "RecoveryManager", "RecoveryPlan",
+    "WorkspaceBackend", "WorkspaceSnapshot",
 ]

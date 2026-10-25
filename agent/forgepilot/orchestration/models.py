@@ -286,6 +286,26 @@ class GraphDefinition:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         object.__setattr__(self, "edges", tuple(self.edges))
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"graph_id": self.graph_id, "version": self.version,
+                "nodes": [{"node_id": node.node_id, "node_type": node.node_type.value,
+                           "handler": node.handler, "dependencies": list(node.dependencies),
+                           "agent_id": node.agent_id, "agent_definition_hash": node.agent_definition_hash,
+                           "settings": _plain_json(node.settings)} for node in self.nodes],
+                "edges": [{"source": edge.source, "target": edge.target,
+                           "condition": {"route": edge.condition.route,
+                                         "statuses": [status.value for status in edge.condition.statuses]}}
+                          for edge in self.edges]}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "GraphDefinition":
+        data = dict(value)
+        data["nodes"] = tuple(NodeDefinition(**{**node, "dependencies": tuple(node.get("dependencies", ()))})
+                              for node in data["nodes"])
+        data["edges"] = tuple(EdgeDefinition(edge["source"], edge["target"],
+                               EdgeCondition(**edge.get("condition", {}))) for edge in data.get("edges", ()))
+        return cls(**data)
+
     @property
     def definition_hash(self) -> str:
         return sha256(_canonical({

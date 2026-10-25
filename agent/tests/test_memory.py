@@ -16,6 +16,7 @@ from forgepilot.api import create_app
 from forgepilot.chat_service import ChatService,READ_TOOLS
 from forgepilot.memory_context import SUMMARY_SYSTEM,project_identity
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 from forgepilot.task_service import TaskService
 from test_conversations import send
 from test_api import messages,until
@@ -436,7 +437,7 @@ async def test_delete_conversation_waits_summary_cleanup_and_no_resurrection():
 def version_two(path):
     store=SqliteEventStore(path); cid=store.create_conversation()['conversation_id']; seed(store,cid,2); store.close()
     with sqlite3.connect(path) as db:
-        for table in ("security_events", "validation_runs", "workspace_records", "checkpoints",
+        for table in ("security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",
                       "task_node_attempts", "task_graph_runs"):
@@ -457,7 +458,7 @@ def test_v2_backup_migration_preserves_history_and_rollback(tmp_path,monkeypatch
     store=SqliteEventStore(path)
     try:
         assert len(store.conversation_detail(cid)['messages'])==4
-        assert store._db.execute('PRAGMA user_version').fetchone()[0]==9
+        assert store._db.execute('PRAGMA user_version').fetchone()[0]==CURRENT_SCHEMA_VERSION
         backups=list(tmp_path.glob('*.v2-backup-*.sqlite3')); assert len(backups)==1
         with sqlite3.connect(backups[0]) as db:
             assert db.execute('PRAGMA user_version').fetchone()[0]==2

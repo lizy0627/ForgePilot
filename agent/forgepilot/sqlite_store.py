@@ -20,7 +20,7 @@ from .memory_store import MemoryStore
 from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
 from .mission_store import (
-    MissionRepository, create_graph_orchestrator_schema, create_mission_schema,
+    MissionRepository, create_graph_checkpoint_schema, create_graph_orchestrator_schema, create_mission_schema,
     recover_graph_runs,
 )
 from .artifacts.sqlite_store import SqliteArtifactStore
@@ -47,9 +47,10 @@ def database_path():
 
 
 class SqliteEventStore(ConversationStore, MemoryStore):
-    def __init__(self, path=":memory:", *, redactor=None, artifact_root=None):
+    def __init__(self, path=":memory:", *, redactor=None, artifact_root=None, workspace_backend=None):
         self.path = str(path)
         self.redactor = redactor or Redactor()
+        self.workspace_backend = workspace_backend
         self._lock = RLock()
         self._waiters = {}
         self._live = set()
@@ -86,6 +87,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.mission_repository = self.missions
             self._recover()
             self._recover_conversations()
+            self._inspect_graph_recovery()
         except BaseException as exc:
             self.close()
             if isinstance(exc, (sqlite3.Error, OSError)):
@@ -169,6 +171,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.GRAPH_ORCHESTRATOR:
                 create_graph_orchestrator_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_ORCHESTRATOR)}')
+            if version < SchemaVersion.GRAPH_CHECKPOINT_RECOVERY:
+                create_graph_checkpoint_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_CHECKPOINT_RECOVERY)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(
@@ -182,6 +187,50 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             raise ForgePilotError("storage_integrity", f"Database {stage} integrity check failed") from None
         if len(rows) != 1 or rows[0][0] != "ok":
             raise ForgePilotError("storage_integrity", f"Database {stage} integrity check failed")
+
+    def _inspect_graph_recovery(self):
+        """Publish restart decisions on open without confirming or executing them.
+
+        Definitions from pre-recovery databases cannot be reconstructed safely.
+        Their durable gate remains visible with a blocked reason until an explicit
+        higher-level migration or user-directed decision supplies known metadata.
+        """
+        # Local imports keep the persistence bootstrap independent of runner imports.
+        from .orchestration.graph import validate_graph
+        from .orchestration.models import GraphDefinition, SHA256
+        from .orchestration.recovery import RecoveryManager, RecoveryPlan
+        from .orchestration.store import GraphStore
+
+        with self._lock:
+            runs = self._db.execute(
+                """SELECT task_id,current_revision,definition_hash,definition_json,policy_hash
+                   FROM task_graph_runs WHERE recovery_required=1 AND status NOT IN
+                   ('succeeded','failed','cancelled','skipped','completed') ORDER BY task_id"""
+            ).fetchall()
+        repository = GraphStore(self)
+        for run in runs:
+            blocked_reason = None
+            if not run["definition_json"]:
+                blocked_reason = "legacy_graph_definition_missing"
+            elif not run["policy_hash"]:
+                blocked_reason = "legacy_graph_policy_missing"
+            else:
+                try:
+                    definition = GraphDefinition.from_dict(json.loads(run["definition_json"]))
+                    validate_graph(definition)
+                    if (definition.definition_hash != run["definition_hash"]
+                            or not SHA256.fullmatch(run["policy_hash"])):
+                        blocked_reason = "recovery_integrity"
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    blocked_reason = "recovery_integrity"
+            if blocked_reason:
+                plan = RecoveryPlan(run["task_id"], run["current_revision"], "", None,
+                                    (), (), blocked_reason)
+                repository.save_recovery_plan(run["task_id"], expected_revision=run["current_revision"],
+                                              plan=plan.to_dict())
+                continue
+            RecoveryManager(self, workspace_backend=self.workspace_backend,
+                            policy_hash=run["policy_hash"]).prepare(run["task_id"], definition)
 
     def _json(self, value):
         return json.dumps(self.redactor.data(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)

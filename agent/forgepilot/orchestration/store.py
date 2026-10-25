@@ -33,15 +33,19 @@ class GraphStore:
                           sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     def create_run(self, task_id: str, graph: ValidatedGraph, *,
-                   inputs: tuple[tuple[str, str], ...] = ()) -> GraphSnapshot:
+                   inputs: tuple[tuple[str, str], ...] = (), policy_hash: str | None = None) -> GraphSnapshot:
+        if policy_hash is None:
+            from .policies import DefaultFailurePolicy
+            policy_hash = DefaultFailurePolicy().definition_hash
         stamp = _now()
         try:
             with self.events_store._transaction():
                 self.events_store._db.execute(
                     """INSERT INTO task_graph_runs(task_id,graph_id,graph_version,status,current_revision,
-                       created_at,updated_at,definition_hash) VALUES(?,?,?,'pending',1,?,?,?)""",
+                       created_at,updated_at,definition_hash,definition_json,policy_hash)
+                       VALUES(?,?,?,'pending',1,?,?,?,?,?)""",
                     (task_id, graph.definition.graph_id, graph.definition.version, stamp, stamp,
-                     graph.definition.definition_hash),
+                     graph.definition.definition_hash, json.dumps(graph.definition.to_dict()), policy_hash),
                 )
                 self.events_store._db.executemany(
                     """INSERT INTO graph_node_states(task_id,node_id,node_type,status,attempt,updated_at)
@@ -125,7 +129,9 @@ class GraphStore:
                    attempt: int | None = None, idempotency_key: str | None = None,
                    input_hash: str | None = None, agent_id: str | None = None,
                    result: NodeResult | None = None,
-                   policy_action: PolicyAction | None = None) -> GraphSnapshot:
+                   policy_action: PolicyAction | None = None,
+                   checkpoint_id: str | None = None,
+                   input_artifacts: tuple[tuple[str, str], ...] = ()) -> GraphSnapshot:
         assert_transition(source, target)
         stamp = _now()
         try:
@@ -153,9 +159,10 @@ class GraphStore:
                         raise ForgePilotError("node_attempt", "Invalid node attempt claim")
                     db.execute(
                         """INSERT INTO task_node_attempts(task_id,node_id,attempt,node_type,agent_id,status,
-                           idempotency_key,input_hash,started_at) VALUES(?,?,?,?,?,'running',?,?,?)""",
+                           idempotency_key,input_hash,started_at,input_artifacts_json)
+                           VALUES(?,?,?,?,?,'running',?,?,?,?)""",
                         (task_id, node_id, attempt, node["node_type"], agent_id,
-                         idempotency_key, input_hash, stamp),
+                         idempotency_key, input_hash, stamp, json.dumps(input_artifacts)),
                     )
                 result_json = (self._result_json(result)
                                if result is not None else node["result_json"])
@@ -193,6 +200,10 @@ class GraphStore:
                          target.value, result_json,
                          policy_action.value if policy_action else None, stamp),
                     )
+                if checkpoint_id is not None:
+                    db.execute("""UPDATE task_node_attempts SET checkpoint_id=?
+                        WHERE task_id=? AND node_id=? AND attempt=?""",
+                        (checkpoint_id, task_id, node_id, actual_attempt))
 
                 revision = expected_revision + 1
                 sequence = db.execute(
@@ -220,7 +231,7 @@ class GraphStore:
         return self.snapshot(task_id)
 
     def approve(self, task_id: str, node_id: str, *, expected_revision: int,
-                result: NodeResult) -> GraphSnapshot:
+                result: NodeResult, checkpoint_id: str | None = None) -> GraphSnapshot:
         stamp = _now()
         if result.status is not NodeStatus.SUCCEEDED:
             raise ValueError("Human approval result must succeed")
@@ -252,6 +263,10 @@ class GraphStore:
                        WHERE task_id=? AND node_id=? AND attempt=?""",
                     (result_json, task_id, node_id, node["attempt"]),
                 )
+                if checkpoint_id is not None:
+                    db.execute("""UPDATE task_node_attempts SET checkpoint_id=?
+                        WHERE task_id=? AND node_id=? AND attempt=?""",
+                        (checkpoint_id, task_id, node_id, node["attempt"]))
                 revision = expected_revision + 1
                 sequence = db.execute(
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)
@@ -383,6 +398,159 @@ class GraphStore:
             ).fetchone()
         return (row is None or row[0] == NodeStatus.CANCELLED.value
                 or row[1] == NodeStatus.CANCELLED.value)
+
+    def recovery_required(self, task_id: str) -> bool:
+        return bool(self.events_store.missions.get_graph_run(task_id)["recovery_required"])
+
+    def attempt_record(self, task_id: str, node_id: str, attempt: int):
+        with self.events_store._lock:
+            row = self.events_store._db.execute("""SELECT * FROM task_node_attempts
+                WHERE task_id=? AND node_id=? AND attempt=?""", (task_id, node_id, attempt)).fetchone()
+        return dict(row) if row else None
+
+    def frozen_inputs(self, task_id: str, node_id: str, attempt: int):
+        row = self.attempt_record(task_id, node_id, attempt)
+        if row is None or row["input_artifacts_json"] is None:
+            return None
+        return tuple(tuple(item) for item in json.loads(row["input_artifacts_json"]))
+
+    def workspace_record(self, task_id: str):
+        run = self.events_store.missions.get_graph_run(task_id)
+        with self.events_store._lock:
+            rows = self.events_store._db.execute(
+                "SELECT * FROM workspace_records WHERE task_id=?", (task_id,)).fetchall()
+        if not rows:
+            if run["workspace_id"] is not None:
+                raise ForgePilotError("workspace_corrupted", "Graph Worktree record is missing")
+            return None
+        row = dict(rows[0])
+        if run["workspace_id"] != row["workspace_id"]:
+            raise ForgePilotError("workspace_corrupted", "Graph and Worktree records disagree")
+        return row
+
+    def reconcile_events(self, task_id: str) -> None:
+        """Repair a missing event from a consistent durable projection, never execute a node.
+
+        Normal publication is atomic. This also handles imported/older partial records;
+        conflicting successful results remain an integrity error instead of a replay.
+        """
+        try:
+            with self.events_store._transaction():
+                db = self.events_store._db
+                run = db.execute("SELECT * FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+                if run is None:
+                    raise ForgePilotError("unknown_graph", "Graph run does not exist")
+                revision = max(run["current_revision"], db.execute(
+                    "SELECT COALESCE(MAX(revision),0) FROM graph_events WHERE task_id=?", (task_id,)
+                ).fetchone()[0])
+                sequence = db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?",
+                                      (task_id,)).fetchone()[0]
+                changed = False
+                for node in db.execute("SELECT * FROM graph_node_states WHERE task_id=? ORDER BY node_id",
+                                       (task_id,)).fetchall():
+                    if node["status"] == "succeeded":
+                        result = db.execute("""SELECT * FROM graph_node_results
+                            WHERE task_id=? AND node_id=? AND attempt=?""",
+                            (task_id, node["node_id"], node["attempt"])).fetchone()
+                        attempt = db.execute("""SELECT status FROM task_node_attempts
+                            WHERE task_id=? AND node_id=? AND attempt=?""",
+                            (task_id, node["node_id"], node["attempt"])).fetchone()
+                        if (not result or not attempt or result["status"] != "succeeded"
+                                or attempt[0] != "succeeded" or result["result_json"] != node["result_json"]):
+                            raise ForgePilotError("recovery_integrity", "Successful node records disagree")
+                    last = db.execute("""SELECT state,attempt FROM graph_events
+                        WHERE task_id=? AND node_id=? ORDER BY sequence DESC LIMIT 1""",
+                        (task_id, node["node_id"])).fetchone()
+                    if ((last and last[0] == node["status"] and last[1] == node["attempt"])
+                            or (not last and node["status"] == "pending" and node["attempt"] == 0)):
+                        continue
+                    revision += 1
+                    sequence += 1
+                    changed = True
+                    db.execute("""INSERT INTO graph_events(task_id,sequence,revision,event_type,
+                        node_id,attempt,state,payload_json,created_at) VALUES(?,?,?,'node_reconciled',?,?,?,?,?)""",
+                        (task_id, sequence, revision, node["node_id"], node["attempt"], node["status"],
+                         self._json({"reason": "durable_projection", "to": node["status"]}), _now()))
+                if changed:
+                    db.execute("UPDATE task_graph_runs SET current_revision=?,updated_at=? WHERE task_id=?",
+                               (revision, _now(), task_id))
+        except sqlite3.Error:
+            raise ForgePilotError("graph_storage", "Recovery event reconciliation failed") from None
+
+    def save_recovery_plan(self, task_id: str, *, expected_revision: int, plan: dict) -> None:
+        try:
+            with self.events_store._transaction():
+                changed = self.events_store._db.execute("""UPDATE task_graph_runs SET
+                    recovery_required=1,recovery_plan_json=? WHERE task_id=? AND current_revision=?
+                    AND status NOT IN ('cancelled','failed','succeeded')""",
+                    (json.dumps(plan, sort_keys=True, separators=(",", ":")), task_id, expected_revision)).rowcount
+                if changed != 1:
+                    raise ForgePilotError("graph_conflict", "Graph revision or recovery state changed")
+        except sqlite3.Error:
+            raise ForgePilotError("graph_storage", "Recovery plan could not be saved") from None
+
+    def apply_recovery(self, task_id: str, *, expected_revision: int, token: str,
+                       changes: tuple[dict, ...]) -> GraphSnapshot:
+        """The only audited exception to ordinary node transitions: confirmed recovery.
+
+        A verified checkpoint can finish an abandoned attempt; retries receive a new
+        attempt on the next claim. State, checkpoint links, confirmation and events
+        commit together, so a duplicate confirmation cannot run or apply code twice.
+        """
+        try:
+            with self.events_store._transaction():
+                db = self.events_store._db
+                run = db.execute("SELECT * FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+                saved = json.loads(run["recovery_plan_json"] or "{}") if run else {}
+                if saved.get("token") == token and saved.get("confirmed"):
+                    return self.snapshot(task_id)
+                if (not run or run["current_revision"] != expected_revision or not run["recovery_required"]
+                        or saved.get("token") != token or run["status"] in {"succeeded", "cancelled", "failed"}):
+                    raise ForgePilotError("graph_conflict", "Recovery confirmation is stale")
+                revision = expected_revision
+                sequence = db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?",
+                                      (task_id,)).fetchone()[0]
+                for change in changes:
+                    node_id, target = change["node_id"], change["target"]
+                    node = db.execute("SELECT * FROM graph_node_states WHERE task_id=? AND node_id=?",
+                                      (task_id, node_id)).fetchone()
+                    result = change.get("result")
+                    encoded = self._result_json(result) if result else None
+                    db.execute("""UPDATE graph_node_states SET status=?,result_json=?,updated_at=?
+                        WHERE task_id=? AND node_id=?""", (target, encoded, _now(), task_id, node_id))
+                    if result is not None and node["attempt"]:
+                        attempt = self.attempt_record(task_id, node_id, node["attempt"])
+                        db.execute("""UPDATE task_node_attempts SET status=?,finished_at=?,error_code=NULL,
+                            error_summary=NULL WHERE task_id=? AND node_id=? AND attempt=?""",
+                            (target, _now() if target == "succeeded" else None, task_id, node_id, node["attempt"]))
+                        db.execute("""INSERT INTO graph_node_results(task_id,node_id,attempt,idempotency_key,
+                            status,result_json,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id,node_id,attempt)
+                            DO UPDATE SET status=excluded.status,result_json=excluded.result_json""",
+                            (task_id, node_id, node["attempt"], attempt["idempotency_key"], target, encoded, _now()))
+                    if change.get("checkpoint_id"):
+                        db.execute("""UPDATE task_node_attempts SET checkpoint_id=?
+                            WHERE task_id=? AND node_id=? AND attempt=?""",
+                            (change["checkpoint_id"], task_id, node_id, node["attempt"]))
+                    revision += 1
+                    sequence += 1
+                    db.execute("""INSERT INTO graph_events(task_id,sequence,revision,event_type,node_id,
+                        attempt,state,payload_json,created_at) VALUES(?,?,?,'node_recovery_confirmed',?,?,?,?,?)""",
+                        (task_id, sequence, revision, node_id, node["attempt"], target,
+                         self._json({"from": node["status"], "to": target, "action": change["action"]}), _now()))
+                revision += 1
+                sequence += 1
+                saved["confirmed"] = True
+                db.execute("""INSERT INTO graph_events(task_id,sequence,revision,event_type,payload_json,
+                    created_at) VALUES(?,?,?,'recovery_confirmed',?,?)""",
+                    (task_id, sequence, revision, self._json({"token": token}), _now()))
+                has_gate = db.execute("SELECT 1 FROM graph_node_states WHERE task_id=? AND status='awaiting_human'",
+                                     (task_id,)).fetchone()
+                db.execute("""UPDATE task_graph_runs SET status=?,recovery_required=0,recovery_plan_json=?,
+                    current_revision=?,updated_at=? WHERE task_id=?""",
+                    ("awaiting_human" if has_gate else "running", json.dumps(saved), revision, _now(), task_id))
+        except sqlite3.Error:
+            raise ForgePilotError("graph_storage", "Recovery confirmation could not be saved") from None
+        return self.snapshot(task_id)
 
 
 __all__ = ["GraphStore"]

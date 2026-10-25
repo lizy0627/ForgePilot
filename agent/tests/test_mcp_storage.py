@@ -10,6 +10,7 @@ from test_mcp_service import database, candidate, save_new, SECRET, REPLACEMENT
 from forgepilot.errors import ForgePilotError
 from forgepilot.mcp_service import MCPService
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 from forgepilot.windows_secrets import protect_secrets, unprotect_secrets
 import forgepilot.sqlite_store as sqlite_store
 
@@ -42,7 +43,7 @@ def version_three(path):
     cid = store.create_conversation(title="历史不应丢失")["conversation_id"]
     store.close()
     with sqlite3.connect(path) as db:
-        for table in ("security_events", "validation_runs", "workspace_records", "checkpoints",
+        for table in ("security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",
                       "task_node_attempts", "task_graph_runs"):
@@ -53,7 +54,8 @@ def version_three(path):
         db.execute("DROP TABLE mcp_migrations")
         db.execute("ALTER TABLE conversation_requests DROP COLUMN mcp_calls_json")
         db.execute("PRAGMA user_version=3")
-        tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        tables = [row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
         old = {name: db.execute(f'SELECT * FROM "{name}"').fetchall() for name in tables}
     return cid, old
 
@@ -69,7 +71,7 @@ def test_v3_migration_backup_preserves_all_old_tables_and_only_runs_once(tmp_pat
     cid, old = version_three(path)
     store = SqliteEventStore(path)
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert_old_data(store._db, old)
         assert store.conversation_detail(cid)["title"] == "历史不应丢失"
         assert MCPService(store).list_servers() == {"items": []}
@@ -107,7 +109,7 @@ def test_v3_migration_failure_rolls_back_partial_ddl_and_version(tmp_path, monke
     monkeypatch.setattr(sqlite_store, "create_mcp_schema", real_create)
     store = SqliteEventStore(path)
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert_old_data(store._db, old)
     finally:
         store.close()

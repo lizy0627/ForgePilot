@@ -233,11 +233,87 @@ def create_graph_orchestrator_schema(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def create_graph_checkpoint_schema(db: sqlite3.Connection) -> None:
+    """Schema 10: immutable node snapshots and explicit startup recovery gates.
+
+    The ordinal is allocated by SQLite, independently of wall-clock timestamps.
+    Legacy checkpoint records remain inspectable but have no node snapshot and
+    therefore cannot authorize recovery.
+    """
+    statements = (
+        """ALTER TABLE task_graph_runs ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0
+            CHECK(recovery_required IN (0,1))""",
+        "ALTER TABLE task_graph_runs ADD COLUMN recovery_plan_json TEXT",
+        "ALTER TABLE task_graph_runs ADD COLUMN definition_json TEXT",
+        """ALTER TABLE task_graph_runs ADD COLUMN policy_hash TEXT
+            CHECK(policy_hash IS NULL OR length(policy_hash) = 64)""",
+        "ALTER TABLE task_node_attempts ADD COLUMN input_artifacts_json TEXT",
+        "ALTER TABLE checkpoints RENAME TO checkpoints_legacy",
+        "DROP INDEX checkpoints_task_created",
+        """CREATE TABLE checkpoints(
+            ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkpoint_id TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            workspace_id TEXT,
+            commit_hash TEXT,
+            artifact_id TEXT,
+            created_at TEXT NOT NULL,
+            error_code TEXT,
+            node_id TEXT,
+            attempt INTEGER CHECK(attempt IS NULL OR attempt >= 1),
+            result_json TEXT,
+            file_hashes_json TEXT,
+            input_artifacts_json TEXT,
+            output_artifacts_json TEXT,
+            idempotency_key TEXT CHECK(idempotency_key IS NULL OR length(idempotency_key) = 64),
+            data_sha256 TEXT CHECK(data_sha256 IS NULL OR length(data_sha256) = 64),
+            UNIQUE(task_id,node_id,attempt),
+            CHECK((node_id IS NULL AND attempt IS NULL AND result_json IS NULL
+                   AND file_hashes_json IS NULL AND input_artifacts_json IS NULL
+                   AND output_artifacts_json IS NULL AND idempotency_key IS NULL
+                   AND data_sha256 IS NULL)
+               OR (node_id IS NOT NULL AND attempt IS NOT NULL AND result_json IS NOT NULL
+                   AND file_hashes_json IS NOT NULL AND input_artifacts_json IS NOT NULL
+                   AND output_artifacts_json IS NOT NULL AND idempotency_key IS NOT NULL
+                   AND data_sha256 IS NOT NULL)))""",
+        """INSERT INTO checkpoints(checkpoint_id,task_id,checkpoint_type,status,workspace_id,
+                   commit_hash,artifact_id,created_at,error_code)
+            SELECT checkpoint_id,task_id,checkpoint_type,status,workspace_id,
+                   commit_hash,artifact_id,created_at,error_code FROM checkpoints_legacy ORDER BY rowid""",
+        "DROP TABLE checkpoints_legacy",
+        "CREATE INDEX checkpoints_task_created ON checkpoints(task_id,created_at,checkpoint_id)",
+        "CREATE INDEX checkpoints_task_ordinal ON checkpoints(task_id,ordinal)",
+        """CREATE TABLE checkpoint_intents(
+            checkpoint_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK(attempt >= 1),
+            payload_json TEXT NOT NULL,
+            data_sha256 TEXT NOT NULL CHECK(length(data_sha256) = 64),
+            UNIQUE(task_id,node_id,attempt),
+            FOREIGN KEY(task_id,node_id,attempt)
+                REFERENCES task_node_attempts(task_id,node_id,attempt))""",
+    )
+    for statement in statements:
+        db.execute(statement)
+
+
 def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
     """Make abandoned running nodes explicit; execution is never silently resumed."""
     stamp = stamp or _now()
+    # A process may stop between nodes, with no running node at all. Every
+    # unfinished graph still needs a newly reviewed recovery plan on startup.
+    db.execute(
+        """UPDATE task_graph_runs SET recovery_required=1,recovery_plan_json=NULL
+           WHERE status NOT IN ('succeeded','failed','cancelled','skipped','completed')"""
+    )
     tasks = db.execute(
-        "SELECT DISTINCT task_id FROM graph_node_states WHERE status='running' ORDER BY task_id"
+        """SELECT DISTINCT n.task_id FROM graph_node_states n
+           JOIN task_graph_runs g ON g.task_id=n.task_id
+           WHERE n.status='running' AND g.status NOT IN
+           ('succeeded','failed','cancelled','skipped','completed') ORDER BY n.task_id"""
     ).fetchall()
     for task_row in tasks:
         task_id = task_row[0]
@@ -641,6 +717,6 @@ class MissionRepository:
 
 
 __all__ = [
-    "MissionRepository", "create_graph_orchestrator_schema", "create_mission_schema",
+    "MissionRepository", "create_graph_checkpoint_schema", "create_graph_orchestrator_schema", "create_mission_schema",
     "recover_graph_runs",
 ]

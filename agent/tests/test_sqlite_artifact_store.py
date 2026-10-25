@@ -12,13 +12,14 @@ from forgepilot.artifacts import (
 import forgepilot.artifacts.sqlite_store as artifact_sqlite
 from forgepilot.errors import ForgePilotError
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 import forgepilot.sqlite_store as sqlite_store_module
 from test_artifact_protocol import HASH_A, HASH_B, plan, task_spec
 
 
 SCHEMA8_TABLES = (
     "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
-    "security_events", "validation_runs", "workspace_records", "checkpoints",
+    "security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
     "model_calls", "approvals", "artifact_relations", "artifacts",
     "task_node_attempts", "task_graph_runs",
 )
@@ -71,7 +72,7 @@ def test_v7_to_v8_verified_backup_reopen_and_failure_rollback(tmp_path, monkeypa
     conversation_id = _v7_database(path)
     store = SqliteEventStore(path)
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert store.conversation_detail(conversation_id)["title"] == "schema seven survives"
         assert set(SCHEMA8_TABLES) <= {
             row[0] for row in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")

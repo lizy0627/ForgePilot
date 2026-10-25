@@ -384,12 +384,12 @@ def test_initialize_reopen_three_tables_and_version(tmp_path):
     path=tmp_path/"history.sqlite3"
     for _ in range(2):
         store=SqliteEventStore(path)
-        assert store._db.execute("PRAGMA user_version").fetchone()[0]==9
+        assert store._db.execute("PRAGMA user_version").fetchone()[0]==CURRENT_SCHEMA_VERSION
         assert {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}=={
             "tasks","task_events","tool_calls","conversations","conversation_requests","conversation_messages",
             "conversation_summaries","memories","mcp_servers","mcp_migrations","rag_files","rag_index_runs",
             "task_graph_runs","task_node_attempts","artifacts","artifact_relations","approvals","model_calls",
-            "checkpoints","workspace_records","validation_runs","security_events",
+            "checkpoints","checkpoint_intents","workspace_records","validation_runs","security_events",
             "graph_node_states","graph_run_inputs","graph_node_results","graph_events",
         }
         assert store._db.execute("PRAGMA foreign_keys").fetchone()[0]==1
@@ -405,14 +405,15 @@ def test_schema_version_ledger_has_unique_contiguous_ownership():
     assert SchemaVersion.RAG_FILES == 6
     assert SchemaVersion.RAG_INDEX_LIFECYCLE == 7
     assert SchemaVersion.GRAPH_ARTIFACT_STORE == 8
-    assert SchemaVersion.GRAPH_ORCHESTRATOR == CURRENT_SCHEMA_VERSION == 9
+    assert SchemaVersion.GRAPH_ORCHESTRATOR == 9
+    assert SchemaVersion.GRAPH_CHECKPOINT_RECOVERY == CURRENT_SCHEMA_VERSION == 10
     assert not requires_upgrade_backup(0)
     assert all(requires_upgrade_backup(version) for version in versions[:-1])
     assert not requires_upgrade_backup(int(CURRENT_SCHEMA_VERSION))
 
 
 def test_schema_ledger_cannot_advance_without_a_migration(monkeypatch):
-    monkeypatch.setattr(sqlite_store_module, "CURRENT_SCHEMA_VERSION", 10)
+    monkeypatch.setattr(sqlite_store_module, "CURRENT_SCHEMA_VERSION", int(CURRENT_SCHEMA_VERSION) + 1)
     with pytest.raises(ForgePilotError, match="migration path") as error:
         SqliteEventStore()
     assert error.value.code == "storage_version"
