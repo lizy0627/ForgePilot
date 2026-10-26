@@ -1,7 +1,8 @@
 """Fail-closed worktree boundary for node checkpoints and recovery.
 
-The production WorktreeManager must implement ``WorkspaceBackend`` before workspace
-recovery is enabled. The fake below stores *only hashes in memory*: it neither
+The production ``forgepilot.workspace_manager.WorkspaceManager`` implements this
+contract with local Git and durable writer ownership. It is injected explicitly;
+the unavailable default cannot touch files. The fake stores *only hashes in memory*: it neither
 opens repository files nor executes Git or a shell. A snapshot's file map is the
 complete controlled-file manifest, including explicit ``None`` tombstones when
 the manager tracks a deleted file. Comparing selected files is insufficient.

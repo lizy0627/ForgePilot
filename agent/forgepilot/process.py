@@ -46,13 +46,22 @@ class ProcessResult:
     truncated: bool
 
 
-async def run_process(argv: list[str], cwd: Path, *, data: bytes = b"",
-                      timeout: float = 10, output_limit: int = 300_000) -> ProcessResult:
-    # No inherited API credentials, Git overrides, rg config, startup hooks or pager.
+def safe_environment() -> dict[str, str]:
+    """Minimal environment shared by read-only tools and manager-owned Git."""
     env = {k: v for k, v in os.environ.items() if k.upper() in
            {"SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"}}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+               GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0",
+               GIT_ALLOW_PROTOCOL="", GIT_PROTOCOL_FROM_USER="0",
+               GIT_ATTR_NOSYSTEM="1", GIT_NO_LAZY_FETCH="1",
+               GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+    return env
+
+
+async def run_process(argv: list[str], cwd: Path, *, data: bytes = b"",
+                      timeout: float = 10, output_limit: int = 300_000) -> ProcessResult:
+    # No inherited API credentials, Git overrides, rg config, startup hooks or pager.
+    env = safe_environment()
     proc = None
     tasks = []
     truncated = False

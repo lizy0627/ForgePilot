@@ -69,6 +69,17 @@ jobs:
             agent/tests/test_mcp_runtime.py `
             agent/tests/test_mcp_service.py
 
+      - name: Run workspace, Git safety and recovery tests
+        shell: pwsh
+        run: |
+          $workspaceTests = Get-ChildItem -Path `
+            'agent/tests/test_*workspace*.py', `
+            'agent/tests/test_recovery*.py', `
+            'agent/tests/test_artifact_recovery.py', `
+            'agent/tests/test_security.py' -File |
+            Sort-Object FullName -Unique | ForEach-Object { $_.FullName }
+          & .\agent.venv\Scripts\python.exe -m pytest -q @workspaceTests
+
       - name: Run deterministic code RAG tests and retrieval evaluation
         shell: pwsh
         run: |

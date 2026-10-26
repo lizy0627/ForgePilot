@@ -11,7 +11,7 @@ from hashlib import sha256
 import json
 from typing import Mapping
 
-from ..artifacts.models import ChangeSet
+from ..artifacts.models import ChangeSet, ExecutionPlan
 from ..errors import ForgePilotError
 from .checkpoint import CheckpointStore
 from .models import GraphDefinition, NodeDefinition, NodeResult, NodeStatus, NodeType, idempotency_key
@@ -198,6 +198,9 @@ class RecoveryManager:
             "checkpoint_type": boundary, "result": result.to_dict(),
             "workspace": self._snapshot_data(current), "input_artifacts": [list(item) for item in frozen],
             "output_artifacts": [list(item) for item in self._artifact_pairs(task_id, result.output_artifact_ids)],
+            "approved_paths": sorted({path for item in outputs if isinstance(item.content, ExecutionPlan)
+                                      for step in item.content.steps for path in step.expected_files})
+                              if boundary == "plan_approved" else None,
             "idempotency_key": attempt_record["idempotency_key"],
         })
         return self._complete_intent(intent, record, current)
@@ -205,7 +208,12 @@ class RecoveryManager:
     def _complete_intent(self, intent, record, current):
         payload = intent["payload"]
         if payload["workspace"] is not None:
-            current = self.workspace.checkpoint(record, intent["checkpoint_id"], current)
+            boundary = getattr(self.workspace, "checkpoint_boundary", None)
+            if boundary is None:
+                current = self.workspace.checkpoint(record, intent["checkpoint_id"], current)
+            else:
+                current = boundary(record, intent["checkpoint_id"], current,
+                                   kind=payload["checkpoint_type"], approved_paths=payload.get("approved_paths"))
         return self.checkpoints.create(
             intent["task_id"], intent["node_id"], intent["attempt"], payload["checkpoint_type"],
             NodeResult.from_dict(payload["result"]), workspace_id=current.workspace_id if current else None,

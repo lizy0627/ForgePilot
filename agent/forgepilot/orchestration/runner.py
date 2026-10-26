@@ -18,6 +18,11 @@ from .node_handlers import HandlerRegistry, NodeContext, NodeExecutionError
 from .policies import DefaultFailurePolicy, FailurePolicy
 from .store import GraphStore
 from .recovery import RecoveryManager, recovery_role
+from .workspace import WorkspaceSnapshot
+
+
+class _WriterNotCompleted(Exception):
+    """Exit the lease through its interrupted-writer path without hiding result."""
 
 
 class GraphRunner:
@@ -242,6 +247,27 @@ class GraphRunner:
 
     def _execute(self, task_id: str, graph: ValidatedGraph, state: NodeState,
                  initial_inputs: tuple[str, ...], *, expected_revision: int) -> GraphSnapshot:
+        writer = getattr(self.recovery.workspace, "writer", None)
+        if writer is None or recovery_role(graph.nodes[state.node_id]) != "writer":
+            return self._execute_owned(task_id, graph, state, initial_inputs,
+                                       expected_revision=expected_revision)
+        baseline = self.recovery.writer_preflight(task_id)
+        expected = WorkspaceSnapshot(baseline.workspace_id, task_id, baseline.head_commit, baseline.file_hashes)
+        result = None
+        try:
+            # Ownership spans the handler, ChangeSet verification, Git checkpoint,
+            # and durable graph publication, including other tasks of this repo.
+            with writer(task_id, expected=expected):
+                result = self._execute_owned(task_id, graph, state, initial_inputs,
+                                             expected_revision=expected_revision)
+                if self._node(result, state.node_id).status is not NodeStatus.SUCCEEDED:
+                    raise _WriterNotCompleted()
+        except _WriterNotCompleted:
+            pass
+        return result
+
+    def _execute_owned(self, task_id: str, graph: ValidatedGraph, state: NodeState,
+                       initial_inputs: tuple[str, ...], *, expected_revision: int) -> GraphSnapshot:
         definition = graph.nodes[state.node_id]
         states = {node.node_id: node for node in self.store.snapshot(task_id).nodes}
         artifact_ids = self._inputs(graph, state.node_id, states, initial_inputs)
