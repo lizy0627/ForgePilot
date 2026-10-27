@@ -807,6 +807,7 @@ class WorkspaceManager(DeliveryMixin):
         remove_worktree_registration(intent["admin_path"], state["common_dir"], state["worktree_path"],
                                      intent["admin_files"], expected_root_identity=intent["admin_identity"])
         state["status"] = "abandoned"
+        self._complete_delivery_operation(state)
         state.pop("intent", None)
         self._save(state)
         return {"status": "abandoned", "worktree_path": state["worktree_path"], "branch": state["branch"]}

@@ -21,6 +21,7 @@ from ..artifacts.models import ArtifactModel, TaskSpec, ExecutionPlan, EvidenceB
 from ..artifacts.sqlite_store import ArtifactStorageError
 from ..artifacts.validation import create_artifact, validate_plan_coverage
 from ..errors import ForgePilotError
+from ..mission_observability import model_call, tool_call, validate_tool
 from ..models.accounting import ModelBudget
 from ..orchestration.analysis_review import AnalysisReviewStore, scope_content
 from ..orchestration.graph import validate_graph
@@ -414,22 +415,24 @@ class ImplementationService:
             tools = registry.get_specs()
             while True:
                 check_approval()
-                response = await client.chat(messages, tools, output_schema=ImplementationOutcome.model_json_schema())
+                response = await model_call(self.events, context, definition, client,
+                    messages, tools, output_schema=ImplementationOutcome.model_json_schema())
                 check_approval()
                 if not response.message.tool_calls:
                     break
                 # Reject malformed or forbidden calls anywhere in a batch before
                 # dispatching its first write. Writes themselves stay serial.
                 for call in response.message.tool_calls:
-                    registry.validate_call(call.function.name, call.function.arguments,
-                                           capabilities=definition.capabilities)
+                    validate_tool(self.events, context, registry, call.function.name,
+                                  call.function.arguments, capabilities=definition.capabilities)
                 budget.consume_tools(len(response.message.tool_calls))
                 messages.append(response.message.model_dump(exclude_none=True))
                 for call in response.message.tool_calls:
                     check_approval()
                     try:
                         async with asyncio.timeout(budget.remaining_seconds()):
-                            result = await registry.execute(call.function.name, call.function.arguments)
+                            result = await tool_call(self.events, context, registry,
+                                                     call.function.name, call.function.arguments)
                     except TimeoutError:
                         raise ForgePilotError("llm_budget", "Implementation tool time budget exhausted") from None
                     if not result.success:

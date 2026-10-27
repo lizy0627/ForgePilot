@@ -23,6 +23,9 @@ from .api_models import ConversationDetail, ConversationList, ConversationReques
 from .api_models import ConversationDeleted
 from .api_models import MemoryCreate,MemoryUpdate,MemoryRecord,MemoryList,MemoryDeleted,SummaryUpdate,SummaryState
 from .mcp_api import MCPRequestGuard, register_mcp_routes
+from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes
+from .mission_host import MissionHost
+from .mission_events import MissionEventStream
 
 ERROR_STATUS = {
     "step_limit": 409,
@@ -64,12 +67,16 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_retention_seconds=60.0,
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
-               model_client_closer=None, rag_coordinator=None):
+               model_client_closer=None, rag_coordinator=None, mission_factory=None,
+               mission_stream_max_subscribers=8):
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
                     legacy_mcp_config=legacy_mcp_config, rag_coordinator=rag_coordinator)
     conversations = ConversationHost(host,chat_factory,summary_factory=summary_factory,
         stream_retention_seconds=conversation_stream_retention_seconds,
         stream_max_subscribers=conversation_stream_max_subscribers)
+    missions = MissionHost(host, workflow_factory=mission_factory)
+    mission_streams = MissionEventStream(host.store, heartbeat_seconds=heartbeat_seconds,
+                                        max_subscribers=mission_stream_max_subscribers)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -77,14 +84,20 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         try:
             yield
         finally:
-            await conversations.close()
-            await host.close(close_resources=model_client_closer)
+            try:
+                await missions.close()
+            finally:
+                await conversations.close()
+                await host.close(close_resources=model_client_closer)
 
     app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
     app.state.task_host = host
     app.state.conversation_host = conversations
+    app.state.mission_host = missions
+    app.state.mission_events = mission_streams
     app.add_middleware(MCPRequestGuard, error=error_response)
+    app.add_middleware(MissionRequestGuard, error=error_response)
 
     @app.middleware("http")
     async def local_origin(request, call_next):
@@ -105,7 +118,12 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.exception_handler(ForgePilotError)
     async def service_error(request, exc):
-        return error_response(exc.code, exc.message, ERROR_STATUS.get(exc.code, 422),
+        status = ERROR_STATUS.get(exc.code, 422)
+        message = exc.message
+        if request.url.path.startswith("/api/v2/"):
+            status = V2_ERROR_STATUS.get(exc.code, status)
+            message = host.store.redactor.text(message)
+        return error_response(exc.code, message, status,
                               task_id=getattr(exc, "task_id", None))
 
     @app.exception_handler(sqlite3.Error)
@@ -115,6 +133,8 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         # Never echo invalid input, request bodies, credentials, or raw validation contexts.
+        if request.url.path.startswith("/api/v2/"):
+            return error_response("invalid_request", "Request does not match the v2 schema", 422)
         if request.url.path.startswith("/api/v1/mcp/"):
             # Even field names/loc entries may be an attacker-supplied secret.
             return error_response("invalid_request", "Request does not match the MCP management schema", 422)
@@ -132,6 +152,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
+    register_mission_routes(app, missions, mission_streams)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)
     async def create_task(body: CreateTask):

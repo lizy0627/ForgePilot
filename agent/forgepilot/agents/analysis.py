@@ -17,6 +17,7 @@ from ..artifacts.models import ArtifactModel, DataPolicy, EvidenceBundle, Execut
 from ..artifacts.sqlite_store import ArtifactStorageError
 from ..artifacts.validation import create_artifact
 from ..errors import ForgePilotError
+from ..mission_observability import model_call, tool_call, validate_tool
 from ..models.accounting import ModelBudget
 from ..models.errors import category_of
 from ..orchestration.analysis_review import AnalysisReviewStore
@@ -252,14 +253,15 @@ class AnalysisService:
             while True:
                 if context.is_cancelled():
                     return NodeResult(NodeStatus.CANCELLED)
-                response = await client.chat(messages, tools, output_schema=schema)
+                response = await model_call(self.events, context, definition, client,
+                                            messages, tools, output_schema=schema)
                 if not response.message.tool_calls:
                     break
                 # Validate the whole batch before dispatch. Even if a provider
                 # returns a forbidden call, it never reaches an adapter.
                 for call in response.message.tool_calls:
-                    registry.validate_call(call.function.name, call.function.arguments,
-                                           capabilities=definition.capabilities)
+                    validate_tool(self.events, context, registry, call.function.name,
+                                  call.function.arguments, capabilities=definition.capabilities)
                 budget.consume_tools(len(response.message.tool_calls))
                 messages.append(response.message.model_dump(exclude_none=True))
                 for call in response.message.tool_calls:
@@ -267,7 +269,8 @@ class AnalysisService:
                         return NodeResult(NodeStatus.CANCELLED)
                     try:
                         async with asyncio.timeout(budget.remaining_seconds()):
-                            result = await registry.execute(call.function.name, call.function.arguments)
+                            result = await tool_call(self.events, context, registry,
+                                                     call.function.name, call.function.arguments)
                     except TimeoutError:
                         raise ForgePilotError("llm_budget", "Agent time budget exhausted during tools") from None
                     if not result.success:

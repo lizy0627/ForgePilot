@@ -34,6 +34,14 @@ def _fail(code, message):
 
 
 class DeliveryMixin:
+    @staticmethod
+    def _complete_delivery_operation(state):
+        operation_id = state.pop("pending_delivery_operation_id", None)
+        if operation_id is not None:
+            state["delivery_operation_id"] = operation_id
+        else:
+            state.pop("delivery_operation_id", None)
+
     def final_change_set(self, task_id, changes):
         """Derive the cumulative base-to-checkpoint diff from Git and verified bytes.
 
@@ -150,6 +158,7 @@ class DeliveryMixin:
                 state["status"] = "delivered"
                 state["delivery_result"] = {"mode": "squash", "commit": intent["head"],
                                             "target_branch": intent["target_branch"]}
+                self._complete_delivery_operation(state)
             else:
                 state["status"] = "active"
             result = {"status": state["status"], "outcome": observed["outcome"],
@@ -394,6 +403,7 @@ class DeliveryMixin:
             self._publish_squash(state, main, target, current, tree, commit, merged_files)
         state["status"] = "delivered"
         state["delivery_result"] = {"mode": "squash", "commit": commit, "target_branch": target["branch"]}
+        self._complete_delivery_operation(state)
         state.pop("intent", None)
         self._save(state)
         return dict(state["delivery_result"])
@@ -424,17 +434,24 @@ class DeliveryMixin:
                 or main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout):
             _fail("delivery_changed", "Delivery outcome requires user inspection")
 
-    def deliver(self, task_id, mode, *, approved, token, bundle=None):
+    def deliver(self, task_id, mode, *, approved, token, bundle=None, operation_id=None):
         from .policy import Capability
         self.policy.require(self.principal, Capability.DELIVER)
         if approved is not True:
             _fail("delivery_approval", "Final delivery requires explicit user approval")
         if not isinstance(mode, str) or mode not in _MODES:
             _fail("delivery_mode", "Select squash, keep_branch, patch, bundle, or abandon")
+        if operation_id is not None and (not isinstance(operation_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None):
+            _fail("delivery_mode", "Invalid delivery operation identity")
         abandon = None
         with self._operation(task_id) as state:
             self._delivery_active(state)
             preview, current = self._check_delivery_token(state, token)
+            if operation_id is not None:
+                state["pending_delivery_operation_id"] = operation_id
+            else:
+                state.pop("pending_delivery_operation_id", None)
             if mode == "abandon":
                 # cleanup obtains the same repository lease and rechecks this exact
                 # snapshot. It never receives an arbitrary path or recursive flag.
@@ -454,6 +471,7 @@ class DeliveryMixin:
                 state.pop("delivery_preview", None)
                 state["status"] = "delivered"
                 state["delivery_result"] = result
+                self._complete_delivery_operation(state)
                 self._save(state)
                 return result
         return self.cleanup(task_id, approved=True, expected=abandon)

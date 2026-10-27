@@ -36,6 +36,9 @@ def parser():
     add_code_intelligence_arguments(result)
     add_mcp_arguments(result)
     add_rag_arguments(result)
+    result.add_argument("--mission-oracle", help="Trusted external protected-test CMake project for API v2 missions")
+    result.add_argument("--mission-allow-cloud-model", action="store_true",
+                        help="Explicitly allow mission repository context to configured cloud model routes")
     return result
 
 
@@ -125,6 +128,10 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
                                  rag_coordinator=rag_coordinator)
+                from .mission_factory import build_mission_workflow
+                app.state.mission_host.factory = lambda events: build_mission_workflow(
+                    app.state.task_host, oracle_source=args.mission_oracle,
+                    cloud_model_allowed=args.mission_allow_cloud_model)
                 options = dict(host=args.host, port=args.port, workers=1,
                                access_log=False, log_level="warning", timeout_graceful_shutdown=10)
                 if stop_requested is None:

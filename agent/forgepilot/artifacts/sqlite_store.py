@@ -273,6 +273,11 @@ class SqliteArtifactStore:
                     parent_artifact_id,child_artifact_id,relation,created_at) VALUES(?,?,?,?)""",
                     ((parent.artifact_id, artifact.artifact_id, relation, stamp) for parent in parents),
                 )
+                from ..mission_events import append_record_event
+                append_record_event(self.events, artifact.task_id, "artifact.created", {
+                    "artifact_id": artifact.artifact_id, "artifact_type": artifact.artifact_type,
+                    "content_sha256": artifact.content_sha256, "size_bytes": len(payload),
+                }, node_id=artifact.producer_node, actor=artifact.producer)
         except BaseException as exc:
             if created_external and target is not None:
                 try:

@@ -25,7 +25,8 @@ class GraphStore:
         self.events_store = event_store
 
     def _json(self, value: Mapping[str, Any]) -> str:
-        return json.dumps(self.events_store.redactor.data(dict(value)), ensure_ascii=False,
+        from ..mission_events import safe_event_data
+        return json.dumps(safe_event_data(self.events_store.redactor, dict(value)), ensure_ascii=False,
                           sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     def _result_json(self, result: NodeResult) -> str:
@@ -231,7 +232,8 @@ class GraphStore:
         return self.snapshot(task_id)
 
     def approve(self, task_id: str, node_id: str, *, expected_revision: int,
-                result: NodeResult, checkpoint_id: str | None = None) -> GraphSnapshot:
+                result: NodeResult, checkpoint_id: str | None = None,
+                approval: Mapping[str, Any] | None = None) -> GraphSnapshot:
         stamp = _now()
         if result.status is not NodeStatus.SUCCEEDED:
             raise ValueError("Human approval result must succeed")
@@ -249,6 +251,21 @@ class GraphStore:
                     raise ForgePilotError("unknown_graph", "Graph run or node does not exist")
                 if run[0] != expected_revision or node["status"] != NodeStatus.AWAITING_HUMAN.value:
                     raise ForgePilotError("graph_conflict", "Graph revision or human gate state changed")
+                if approval is not None:
+                    # A transport approval is published in the same transaction
+                    # as the gate transition. A failed gate never leaves a grant.
+                    from ..orchestration.analysis_review import AnalysisReviewStore
+                    current = AnalysisReviewStore(self.events_store).get(task_id)
+                    if any(approval[name] != getattr(current, name) for name in (
+                            "task_spec_hash", "plan_hash", "scope_hash")):
+                        raise ForgePilotError("mission_approval_conflict",
+                            "TaskSpec, Plan or Scope changed; review the current approval package")
+                    db.execute("""INSERT INTO approvals(approval_id,task_id,approval_type,status,
+                        task_spec_artifact_id,task_spec_hash,plan_artifact_id,plan_hash,scope_hash,
+                        approved_by,created_at) VALUES(?,?,'execution','approved',?,?,?,?,?,'user',?)""",
+                        (approval["approval_id"], task_id, current.task_spec_artifact_id,
+                         current.task_spec_hash, current.plan_artifact_id, current.plan_hash,
+                         current.scope_hash, stamp))
                 assert_transition(NodeStatus.AWAITING_HUMAN, NodeStatus.SUCCEEDED)
                 db.execute(
                     """UPDATE graph_node_states SET status='succeeded',result_json=?,updated_at=?
@@ -271,11 +288,16 @@ class GraphStore:
                 sequence = db.execute(
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)
                 ).fetchone()[0]
+                approval_payload = {"from": "awaiting_human", "to": "succeeded"}
+                if approval is not None:
+                    approval_payload.update({key: approval[key] for key in (
+                        "approval_id", "task_spec_hash", "plan_hash", "scope_hash")})
+                    approval_payload.update(decision="approved", _actor="user")
                 db.execute(
                     """INSERT INTO graph_events(task_id,sequence,revision,event_type,node_id,attempt,state,
                        payload_json,created_at) VALUES(?,?,?,?,?,?,'succeeded',?,?)""",
                     (task_id, sequence, revision, "human_gate_approved", node_id, node["attempt"],
-                     self._json({"from": "awaiting_human", "to": "succeeded"}), stamp),
+                     self._json(approval_payload), stamp),
                 )
                 db.execute(
                     """UPDATE task_graph_runs SET status='running',current_revision=?,updated_at=?
@@ -323,7 +345,7 @@ class GraphStore:
             raise ForgePilotError("graph_storage", "Graph completion could not be saved") from None
         return self.snapshot(task_id)
 
-    def cancel(self, task_id: str, *, expected_revision: int) -> GraphSnapshot:
+    def cancel(self, task_id: str, *, expected_revision: int, rejected_approval=None) -> GraphSnapshot:
         stamp = _now()
         try:
             with self.events_store._transaction():
@@ -338,6 +360,13 @@ class GraphStore:
                     return self.snapshot(task_id)
                 if run["status"] in {NodeStatus.SUCCEEDED.value, NodeStatus.FAILED.value}:
                     raise ForgePilotError("invalid_state", "A finished graph cannot be cancelled")
+                if rejected_approval is not None:
+                    review = rejected_approval
+                    db.execute("""INSERT INTO approvals(approval_id,task_id,approval_type,status,
+                        task_spec_artifact_id,task_spec_hash,plan_artifact_id,plan_hash,scope_hash,approved_by,created_at)
+                        VALUES(?,?,'execution','rejected',?,?,?,?,?,'user',?)""", (
+                        review["approval_id"], task_id, review["task_spec_artifact_id"], review["task_spec_hash"],
+                        review["plan_artifact_id"], review["plan_hash"], review["scope_hash"], stamp))
                 revision = expected_revision
                 sequence = db.execute(
                     "SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)
@@ -383,6 +412,11 @@ class GraphStore:
                        WHERE task_id=? AND current_revision=?""",
                     (revision, stamp, stamp, task_id, expected_revision),
                 )
+                if rejected_approval is not None:
+                    from ..mission_events import append_mission_event
+                    append_mission_event(self.events_store, task_id, "approval.rejected", {
+                        key: rejected_approval[key] for key in ("approval_id", "task_spec_hash", "plan_hash", "scope_hash")},
+                        actor="user")
         except ForgePilotError:
             raise
         except sqlite3.Error:

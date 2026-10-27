@@ -303,6 +303,12 @@ def create_graph_checkpoint_schema(db: sqlite3.Connection) -> None:
 def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
     """Make abandoned running nodes explicit; execution is never silently resumed."""
     stamp = stamp or _now()
+    # Existing graph protocols keep their original revisions. V2 missions must
+    # expose the recovery gate even if the process stopped at an idle human gate
+    # and therefore no running-node interruption event will be generated below.
+    v2_recovery = db.execute("""SELECT task_id FROM task_graph_runs g
+        WHERE recovery_required=0 AND status NOT IN ('succeeded','failed','cancelled','skipped','completed')
+        AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchall()
     # A process may stop between nodes, with no running node at all. Every
     # unfinished graph still needs a newly reviewed recovery plan on startup.
     db.execute(
@@ -357,6 +363,14 @@ def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> N
             "UPDATE task_graph_runs SET status='interrupted',current_revision=?,updated_at=? WHERE task_id=?",
             (revision, stamp, task_id),
         )
+    for task in v2_recovery:
+        task_id = task[0]
+        revision = db.execute("SELECT current_revision+1 FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()[0]
+        sequence = db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+        db.execute("""INSERT INTO graph_events(task_id,sequence,revision,event_type,payload_json,created_at)
+            VALUES(?,?,?,'task.recovery_required',?,?)""", (task_id, sequence, revision,
+            '{"_actor":"system","reason":"application_interrupted","recovery_required":true}', stamp))
+        db.execute("UPDATE task_graph_runs SET current_revision=?,updated_at=? WHERE task_id=?", (revision, stamp, task_id))
 
 
 def _now() -> str:
@@ -633,6 +647,15 @@ class MissionRepository:
                     schema_json, duration_ms, input_tokens, output_tokens, total_tokens,
                     error_code, retry_count, fallback_model, response_hash, created_at or _now(),
                 ))
+                from .mission_events import append_record_event
+                append_record_event(self.events, task_id, "model.failed" if error_code else "model.completed", {
+                    "call_id": call_id, "role": role, "model": model,
+                    "prompt_version": prompt_version, "input_hash": input_hash,
+                    "duration_ms": duration_ms, "input_tokens": input_tokens,
+                    "output_tokens": output_tokens, "total_tokens": total_tokens,
+                    "error_code": error_code, "retry_count": retry_count,
+                    "fallback_model": fallback_model, "response_hash": response_hash,
+                }, node_id=node_id, actor=role)
             return self.get_model_call(call_id)
         except sqlite3.IntegrityError:
             raise ForgePilotError("model_call_conflict", "Model call already exists or is invalid") from None
@@ -681,8 +704,9 @@ class MissionRepository:
                               attributes: Mapping[str, Any] | None = None,
                               task_id: str | None = None, occurred_at: str | None = None) -> dict[str, Any]:
         # Security records retain bounded, redacted attributes, never the triggering payload.
+        from .mission_events import safe_event_data
         attributes_json = json.dumps(
-            self.events.redactor.data(dict(attributes or {})), ensure_ascii=False,
+            safe_event_data(self.events.redactor, dict(attributes or {})), ensure_ascii=False,
             sort_keys=True, separators=(",", ":"), allow_nan=False,
         )
         if len(attributes_json.encode("utf-8")) > 16_384:
@@ -706,6 +730,15 @@ class MissionRepository:
                     f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
                     tuple(values[column] for column in columns),
                 )
+                from .mission_events import append_record_event
+                event_types = {"workspace_records": "workspace.created",
+                               "validation_runs": "validation.completed",
+                               "security_events": "security.recorded"}
+                if table in event_types:
+                    attributes = dict(values)
+                    if json_field:
+                        attributes[json_field.removesuffix("_json")] = json.loads(attributes.pop(json_field))
+                    append_record_event(self.events, values.get("task_id"), event_types[table], attributes)
             with self.events._lock:
                 result = dict(self.events._db.execute(
                     f"SELECT * FROM {table} WHERE {key_name}=?", (key_value,)).fetchone())

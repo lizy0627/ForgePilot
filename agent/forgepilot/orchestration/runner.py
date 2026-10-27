@@ -164,7 +164,8 @@ class GraphRunner:
                 raise ForgePilotError("graph_stalled", "Graph has no runnable or terminal node")
 
     def approve_human(self, task_id: str, graph: GraphDefinition, node_id: str, *,
-                      expected_revision: int, decision_summary: str = "Approved") -> GraphSnapshot:
+                      expected_revision: int, decision_summary: str = "Approved",
+                      approval=None, on_approved=None) -> GraphSnapshot:
         with self._exclusive_control():
             validated = validate_graph(graph)
             snapshot = self.store.snapshot(task_id)
@@ -189,7 +190,9 @@ class GraphRunner:
                 cp = self.recovery.record_completed(task_id, validated.nodes[node_id], current.attempt,
                                                      result, approved=True)
                 self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result,
-                                   checkpoint_id=cp.checkpoint_id if cp else None)
+                                   checkpoint_id=cp.checkpoint_id if cp else None, approval=approval)
+        if on_approved is not None:
+            on_approved()
         # run() takes the same non-reentrant execution lock for its next batch.
         return self.run(task_id, graph)
 
