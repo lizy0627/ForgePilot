@@ -1,0 +1,75 @@
+{
+  "$defs": {
+    "DataPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_model_allowed": {
+          "default": false,
+          "title": "Cloud Model Allowed",
+          "type": "boolean"
+        },
+        "external_mcp_allowed": {
+          "default": false,
+          "title": "External Mcp Allowed",
+          "type": "boolean"
+        }
+      },
+      "title": "DataPolicy",
+      "type": "object"
+    },
+    "RepositorySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "base_ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Base Ref",
+          "type": "string"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_ref",
+        "toolchain_profile"
+      ],
+      "title": "RepositorySpec",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/agent-draft-task-spec-input.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "data_policy": {
+      "$ref": "#/$defs/DataPolicy"
+    },
+    "language": {
+      "default": "en",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Language",
+      "type": "string"
+    },
+    "repository": {
+      "$ref": "#/$defs/RepositorySpec"
+    },
+    "request": {
+      "maxLength": 8192,
+      "minLength": 1,
+      "title": "Request",
+      "type": "string"
+    }
+  },
+  "required": [
+    "request",
+    "repository",
+    "data_policy"
+  ],
+  "title": "DraftTaskSpecInput",
+  "type": "object"
+}

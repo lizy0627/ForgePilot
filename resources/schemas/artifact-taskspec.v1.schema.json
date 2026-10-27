@@ -205,6 +205,17 @@
           "title": "Risk Level",
           "type": "string"
         },
+        "risks": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Risks",
+          "type": "array"
+        },
         "task_type": {
           "enum": [
             "bug_fix",

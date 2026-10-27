@@ -1,4 +1,4 @@
-"""Declarative Agent contracts; no Agent execution lives in this package."""
+"""Versioned Agent contracts; read-only execution is in agents.analysis."""
 from .definitions import (
     AGENT_SCHEMA_VERSION, ROLE_CAPABILITIES, ROLE_ROUTES, AgentDefinition, AgentLimits,
 )

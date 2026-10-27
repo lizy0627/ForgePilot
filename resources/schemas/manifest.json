@@ -1,13 +1,21 @@
 {
   "files": {
     "agent-definition.v1.schema.json": "c2d9dac3decebe5ea40134260b42f25bcafeedd7bb0b0a305936ccb988327d38",
+    "agent-draft-task-spec-input.v1.schema.json": "c09b379990e4e3ab46246630f14e476540b636da8bc5b0d9991dc22e9c7dad9d",
+    "agent-draft-task-spec-output.v1.schema.json": "f1a11bcbdb03f88724bd4d012284104a992ea650847eb19b016729436db134d0",
+    "agent-generate-plan-input.v1.schema.json": "282504f6805e493c7fe543c9585febd23ff34a826cb2f753d6bcd9d043841de0",
+    "agent-generate-plan-output.v1.schema.json": "70c9e7b7480a29d2e72f5f73488707dd684a6c6b1efe32b80de309ca4d4e2663",
+    "agent-impact-test-analysis-input.v1.schema.json": "b02d5007e0a45f194f5042c18bc8c9ef81b4c1a6926cf267643ab7297438bbff",
+    "agent-impact-test-analysis-output.v1.schema.json": "a58c96a962f9c6895139983d7814a517506215065c530621038d97d4ced1cbef",
+    "agent-root-cause-analysis-input.v1.schema.json": "9daab4f56b95f439947323d0e9e436e5bdf74847f16d27f32bfadc5b62546012",
+    "agent-root-cause-analysis-output.v1.schema.json": "a78abfb6a500a8d672d0c8def0c3bc180a7519869f9573b9d9149b90ef93e0d9",
     "artifact-changeset.v1.schema.json": "efd3ec231f6df18cce2d8af83876012f62f821c004fab28cfc03cd960994a09d",
     "artifact-deliverybundle.v1.schema.json": "57744203ffccc0366abab4e3feea2ab1d428092256da077ec83d3ca7f3787686",
-    "artifact-envelope.v1.schema.json": "be69637a343c7a262bd9b917b7603efe57c3dc354dd0a496e3498e30693b5a1a",
-    "artifact-evidencebundle.v1.schema.json": "71d5276d212883fdf20d3327752e18f53b9d2dced773b87f611307c5c2b2bf4b",
+    "artifact-envelope.v1.schema.json": "fdadd96e7a6472f53c4ea408c82c768c0f0ed2b425f7fc1956676e14adaef321",
+    "artifact-evidencebundle.v1.schema.json": "8e6a1f766e557945b972b66bf01e385be8d847b9ac111b38994da34ab620b49b",
     "artifact-executionplan.v1.schema.json": "d33940fb0accded16eb2dd4e6654328b5a78f7313a2a02f560e45cdabfdb88e3",
     "artifact-reviewreport.v1.schema.json": "91ebe2b1757be94ee69ccc9b664cd6db0858035632ca0036ba5152c4fcbfd7aa",
-    "artifact-taskspec.v1.schema.json": "51880ac7adbcad29e041909aab47137dcf00ef0e838aaa9f0b6510af20fc7313",
+    "artifact-taskspec.v1.schema.json": "9b9c1e4185fffa02f9ff390fc1c17c4054cd4355fd45b2b7c13f046b5f60c7d7",
     "artifact-validationreport.v1.schema.json": "159e09f8f81bad4d622602ea98843feaa82d224bdf2ec7662ee615cc557970b6"
   },
   "schema_version": "1.0"

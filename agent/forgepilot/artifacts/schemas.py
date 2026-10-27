@@ -17,6 +17,8 @@ def _decorate(schema: dict, schema_id: str) -> dict:
 
 
 def generated_schemas() -> dict[str, dict]:
+    from ..agents.contracts import contract_schemas
+
     result = {
         "artifact-envelope.v1.schema.json": _decorate(
             ARTIFACT_ADAPTER.json_schema(), "https://forgepilot.local/schemas/artifact-envelope.v1.schema.json"),
@@ -27,6 +29,7 @@ def generated_schemas() -> dict[str, dict]:
         filename = f"artifact-{artifact_type.lower()}.v1.schema.json"
         result[filename] = _decorate(
             model.model_json_schema(), f"https://forgepilot.local/schemas/{filename}")
+    result.update(contract_schemas())
     return result
 
 

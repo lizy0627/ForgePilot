@@ -1,11 +1,11 @@
-"""Node execution interfaces and explicit serial-MVP parallel stubs."""
+"""Node execution interfaces and deterministic fan-out/join boundaries."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol, TypeAlias
 
 from ..artifacts.store import ArtifactStore
-from .models import FailureKind, NodeDefinition, NodeResult, NodeType
+from .models import FailureKind, NodeDefinition, NodeResult, NodeStatus, NodeType
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,19 +39,14 @@ class NodeExecutionError(RuntimeError):
         super().__init__(self.summary)
 
 
-class ParallelExecutionNotImplemented(NodeExecutionError):
-    def __init__(self, node_type: NodeType) -> None:
-        super().__init__(
-            FailureKind.TOOL_POLICY_VIOLATION,
-            f"{node_type.value} declares a synchronization boundary; parallel execution is not enabled",
-        )
-
-
-class ParallelExecutionStub:
-    """Testable placeholder: fanout/join are valid graph types but never spawn work."""
+class ArtifactBoundaryHandler:
+    """Forward immutable inputs; scheduling and all-success joining live in the runner."""
 
     def __call__(self, context: NodeContext) -> NodeResult:
-        raise ParallelExecutionNotImplemented(context.node.node_type)
+        return NodeResult(
+            NodeStatus.SUCCEEDED, output_artifact_ids=context.input_artifact_ids,
+            decision_summary=f"{context.node.node_type.value} Artifact boundary completed",
+        )
 
 
 class HandlerRegistry:
@@ -64,8 +59,10 @@ class HandlerRegistry:
         self._handlers[handler_id] = handler
 
     def resolve(self, node: NodeDefinition) -> NodeHandler:
+        if node.handler in self._handlers:
+            return self._handlers[node.handler]
         if node.node_type in {NodeType.PARALLEL_FANOUT, NodeType.JOIN}:
-            return ParallelExecutionStub()
+            return ArtifactBoundaryHandler()
         try:
             return self._handlers[node.handler]
         except KeyError:
@@ -79,5 +76,5 @@ __all__ = [
     "AgentNodeHandler", "CheckpointNodeHandler", "ConditionalNodeHandler",
     "DeliveryNodeHandler", "DeterministicNodeHandler", "HandlerRegistry",
     "HumanGateNodeHandler", "NodeContext", "NodeExecutionError", "NodeHandler",
-    "ParallelExecutionNotImplemented", "ParallelExecutionStub",
+    "ArtifactBoundaryHandler",
 ]

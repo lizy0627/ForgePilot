@@ -255,7 +255,7 @@ def test_all_documented_failures_have_an_explicit_policy(failure, action):
     assert DefaultFailurePolicy().action_for(failure, attempt=1) is action
 
 
-def test_repair_is_reported_but_not_executed_and_parallel_types_are_stubs():
+def test_repair_is_reported_but_not_executed_and_parallel_boundaries_are_deterministic():
     for task_id, graph in (
         ("task-repair", GraphDefinition("repair", 1, (node("x", "bad"),))),
         ("task-fanout", GraphDefinition("fanout", 1, (
@@ -272,10 +272,10 @@ def test_repair_is_reported_but_not_executed_and_parallel_types_are_stubs():
         try:
             runner = GraphRunner(store, handlers)
             result = runner.run(task_id, graph)
-            assert result.status is NodeStatus.FAILED
+            assert result.status is (NodeStatus.FAILED if task_id == "task-repair" else NodeStatus.SUCCEEDED)
             event = next(event for event in runner.events(task_id)
                          if event.event_type == "node_finished")
-            expected = "repair" if task_id == "task-repair" else "stop"
+            expected = "repair" if task_id == "task-repair" else None
             assert event.payload["policy_action"] == expected
         finally:
             store.close()

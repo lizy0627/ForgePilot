@@ -1,10 +1,13 @@
-"""Serial GraphRunner with durable-before-visible state and result publication."""
+"""Bounded Analyst fan-out with durable-before-visible state publication."""
 from __future__ import annotations
 
 from hashlib import sha256
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 from time import monotonic
-from typing import Iterable
+from threading import Barrier, BrokenBarrierError, Lock
+from typing import Callable, Iterable
 
 from ..artifacts.store import ArtifactNotFoundError
 from ..artifacts.sqlite_store import ArtifactStorageError
@@ -12,7 +15,7 @@ from ..errors import ForgePilotError
 from .graph import ValidatedGraph, validate_graph
 from .models import (
     FailureKind, GraphDefinition, GraphEvent, GraphSnapshot, NodeMetrics, NodeResult,
-    NodeState, NodeStatus, PolicyAction, idempotency_key,
+    NodeState, NodeStatus, NodeType, PolicyAction, idempotency_key,
 )
 from .node_handlers import HandlerRegistry, NodeContext, NodeExecutionError
 from .policies import DefaultFailurePolicy, FailurePolicy
@@ -26,7 +29,7 @@ class _WriterNotCompleted(Exception):
 
 
 class GraphRunner:
-    """Executes at most one node at a time; handlers may be fake or deterministic."""
+    """Runs two trusted Analysts concurrently; every other node is exclusive."""
 
     def __init__(self, event_store, handlers: HandlerRegistry, *,
                  artifact_store=None, policy: FailurePolicy | None = None,
@@ -39,6 +42,13 @@ class GraphRunner:
                                         workspace_backend=workspace_backend or getattr(event_store, "workspace_backend", None),
                                         policy_hash=self.policy.definition_hash)
         self.checkpoints = self.recovery.checkpoints
+        with event_store._lock:
+            # Shared across runner instances and tasks of this store. A batch
+            # owns resources until both Analysts have joined, so two graph runs
+            # cannot multiply the limit or overlap a writer/build/Git handler.
+            if not hasattr(event_store, "_graph_execution_lock"):
+                event_store._graph_execution_lock = Lock()
+            self._execution_lock = event_store._graph_execution_lock
 
     def run(self, task_id: str, graph: GraphDefinition, *,
             input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
@@ -96,10 +106,20 @@ class GraphRunner:
                 by_id = {node.node_id: node for node in snapshot.nodes}
                 progressed = True
 
-            ready = next((node_id for node_id in validated.topological_order
-                          if by_id[node_id].status is NodeStatus.READY
-                          and self._readiness(validated, node_id, by_id) is True), None)
-            if ready is not None:
+            ready_nodes = [node_id for node_id in validated.topological_order
+                           if by_id[node_id].status is NodeStatus.READY
+                           and self._readiness(validated, node_id, by_id) is True]
+            if ready_nodes:
+                ready = ready_nodes[0]
+                batch = [ready]
+                fanout = validated.analyst_fanout(ready)
+                if fanout is not None:
+                    # A group contains at most one of each built-in Analyst.
+                    sibling = next((item for item in ready_nodes[1:]
+                                    if validated.analyst_fanout(item) == fanout
+                                    and validated.nodes[item].agent_id != validated.nodes[ready].agent_id), None)
+                    if sibling is not None:
+                        batch.append(sibling)
                 with self.store.events_store._lock:
                     active = getattr(self.store.events_store, "_graph_executing", None)
                     if active is None:
@@ -107,10 +127,26 @@ class GraphRunner:
                     if task_id in active:
                         return self.store.snapshot(task_id)
                     active.add(task_id)
+                acquired = False
                 try:
-                    self._execute(task_id, validated, by_id[ready], initial_inputs,
-                                  expected_revision=snapshot.revision)
+                    while not acquired:
+                        if self.store.is_cancelled(task_id, ready):
+                            return self.store.snapshot(task_id)
+                        acquired = self._execution_lock.acquire(timeout=0.05)
+                    if len(batch) == 1:
+                        self._execute(task_id, validated, by_id[ready], initial_inputs,
+                                      expected_revision=snapshot.revision)
+                    else:
+                        # Join the entire batch even when one worker raises.
+                        boundary = Barrier(len(batch))
+                        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="forgepilot-analyst") as pool:
+                            futures = [pool.submit(self._execute_parallel, task_id, validated,
+                                                   by_id[item], initial_inputs, boundary) for item in batch]
+                            for future in futures:
+                                future.result()
                 finally:
+                    if acquired:
+                        self._execution_lock.release()
                     with self.store.events_store._lock:
                         active.discard(task_id)
                 continue
@@ -129,30 +165,32 @@ class GraphRunner:
 
     def approve_human(self, task_id: str, graph: GraphDefinition, node_id: str, *,
                       expected_revision: int, decision_summary: str = "Approved") -> GraphSnapshot:
-        validated = validate_graph(graph)
-        snapshot = self.store.snapshot(task_id)
-        self._assert_definition(snapshot, validated)
-        if self.store.recovery_required(task_id):
-            raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm recovery before approval")
-        if snapshot.revision != expected_revision:
-            raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
-        current = self._node(snapshot, node_id)
-        if current.status is not NodeStatus.AWAITING_HUMAN or current.result is None:
-            raise ForgePilotError("invalid_state", "Node is not awaiting a human decision")
-        result = NodeResult(
-            status=NodeStatus.SUCCEEDED,
-            output_artifact_ids=current.result.output_artifact_ids,
-            decision_summary=decision_summary,
-            next_route=current.result.next_route,
-            metrics=current.result.metrics,
-        )
-        with self.store.events_store._lock:
-            if self.store.snapshot(task_id).revision != expected_revision:
+        with self._exclusive_control():
+            validated = validate_graph(graph)
+            snapshot = self.store.snapshot(task_id)
+            self._assert_definition(snapshot, validated)
+            if self.store.recovery_required(task_id):
+                raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm recovery before approval")
+            if snapshot.revision != expected_revision:
                 raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
-            cp = self.recovery.record_completed(task_id, validated.nodes[node_id], current.attempt,
-                                                 result, approved=True)
-            self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result,
-                               checkpoint_id=cp.checkpoint_id if cp else None)
+            current = self._node(snapshot, node_id)
+            if current.status is not NodeStatus.AWAITING_HUMAN or current.result is None:
+                raise ForgePilotError("invalid_state", "Node is not awaiting a human decision")
+            result = NodeResult(
+                status=NodeStatus.SUCCEEDED,
+                output_artifact_ids=current.result.output_artifact_ids,
+                decision_summary=decision_summary,
+                next_route=current.result.next_route,
+                metrics=current.result.metrics,
+            )
+            with self.store.events_store._lock:
+                if self.store.snapshot(task_id).revision != expected_revision:
+                    raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
+                cp = self.recovery.record_completed(task_id, validated.nodes[node_id], current.attempt,
+                                                     result, approved=True)
+                self.store.approve(task_id, node_id, expected_revision=expected_revision, result=result,
+                                   checkpoint_id=cp.checkpoint_id if cp else None)
+        # run() takes the same non-reentrant execution lock for its next batch.
         return self.run(task_id, graph)
 
     def retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
@@ -177,15 +215,29 @@ class GraphRunner:
         return self.store.cancel(task_id, expected_revision=expected_revision)
 
     def prepare_recovery(self, task_id: str, graph: GraphDefinition):
-        validated = validate_graph(graph)
-        self._assert_definition(self.store.snapshot(task_id), validated)
-        return self.recovery.prepare(task_id, graph)
+        with self._exclusive_control():
+            validated = validate_graph(graph)
+            self._assert_definition(self.store.snapshot(task_id), validated)
+            return self.recovery.prepare(task_id, graph)
 
     def confirm_recovery(self, task_id: str, graph: GraphDefinition, *, token: str,
                          expected_revision: int) -> GraphSnapshot:
-        validated = validate_graph(graph)
-        self._assert_definition(self.store.snapshot(task_id), validated)
-        return self.recovery.confirm(task_id, graph, token=token, expected_revision=expected_revision)
+        with self._exclusive_control():
+            validated = validate_graph(graph)
+            self._assert_definition(self.store.snapshot(task_id), validated)
+            return self.recovery.confirm(task_id, graph, token=token, expected_revision=expected_revision)
+
+    @contextmanager
+    def _exclusive_control(self):
+        # Approval can create a Git checkpoint; recovery can inspect Git,
+        # restore files, or finish a commit. Acquire execution before SQLite,
+        # matching run(), and never block an event loop needed by live Analysts.
+        if not self._execution_lock.acquire(blocking=False):
+            raise ForgePilotError("graph_active", "A live node batch must stop before approval or recovery")
+        try:
+            yield
+        finally:
+            self._execution_lock.release()
 
     def events(self, task_id: str, *, after_sequence: int = 0) -> tuple[GraphEvent, ...]:
         return self.store.graph_events(task_id, after_sequence=after_sequence)
@@ -223,6 +275,10 @@ class GraphRunner:
         if any(source.status not in {NodeStatus.SUCCEEDED, NodeStatus.SKIPPED}
                for source in sources):
             return None
+        if definition.node_type is NodeType.JOIN:
+            # The claim executes an all-success check, including skipped and
+            # non-matching branches. Never silently drop one side of a join.
+            return True
         return any(edge.condition.matches(states[edge.source].result,
                                           states[edge.source].status)
                    for edge in incoming)
@@ -246,7 +302,7 @@ class GraphRunner:
         return tuple(hashes)
 
     def _execute(self, task_id: str, graph: ValidatedGraph, state: NodeState,
-                 initial_inputs: tuple[str, ...], *, expected_revision: int) -> GraphSnapshot:
+                 initial_inputs: tuple[str, ...], *, expected_revision: int | None) -> GraphSnapshot:
         writer = getattr(self.recovery.workspace, "writer", None)
         if writer is None or recovery_role(graph.nodes[state.node_id]) != "writer":
             return self._execute_owned(task_id, graph, state, initial_inputs,
@@ -266,8 +322,32 @@ class GraphRunner:
             pass
         return result
 
+    def _execute_parallel(self, task_id: str, graph: ValidatedGraph, state: NodeState,
+                          initial_inputs: tuple[str, ...], boundary: Barrier) -> GraphSnapshot:
+        arrived = False
+
+        def handlers_completed():
+            nonlocal arrived
+            arrived = True
+            boundary.wait()
+
+        try:
+            # Eligibility already guarantees an Analyst, never a writer. The
+            # barrier precedes publication because recovery checkpoints may
+            # touch Git even for a read-only Artifact boundary.
+            return self._execute_owned(task_id, graph, state, initial_inputs,
+                                       expected_revision=None, before_publish=handlers_completed)
+        except BrokenBarrierError:
+            if self.store.is_cancelled(task_id, state.node_id):
+                return self.store.snapshot(task_id)
+            raise ForgePilotError("graph_interrupted", "Parallel branch stopped before publication") from None
+        finally:
+            if not arrived:
+                boundary.abort()
+
     def _execute_owned(self, task_id: str, graph: ValidatedGraph, state: NodeState,
-                       initial_inputs: tuple[str, ...], *, expected_revision: int) -> GraphSnapshot:
+                       initial_inputs: tuple[str, ...], *, expected_revision: int | None,
+                       before_publish: Callable[[], None] | None = None) -> GraphSnapshot:
         definition = graph.nodes[state.node_id]
         states = {node.node_id: node for node in self.store.snapshot(task_id).nodes}
         artifact_ids = self._inputs(graph, state.node_id, states, initial_inputs)
@@ -294,14 +374,19 @@ class GraphRunner:
         if reused is not None:
             raise ForgePilotError(
                 "graph_conflict", "Successful idempotency key conflicts with node projection")
-        self.store.transition(
-            task_id, state.node_id, expected_revision=expected_revision,
-            source=NodeStatus.READY, target=NodeStatus.RUNNING,
-            event_type="node_started", payload={"idempotency_key": key},
-            attempt=attempt, idempotency_key=key, input_hash=input_hash,
-            agent_id=definition.agent_id,
-            input_artifacts=tuple(zip(artifact_ids, hashes)),
-        )
+        with self.store.events_store._lock:
+            current = self.store.snapshot(task_id)
+            if current.status is NodeStatus.CANCELLED:
+                return current
+            self.store.transition(
+                task_id, state.node_id,
+                expected_revision=current.revision if expected_revision is None else expected_revision,
+                source=NodeStatus.READY, target=NodeStatus.RUNNING,
+                event_type="node_started", payload={"idempotency_key": key},
+                attempt=attempt, idempotency_key=key, input_hash=input_hash,
+                agent_id=definition.agent_id,
+                input_artifacts=tuple(zip(artifact_ids, hashes)),
+            )
         context = NodeContext(
             task_id=task_id, node=definition, attempt=attempt,
             input_artifact_ids=artifact_ids, input_artifact_hashes=hashes,
@@ -310,6 +395,14 @@ class GraphRunner:
         )
         started = monotonic()
         try:
+            if definition.node_type is NodeType.JOIN and (
+                    any(states[item].status is not NodeStatus.SUCCEEDED
+                        for item in graph.predecessors(state.node_id))
+                    or any(not edge.condition.matches(states[edge.source].result,
+                                                       states[edge.source].status)
+                           for edge in graph.incoming_edges(state.node_id))):
+                raise NodeExecutionError(FailureKind.MODEL_CONTRACT_VIOLATION,
+                                         "Join requires every input branch to succeed")
             result = self.handlers.resolve(definition)(context)
             if not isinstance(result, NodeResult):
                 raise NodeExecutionError(
@@ -332,6 +425,8 @@ class GraphRunner:
             )
         elapsed = max(0, int((monotonic() - started) * 1000))
         result = result.with_duration(max(elapsed, result.metrics.duration_ms))
+        if before_publish is not None:
+            before_publish()
 
         current = self.store.snapshot(task_id)
         persisted = self._node(current, state.node_id)
@@ -380,6 +475,13 @@ class GraphRunner:
             if (persisted.status is not NodeStatus.RUNNING or persisted.attempt != attempt
                     or self.store.recovery_required(task_id)):
                 raise ForgePilotError("graph_conflict", "Node changed before checkpoint publication")
+            # Concurrent successful siblings cannot erase a failure or pause.
+            projected = {node.status for node in current.nodes if node.node_id != state.node_id} | {target}
+            for status in (NodeStatus.FAILED, NodeStatus.INTERRUPTED,
+                           NodeStatus.RETRYABLE, NodeStatus.AWAITING_HUMAN):
+                if status in projected:
+                    graph_status = status
+                    break
             cp = self.recovery.record_completed(task_id, definition, attempt, result, baseline=baseline)
             return self.store.transition(
                 task_id, state.node_id, expected_revision=current.revision,

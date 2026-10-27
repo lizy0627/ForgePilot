@@ -106,9 +106,12 @@ class TaskSpec(ArtifactModel):
     test_policy: TestPolicy = TestPolicy()
     data_policy: DataPolicy = DataPolicy()
     assumptions: tuple[Text, ...] = Field(default=(), max_length=32)
+    # Omit the new optional field when empty so already-persisted v1 content
+    # retains its canonical hash. New analysis contracts require explicit risks.
+    risks: tuple[Text, ...] = Field(default=(), max_length=32, exclude_if=lambda value: not value)
     risk_level: Literal["low", "medium", "high", "critical"]
 
-    _arrays = field_validator("acceptance_criteria", "forbidden_scope", "assumptions", mode="before")(_tuple)
+    _arrays = field_validator("acceptance_criteria", "forbidden_scope", "assumptions", "risks", mode="before")(_tuple)
 
     @model_validator(mode="after")
     def unique_criteria(self):
@@ -124,7 +127,7 @@ class EvidenceItem(ArtifactModel):
     end_line: int | None = Field(default=None, ge=1)
     file_hash: Sha256Text | None = None
     symbol: Annotated[str, Field(min_length=1, max_length=512)] | None = None
-    source: Literal["local_repository", "rag", "user", "approved_mcp", "tool_output"]
+    source: Literal["local_repository", "rag", "external", "user", "approved_mcp", "tool_output"]
     confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     reason: Text
 

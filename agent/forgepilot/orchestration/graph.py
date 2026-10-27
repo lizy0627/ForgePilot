@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import EdgeDefinition, GraphDefinition, NodeDefinition
+from .models import EdgeDefinition, GraphDefinition, NodeDefinition, NodeType
 
 
 class GraphValidationError(ValueError):
@@ -26,6 +26,28 @@ class ValidatedGraph:
         node = self.nodes[node_id]
         incoming = [edge.source for edge in self.incoming_edges(node_id)]
         return tuple(dict.fromkeys((*node.dependencies, *incoming)))
+
+    def analyst_fanout(self, node_id: str) -> str | None:
+        """Only exact built-in read-only Analyst contracts enter a parallel group.
+
+        Node settings or role-like names cannot grant parallel execution. All
+        other handlers (including writers, Git and build services) stay serial.
+        """
+        from ..agents.registry import BUILTIN_AGENT_DEFINITIONS
+
+        node = self.nodes[node_id]
+        if node.node_type is not NodeType.AGENT:
+            return None
+        allowed = {definition.agent_id: definition.definition_hash
+                   for definition in BUILTIN_AGENT_DEFINITIONS
+                   if definition.role in {"root_cause_analyst", "impact_test_analyst"}}
+        if node.agent_id not in allowed or node.agent_definition_hash != allowed[node.agent_id]:
+            return None
+        if node.settings.get("recovery_role", "analyst") != "analyst":
+            return None
+        boundaries = [source for source in self.predecessors(node_id)
+                      if self.nodes[source].node_type is NodeType.PARALLEL_FANOUT]
+        return boundaries[0] if len(boundaries) == 1 else None
 
 
 def validate_graph(graph: GraphDefinition) -> ValidatedGraph:

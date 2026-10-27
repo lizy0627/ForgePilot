@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "AnalysisEvidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "end_line": {
+          "minimum": 1,
+          "title": "End Line",
+          "type": "integer"
+        },
+        "evidence_id": {
+          "maxLength": 32,
+          "pattern": "^EV-[1-9][0-9]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "file_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "File Hash",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "local_repository",
+            "rag",
+            "external"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "start_line": {
+          "minimum": 1,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "symbol": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "claim",
+        "path",
+        "start_line",
+        "end_line",
+        "file_hash",
+        "symbol",
+        "source",
+        "confidence",
+        "reason"
+      ],
+      "title": "AnalysisEvidenceItem",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/agent-impact-test-analysis-output.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "#/$defs/AnalysisEvidenceItem"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "summary": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "items",
+    "summary"
+  ],
+  "title": "AnalysisEvidenceBundle",
+  "type": "object"
+}
