@@ -175,7 +175,7 @@ async def test_repair_new_scope_review(cpp_repo, rg_exe, git_exe, fake_validatio
 
 @pytest.mark.asyncio
 async def test_scope_discovered_during_repair_write(cpp_repo, rg_exe, git_exe, fake_validation):
-    messages = script(0) + [reflection(), reply(calls=[write("helper.cpp", "new"), write("main.cpp", "must not run")]),
+    messages = script(0) + [reflection(), reply(calls=[write("helper.cpp", "new"), write("main.cpp", "must not run", "write-main")]),
                            reply(json.dumps(proposal("main.cpp", "helper.cpp"))), reply("finish repair")]
     svc, _, _ = service(cpp_repo, rg_exe, git_exe, messages)
     try:

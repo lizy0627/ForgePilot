@@ -1,6 +1,13 @@
 """Built-in Agent definitions and an immutable-by-value registry."""
 from __future__ import annotations
 
+from collections.abc import Mapping
+import json
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from ..errors import ForgePilotError
 from .definitions import AgentDefinition, AgentLimits
 
 
@@ -65,13 +72,23 @@ BUILTIN_AGENT_DEFINITIONS = (
 
 
 class AgentRegistry:
-    def __init__(self, definitions=BUILTIN_AGENT_DEFINITIONS):
+    def __init__(self, definitions=BUILTIN_AGENT_DEFINITIONS, *, prompt_versions=None, router=None):
+        # This is a manifest of known prompt versions, not executable prompts.
+        # Custom declarations must supply a trusted version->role manifest.
+        self._prompt_versions = dict(prompt_versions) if prompt_versions is not None else {
+            definition.prompt_version: definition.role for definition in BUILTIN_AGENT_DEFINITIONS
+        }
+        self._router = router
         self._definitions: dict[str, AgentDefinition] = {}
         for definition in definitions:
             self.register(definition)
 
     def register(self, definition: AgentDefinition) -> None:
         definition = AgentDefinition.model_validate(definition)
+        if self._prompt_versions.get(definition.prompt_version) != definition.role:
+            raise ValueError("Unknown prompt version or prompt role mismatch")
+        if self._router is not None:
+            self._router.validate_agent(definition)
         if definition.agent_id in self._definitions:
             raise ValueError(f"Agent is already registered: {definition.agent_id}")
         self._definitions[definition.agent_id] = definition
@@ -84,3 +101,51 @@ class AgentRegistry:
 
     def all(self) -> tuple[AgentDefinition, ...]:
         return tuple(self._definitions.values())
+
+    @classmethod
+    def from_json(cls, raw: str | bytes, *, prompt_versions=None, router=None):
+        """Load a versioned, data-only manifest; fail atomically on invalid data."""
+        from ..models.profiles import MAX_CONFIGURATION_BYTES, _unique_json_pairs
+        try:
+            if len(raw.encode("utf-8") if isinstance(raw, str) else raw) > MAX_CONFIGURATION_BYTES:
+                raise ValueError("Agent registry exceeds size limit")
+            payload = json.loads(raw, object_pairs_hook=_unique_json_pairs)
+            if (not isinstance(payload, dict) or set(payload) != {"schema_version", "agents"}
+                    or payload["schema_version"] != "1.0" or not isinstance(payload["agents"], list)
+                    or not 1 <= len(payload["agents"]) <= 128):
+                raise ValueError("Invalid Agent registry manifest")
+            return cls(payload["agents"], prompt_versions=prompt_versions, router=router)
+        except (ValueError, TypeError, RecursionError, UnicodeError, ValidationError):
+            raise ForgePilotError("agent_config", "Invalid Agent registry configuration") from None
+
+    @classmethod
+    def load(cls, path: str | Path, *, prompt_versions=None, router=None):
+        from ..models.profiles import MAX_CONFIGURATION_BYTES
+        try:
+            with Path(path).open("rb") as stream:
+                raw = stream.read(MAX_CONFIGURATION_BYTES + 1)
+            return cls.from_json(raw, prompt_versions=prompt_versions, router=router)
+        except OSError:
+            raise ForgePilotError("agent_config", "Cannot read Agent registry configuration") from None
+
+    def validate_artifacts(self, agent_id: str, artifacts, *, output: bool = False) -> None:
+        """Validate the types crossing a declared Agent boundary.
+
+        Inputs such as ValidationReport are optional until a repair iteration, and
+        an Orchestrator stage may produce only one of its declared output types.
+        Individual Artifact envelopes are validated by the Artifact store.
+        """
+        definition = self.get(agent_id)
+        allowed = definition.output_artifacts if output else definition.input_artifacts
+        for artifact in artifacts:
+            name = artifact if isinstance(artifact, str) else getattr(artifact, "artifact_type", None)
+            if name not in allowed:
+                raise ForgePilotError("agent_artifact", "Artifact type is outside this Agent contract")
+
+    def validate_limits(self, agent_id: str, limits: AgentLimits | Mapping) -> AgentLimits:
+        """Allow a caller to reduce, never increase, a registered Agent's budget."""
+        requested = AgentLimits.model_validate(limits)
+        allowed = self.get(agent_id).limits
+        if any(value > getattr(allowed, name) for name, value in requested.model_dump().items()):
+            raise ForgePilotError("agent_budget", "Requested budget exceeds the Agent definition")
+        return requested

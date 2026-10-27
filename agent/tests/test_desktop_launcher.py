@@ -224,19 +224,13 @@ async def test_model_check_uses_config_without_history_or_secret_output(configur
     monkeypatch.setenv('FORGEPILOT_API_KEY', KEY)
     original = config.read_bytes()
     requests = []
-    client_type = launcher.OpenAICompatibleClient
 
     def handler(request):
         requests.append(request)
         return httpx.Response(status, json={'choices': [{'message': {'role': 'assistant', 'content': KEY},
                                                         'finish_reason': 'stop'}]})
 
-    def client(*args, **kwargs):
-        assert kwargs['timeout'] == 30
-        return client_type(*args, **kwargs, transport=httpx.MockTransport(handler))
-
-    monkeypatch.setattr(launcher, 'OpenAICompatibleClient', client)
-    assert await launcher.check_model(config) == (0 if status == 200 else 1)
+    assert await launcher.check_model(config, transport=httpx.MockTransport(handler)) == (0 if status == 200 else 1)
     out = capsys.readouterr()
     assert KEY not in out.out + out.err
     assert ('检查通过' in out.out) == (status == 200)
@@ -259,35 +253,29 @@ async def test_model_check_requires_key_and_text_reply(configured, monkeypatch, 
     assert await launcher.check_model(config) == 1
     assert '未配置 API Key' in capsys.readouterr().err
     monkeypatch.setenv('FORGEPILOT_API_KEY', KEY)
-    client_type = launcher.OpenAICompatibleClient
     body = {'choices': [{'message': {'role': 'assistant', 'tool_calls': [
         {'id': 'unrequested', 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{}'}}]},
         'finish_reason': 'tool_calls'}]}
-    monkeypatch.setattr(launcher, 'OpenAICompatibleClient', lambda *a, **kw:
-        client_type(*a, **kw, transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))))
-    assert await launcher.check_model(config) == 1
-    assert 'llm_protocol' in capsys.readouterr().err
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    assert await launcher.check_model(config, transport=transport) == 1
+    assert 'llm_tool_unknown' in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
 async def test_model_check_validates_each_distinct_model_and_names_failed_purpose(tmp_path,monkeypatch,capsys):
-    from conftest import reply
-    from forgepilot.errors import ForgePilotError
     config=tmp_path/'models.json'
     config.write_text(json.dumps({'base_url':'https://provider.invalid/v1','chat_model':'fast-chat',
         'task_model':'quality-task','summary_model':'cheap-summary','port':8765,'server_args':[]}),encoding='utf-8')
     calls=[]
-    class Client:
-        def __init__(self,base_url,key,model,**kwargs): self.model=model
-        async def __aenter__(self): return self
-        async def __aexit__(self,*args): pass
-        async def chat(self,messages,tools=None):
-            calls.append(self.model)
-            if self.model=='quality-task': raise ForgePilotError('llm_http','HTTP 403 from model provider')
-            return reply('OK')
+    def respond(request):
+        model = json.loads(request.content)['model']
+        calls.append(model)
+        if model == 'quality-task':
+            return httpx.Response(403, text='private response')
+        return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': 'OK'},
+                                                     'finish_reason': 'stop'}]})
     monkeypatch.setenv('FORGEPILOT_API_KEY',KEY)
-    monkeypatch.setattr(launcher,'OpenAICompatibleClient',Client)
-    assert await launcher.check_model(config)==1
+    assert await launcher.check_model(config, transport=httpx.MockTransport(respond))==1
     output=capsys.readouterr()
     assert calls==['fast-chat','quality-task','cheap-summary']
     assert '任务模型检查失败' in output.err and '聊天模型检查失败' not in output.err

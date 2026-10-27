@@ -1,6 +1,7 @@
 """Analysis, plan review and approved modification. Program-owned state and authority."""
 
 import asyncio
+import hashlib
 import json
 import re
 from time import perf_counter
@@ -26,6 +27,13 @@ MAX_AGENT_STEPS = 30
 MAX_CONTEXT_CHARS = 262_144
 MAX_AUTO_RAG_CHARS = 48_000
 _AUTO_RAG_PREFIX = "Automatically retrieved repository context"
+_TRACE_TOOL_ERROR_CODES = frozenset({
+    "cancelled", "tool_timeout", "tool_internal", "invalid_arguments", "unknown_tool",
+    "policy_denied", "repository_boundary", "repository_denied", "repository_path",
+    "approval_required", "write_conflict", "validation_integrity", "file_access",
+    "analysis_read_only", "replanning_read_only", "mcp_budget", "mcp_timeout",
+    "mcp_unavailable", "mcp_schema", "mcp_schema_changed",
+})
 _CODE_TASK = re.compile(
     r"\b(?:analy[sz]e|inspect|debug|fix|implement|refactor|code|source|function|class|"
     r"method|compile|build|test|bug|error)\b|分析|检查|定位|调试|修复|实现|重构|代码|源码|函数|类|编译|测试",
@@ -96,6 +104,7 @@ class AgentRuntime:
         self.before_approve = None
         self.verify_integrity = None
         self.registry.principal_provider = self._policy_principal
+        self._tool_preflight_errors = {}
 
     def _policy_principal(self):
         state = self._context.state if self._context else TaskState.ANALYZING
@@ -236,12 +245,32 @@ class AgentRuntime:
         # Every sent request owns a usage slot, even if no response arrives.
         context.usage.append(None)
         self.trace.emit(context.task_id, "llm_request", {
-            "step": context.steps, "messages": self._trace_messages(context, outgoing), "tools": [t.model_dump() for t in tools] if tools else None,
+            "step": context.steps, "messages": self._trace_messages(context, outgoing),
+            "tools": [t.name for t in tools] if tools else None,
         })
         reply = await self.llm.chat(self.redactor.data(outgoing), tools=tools)
         message = self.redactor.data(reply.message.model_dump(exclude_none=True))
-        context.usage[-1] = self.redactor.data(reply.usage)
+        calls = message.get("tool_calls") or []
+        if len({call["id"] for call in calls}) != len(calls):
+            raise ForgePilotError("llm_tool_protocol", "Duplicate tool call identifiers")
+        context.usage[-1] = ({key: value for key, value in reply.usage.items()
+                             if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                             and type(value) is int and value >= 0}
+                            if reply.usage is not None else None)
         context.conversation.append(message)
+        # Preflight the entire round before executing its first tool. Legacy
+        # loops retain one failure observation per invalid call, in model order.
+        self._tool_preflight_errors = {}
+        for call in message.get("tool_calls") or ():
+            try:
+                self.registry.validate_call(call["function"]["name"], call["function"]["arguments"])
+            except ForgePilotError as exc:
+                self._tool_preflight_errors[call["id"]] = self.redactor.text(str(exc))
+        if not message.get("tool_calls"):
+            if context.state == TaskState.ANALYZING:
+                context.analysis_result = message.get("content", "")
+            elif context.state == TaskState.MODIFYING:
+                context.final_result = message.get("content", "")
         self.trace.emit(context.task_id, "llm_response", {
             "step": context.steps, "message": self._trace_messages(context, [message])[0],
             "usage": context.usage[-1],
@@ -249,29 +278,21 @@ class AgentRuntime:
         return message
 
     def _trace_messages(self, context: TaskContext, messages: list[dict]) -> list[dict]:
-        """Keep RAG source/query bodies out of traces while preserving model input."""
-        retrieval_ids = {
-            item.get("tool_call_id") for item in context.tool_results
-            if item.get("name") in {"retrieve_code_context", "rag_retrieve"}
-        }
-        sanitized = self.redactor.data(messages)
-        for message in sanitized:
-            content = message.get("content")
-            if (message.get("role") == "user" and isinstance(content, str)
-                    and content.startswith(_AUTO_RAG_PREFIX)):
-                message["content"] = "[RAG repository context omitted from trace]"
-            if (message.get("role") == "tool"
-                    and message.get("tool_call_id") in retrieval_ids):
-                message["content"] = "[retrieve_code_context output omitted from trace]"
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                if function.get("name") in {"retrieve_code_context", "rag_retrieve"}:
-                    raw = function.get("arguments", "")
-                    function["arguments"] = json.dumps({
-                        "query_omitted": True,
-                        "argument_chars": len(raw) if isinstance(raw, str) else 0,
-                    })
-        return sanitized
+        """Trace identities/counts only; redaction cannot classify private context."""
+        result = []
+        for message in messages:
+            content = message.get("content") or ""
+            entry = {"role": message["role"], "content_omitted": True,
+                     "content_chars": len(content),
+                     "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+            if message.get("tool_call_id"):
+                entry["tool_call_id"] = message["tool_call_id"]
+            if message.get("tool_calls"):
+                entry["tool_calls"] = [{"id": call["id"], "name": call["function"]["name"],
+                    "arguments_hash": hashlib.sha256(call["function"]["arguments"].encode("utf-8")).hexdigest()}
+                    for call in message["tool_calls"]]
+            result.append(entry)
+        return result
 
     async def _generate_plan(self, context: TaskContext) -> None:
         retrieval_specs = [spec for spec in self.registry.get_specs()
@@ -821,14 +842,18 @@ class AgentRuntime:
             meta["repair_round"] = repair_round
         context.tool_calls += 1
         arguments = function["arguments"]
-        if function["name"] in {"retrieve_code_context", "rag_retrieve"}:
-            arguments = {"query_omitted": True,
-                         "argument_chars": len(arguments) if isinstance(arguments, str) else 0}
-        self.trace.emit(context.task_id, "tool_started", {**meta, "arguments": arguments})
+        self.trace.emit(context.task_id, "tool_started", {**meta,
+            "argument_chars": len(arguments), "arguments_omitted": True,
+            "arguments_hash": hashlib.sha256(arguments.encode("utf-8")).hexdigest()})
+        preflight_error = self._tool_preflight_errors.get(call["id"])
+        preflight_result = (ToolResult(success=False, output="", error=preflight_error, duration_ms=0)
+                            if preflight_error else None)
         started = perf_counter()
         try:
+            options = {"preflight_result": preflight_result} if preflight_result is not None else {}
             result = (ToolResult(success=False, output="", error=blocked_error, duration_ms=0) if blocked_error else
-                await self.mcp.execute(self.registry, function["name"], function["arguments"], call["id"]))
+                await self.mcp.execute(self.registry, function["name"], function["arguments"], call["id"],
+                                       **options))
         except asyncio.CancelledError:
             self._record_tool(context, meta, ToolResult(success=False, output="", error="cancelled: Tool cancelled",
                 duration_ms=int((perf_counter() - started) * 1_000)))
@@ -848,10 +873,21 @@ class AgentRuntime:
         context.tool_results.append({**meta, **data})
         context.conversation.append({"role": "tool", "tool_call_id": meta["tool_call_id"],
                                      "content": json.dumps(data, ensure_ascii=False)})
-        trace_data = data
-        if meta["name"] in {"retrieve_code_context", "rag_retrieve"}:
-            trace_data = {
-                "success": data["success"], "error": data["error"],
-                "duration_ms": data["duration_ms"], "output_omitted": True,
-            }
+        error_code = None
+        if data["error"]:
+            prefix = data["error"].split(":", 1)[0]
+            error_code = prefix if prefix in _TRACE_TOOL_ERROR_CODES else "tool_failed"
+        trace_data = {
+            "success": data["success"],
+            "error": error_code + ": Tool failed; details omitted" if error_code else None,
+            "duration_ms": data["duration_ms"], "output_omitted": True,
+            "output_chars": len(data["output"]),
+            "output_hash": hashlib.sha256(data["output"].encode("utf-8")).hexdigest(),
+        }
+        try:
+            source = json.loads(data["output"]).get("source")
+            if source in {"clangd", "rg"}:
+                trace_data["result_source"] = source
+        except (ValueError, TypeError, AttributeError):
+            pass
         self.trace.emit(context.task_id, "tool_finished", {**meta, **trace_data})

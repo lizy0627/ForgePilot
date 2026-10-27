@@ -192,6 +192,48 @@ async def test_redaction_in_context_observations_trace_and_callbacks():
 
 
 @pytest.mark.asyncio
+async def test_model_and_tool_traces_omit_private_context_and_preserve_hashes():
+    private = "private repository source and user context"
+    llm = ScriptedLLM([reply(None, [call("repository_read_range", json.dumps({"path": private}))]),
+                       reply("Public answer")])
+    runtime, context, trace = setup(llm)
+    context.user_request = private
+    await runtime.run(context)
+    assert context.state == TaskState.COMPLETED
+    events = [e for e in trace.events if e.kind in {"llm_request", "llm_response", "tool_started", "tool_finished"}]
+    encoded = json.dumps([e.data for e in events])
+    assert private not in encoded and "Public answer" not in encoded
+    request = next(e.data for e in events if e.kind == "llm_request")
+    assert all(m["content_omitted"] and len(m["content_hash"]) == 64 for m in request["messages"])
+    finished = next(e.data for e in events if e.kind == "tool_finished")
+    assert finished["output_omitted"] and len(finished["output_hash"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_duplicate_ids_are_rejected_before_any_tool_execution():
+    runtime, context, _ = setup(ScriptedLLM([reply(calls=[call(), call()])]))
+    await runtime.run(context)
+    assert context.state == TaskState.FAILED
+    assert context.error.startswith("llm_tool_protocol:")
+    assert context.tool_calls == 0 and context.tool_results == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private_error", ["privatecontextsecret", "privatecontextsecret: private body"])
+async def test_custom_tool_error_is_never_used_as_a_trace_error_code(private_error):
+    runtime, context, trace = setup(ScriptedLLM([reply(calls=[call()]), reply("done")]))
+    async def fail(_):
+        return ToolResult(success=False, output="", error=private_error, duration_ms=0)
+    runtime.registry.get("read_file").execute = fail
+    await runtime.run(context)
+    assert context.state == TaskState.COMPLETED
+    encoded = json.dumps([event.data for event in trace.events])
+    assert "privatecontextsecret" not in encoded and "private body" not in encoded
+    finished = next(event.data for event in trace.events if event.kind == "tool_finished")
+    assert finished["error"] == "tool_failed: Tool failed; details omitted"
+
+
+@pytest.mark.asyncio
 async def test_state_and_context_budget_enforced(monkeypatch):
     assert {s.value for s in TaskState} == {
         "created", "analyzing", "planning", "waiting_approval", "modifying", "building",

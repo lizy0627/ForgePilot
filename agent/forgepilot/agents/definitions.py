@@ -6,10 +6,11 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..artifacts.canonical import content_sha256
-from ..artifacts.models import ArtifactTypeName, IDENTIFIER_PATTERN
+from ..artifacts.models import ArtifactTypeName
 from ..policy import ROLE_CAPABILITIES as POLICY_CAPABILITIES, normalize_role
 
 AGENT_SCHEMA_VERSION = "1.0"
+VERSIONED_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\.v[1-9][0-9]*$"
 AgentRole: TypeAlias = Literal[
     "orchestrator", "root_cause_analyst", "impact_test_analyst",
     "implementer", "reviewer", "repair",
@@ -31,6 +32,14 @@ ROLE_ROUTES: dict[str, frozenset[str]] = {
 ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     role: frozenset(POLICY_CAPABILITIES[normalize_role(role)]) for role in ROLE_ROUTES
 }
+ROLE_OUTPUT_ARTIFACTS: dict[str, frozenset[str]] = {
+    "orchestrator": frozenset({"TaskSpec", "ExecutionPlan", "DeliveryBundle"}),
+    "root_cause_analyst": frozenset({"EvidenceBundle"}),
+    "impact_test_analyst": frozenset({"EvidenceBundle"}),
+    "implementer": frozenset({"ChangeSet"}),
+    "reviewer": frozenset({"ReviewReport"}),
+    "repair": frozenset({"ChangeSet"}),
+}
 
 
 def _tuple(value):
@@ -38,7 +47,8 @@ def _tuple(value):
 
 
 class AgentLimits(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, revalidate_instances="always")
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True,
+                              revalidate_instances="always", hide_input_in_errors=True)
 
     max_model_calls: int = Field(ge=1, le=64)
     max_tool_calls: int = Field(ge=0, le=256)
@@ -56,11 +66,11 @@ class AgentDefinition(BaseModel):
     )
 
     schema_version: Literal["1.0"] = AGENT_SCHEMA_VERSION
-    agent_id: Annotated[str, Field(pattern=IDENTIFIER_PATTERN, max_length=128)]
+    agent_id: Annotated[str, Field(pattern=VERSIONED_IDENTIFIER_PATTERN, max_length=128)]
     display_name: Annotated[str, Field(min_length=1, max_length=128)]
     role: AgentRole
     role_description: Annotated[str, Field(min_length=1, max_length=2_048)]
-    prompt_version: Annotated[str, Field(pattern=IDENTIFIER_PATTERN, max_length=128)]
+    prompt_version: Annotated[str, Field(pattern=VERSIONED_IDENTIFIER_PATTERN, max_length=128)]
     model_route: ModelRoute
     input_artifacts: tuple[ArtifactTypeName, ...] = Field(default=(), max_length=16)
     output_artifacts: tuple[ArtifactTypeName, ...] = Field(min_length=1, max_length=16)
@@ -88,4 +98,6 @@ class AgentDefinition(BaseModel):
         excessive = set(self.capabilities) - ROLE_CAPABILITIES[self.role]
         if excessive:
             raise ValueError(f"Capabilities are not allowed for role {self.role!r}: {sorted(excessive)}")
+        if set(self.output_artifacts) - ROLE_OUTPUT_ARTIFACTS[self.role]:
+            raise ValueError("Output Artifact type is not allowed for this role")
         return self

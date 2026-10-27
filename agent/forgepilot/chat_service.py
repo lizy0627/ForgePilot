@@ -221,6 +221,11 @@ class ReadOnlyRegistry(ToolRegistry):
             raise ForgePilotError('chat_tool_forbidden', '问答模式只允许读取文件、列出文件和搜索代码。')
         super().register(tool)
 
+    def validate_call(self, name, arguments, *, capabilities=None):
+        if LEGACY_ALIASES.get(name, name) not in self.allowed:
+            raise ForgePilotError('chat_tool_forbidden', '问答模式禁止写入、构建、测试和执行命令。')
+        return super().validate_call(name, arguments, capabilities=capabilities)
+
     async def execute(self, name, arguments):
         if LEGACY_ALIASES.get(name, name) not in self.allowed:
             return ToolResult(success=False,output='',error='chat_tool_forbidden: 问答模式禁止写入、构建、测试和执行命令。',duration_ms=0)
@@ -402,6 +407,16 @@ class ChatService:
                                   diagnostics: StreamMetrics | None):
         names=[call['function']['name'] for call in calls]
         permitted=[allowed_tools is None or LEGACY_ALIASES.get(name, name) in allowed_tools for name in names]
+        # Check the full round before dispatch; retain legacy error observations
+        # and the original order even when some read-only calls are invalid.
+        failures={}
+        for index,(call,allowed) in enumerate(zip(calls,permitted)):
+            if allowed:
+                try:
+                    self.registry.validate_call(names[index],call['function']['arguments'])
+                except ForgePilotError as exc:
+                    failures[index]=ToolResult(success=False,output='',
+                        error=self.redactor.text(str(exc)),duration_ms=0)
         indexes=[index for index,allowed in enumerate(permitted) if allowed]
         reserved=self.mcp.reserve_calls([names[index] for index in indexes])
         reservations={index:value for index,value in zip(indexes,reserved)}
@@ -426,8 +441,10 @@ class ChatService:
             tool_started=monotonic()
             try:
                 call=calls[index]
+                options={'preflight_result':failures[index]} if index in failures else {}
                 return await self.mcp.execute(self.registry,names[index],
-                    call['function']['arguments'],call['id'],reservations[index])
+                    call['function']['arguments'],call['id'],reservations[index],
+                    **options)
             finally:
                 if diagnostics: diagnostics.tool_finished(tool_started)
 

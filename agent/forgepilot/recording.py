@@ -47,8 +47,12 @@ def project_events(traces, snapshot):
             })
         if kind == "llm_response":
             message=data.get("message",{})
-            if message.get("content") and not message.get("tool_calls") and snapshot["state"] in {"analyzing","modifying"}:
-                add("message",{"role":"assistant","content":message["content"],"step":data["step"]})
+            content=message.get("content")
+            if message.get("content_omitted") and not message.get("tool_calls"):
+                content=(snapshot.get("analysis_result") if snapshot["state"] == "analyzing"
+                         else snapshot.get("final_result") if snapshot["state"] == "modifying" else None)
+            if content and not message.get("tool_calls") and snapshot["state"] in {"analyzing","modifying"}:
+                add("message",{"role":"assistant","content":content,"step":data["step"]})
         if kind == "mcp_status":
             add("message", {"kind": kind, **data, "role": "system", "content":
                 f"MCP ready: {data['name']}" if data["status"] == "ready" else

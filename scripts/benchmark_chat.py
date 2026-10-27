@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT / "agent"))
 
 from forgepilot.api import create_app
 from forgepilot.chat_service import ChatService
-from forgepilot.llm import ContentDelta, OpenAICompatibleClient, StreamFinished
+from forgepilot.llm import ContentDelta, StreamFinished
+from forgepilot.models.gateway import ModelGateway
 from forgepilot.sqlite_store import SqliteEventStore
 
 
@@ -75,6 +76,7 @@ def distribution(values: list[int]) -> dict[str, int]:
 
 
 async def run(args) -> dict:
+    gateway = None
     if args.real_model:
         base_url = os.environ.get("FORGEPILOT_BASE_URL", "")
         api_key = os.environ.get("FORGEPILOT_API_KEY", "")
@@ -82,8 +84,10 @@ async def run(args) -> dict:
         if not all((base_url, api_key, model)):
             raise SystemExit("--real-model requires FORGEPILOT_BASE_URL, FORGEPILOT_API_KEY and a chat or fallback model")
 
+        gateway = ModelGateway.from_legacy(base_url, api_key, {'chat': model}, timeout=args.timeout)
+
         def chat_factory():
-            return ChatService(OpenAICompatibleClient(base_url, api_key, model, timeout=args.timeout))
+            return ChatService(gateway.for_route('chat'))
     else:
         def chat_factory():
             return ChatService(OfflineModel(args.first_token_delay_ms, args.chunk_delay_ms))
@@ -95,7 +99,8 @@ async def run(args) -> dict:
     logger.setLevel(logging.WARNING)
     logger.propagate = False
     store = SqliteEventStore(":memory:")
-    app = create_app(lambda trace: None, store=store, chat_factory=chat_factory, mcp_disabled=True)
+    app = create_app(lambda trace: None, store=store, chat_factory=chat_factory, mcp_disabled=True,
+                     model_client_closer=gateway.aclose if gateway is not None else None)
     prompt = "Return a short deterministic acknowledgement."
 
     async def sample(client):

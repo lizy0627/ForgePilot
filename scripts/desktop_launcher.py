@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / 'agent'))
 from forgepilot.build_process import ProcessJob, build_environment
 from forgepilot.security import Redactor
 from forgepilot.errors import ForgePilotError
-from forgepilot.llm import OpenAICompatibleClient
+from forgepilot.models.gateway import ModelGateway
 from forgepilot.settings import resolve_models
 
 PYTHON = ROOT / 'agent.venv/Scripts/python.exe'
@@ -134,8 +134,8 @@ def read_config(path):
             'task_model': models.task, 'summary_model': models.summary}
 
 
-async def check_model(config):
-    """One bounded request per distinct model; no history database or service needed."""
+async def check_model(config, *, transport=None):
+    """One bounded gateway call per distinct model; no history database needed."""
     key = os.environ.get('FORGEPILOT_API_KEY', '')
     redactor = Redactor((key,))
     try:
@@ -150,7 +150,10 @@ async def check_model(config):
         for model, purposes in groups.items():
             label = '/'.join(purposes)
             try:
-                async with OpenAICompatibleClient(data['base_url'], key, model, timeout=30) as llm:
+                async with ModelGateway.from_legacy(
+                        data['base_url'], key, {'connection-check': model},
+                        timeout=30, transport=transport) as gateway:
+                    llm = gateway.for_route('connection-check')
                     reply = await llm.chat([{'role': 'user', 'content': 'Reply with only OK.'}])
                     if reply.message.tool_calls or not (reply.message.content or '').strip():
                         raise ForgePilotError('llm_protocol', '模型未返回有效文本。')

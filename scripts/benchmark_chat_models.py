@@ -20,7 +20,8 @@ from time import monotonic
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "agent"))
 
-from forgepilot.llm import ContentDelta, OpenAICompatibleClient, StreamFinished
+from forgepilot.llm import ContentDelta, StreamFinished
+from forgepilot.models.gateway import ModelGateway
 from forgepilot.settings import checked_model_id
 
 
@@ -43,18 +44,20 @@ def distribution(values: list[int]) -> dict[str, int]:
             "sample_count": len(values)}
 
 
-async def real_candidate(base_url, key, model, repeats, timeout):
+async def real_candidate(base_url, key, model, repeats, timeout, *, transport=None):
     rows = []
-    async with OpenAICompatibleClient(base_url, key, model, timeout=timeout) as client:
+    async with ModelGateway.from_legacy(
+            base_url, key, {'benchmark': model}, timeout=timeout, transport=transport) as gateway:
+        client = gateway.for_route('benchmark')
         for _ in range(repeats):
             for prompt in FIXED_PROMPTS:
                 started = monotonic(); first = None; characters = 0; success = False
                 try:
                     async for event in client.stream_chat([{"role": "user", "content": prompt}]):
-                        if isinstance(event, ContentDelta) and event.content:
+                        if isinstance(event, ContentDelta) and event.text:
                             if first is None:
                                 first = monotonic()
-                            characters += len(event.content)
+                            characters += len(event.text)
                         elif isinstance(event, StreamFinished):
                             success = bool(characters)
                     finished = monotonic()

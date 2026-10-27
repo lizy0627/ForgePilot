@@ -31,6 +31,7 @@ class SearchArguments(Arguments):
 
 
 def register_repository_tools(registry: ToolRegistry, repository: Repository) -> None:
+    registry.repository = repository
     for name, description, model in (
         ("list_files", "List bounded repository-relative file paths; excludes sensitive/generated files and links.", ListArguments),
         ("read_file", "Read numbered UTF-8 lines within the repository; reports partial/truncated content.", ReadArguments),

@@ -57,6 +57,35 @@ def task_model_from_args(args):
     return model
 
 
+def model_gateway_from_args(args, *, task_only=False, transport=None):
+    """Build the one model boundary without issuing a provider request.
+
+    Explicit profile configuration replaces legacy model flags. Otherwise the
+    established environment and purpose-specific model fallback stay intact.
+    """
+    from .models.gateway import ModelGateway
+    from .models.profiles import ModelConfiguration
+
+    path = getattr(args, "model_config", None)
+    if path:
+        config = ModelConfiguration.load(path)
+        for route in (("task",) if task_only else ("task", "chat", "summary")):
+            config.router().resolve(route)
+        return ModelGateway(config, transport_factory=(lambda _: transport) if transport is not None else None)
+
+    key = os.environ.get("FORGEPILOT_API_KEY", "")
+    if not args.base_url or not key:
+        raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
+    if task_only:
+        selected = {"task": task_model_from_args(args)}
+    else:
+        models = models_from_args(args)
+        selected = {"task": models.task, "chat": models.chat, "summary": models.summary}
+    return ModelGateway.from_legacy(
+        args.base_url, key, selected, timeout=args.timeout, transport=transport,
+    )
+
+
 def add_mcp_arguments(parser):
     parser.add_argument("--mcp-config", default=os.environ.get("FORGEPILOT_MCP_CONFIG"),
                         help="Explicit absolute trusted single-server JSON configuration; disabled by default")
@@ -84,6 +113,8 @@ def add_storage_arguments(parser):
 
 
 def add_connection_arguments(parser):
+    parser.add_argument("--model-config", default=os.environ.get("FORGEPILOT_MODEL_CONFIG"),
+                        help="Trusted versioned model profiles/routes JSON; overrides legacy model flags")
     parser.add_argument("--base-url", default=os.environ.get("FORGEPILOT_BASE_URL"))
     parser.add_argument("--model", default=os.environ.get("FORGEPILOT_MODEL"))
     parser.add_argument("--chat-model", default=os.environ.get("FORGEPILOT_CHAT_MODEL"))

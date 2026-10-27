@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import httpx
 import pytest
 
 from forgepilot.llm import ChatReply
@@ -12,6 +13,33 @@ from forgepilot.process import executable
 @pytest.fixture(autouse=True)
 def isolated_history_database(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGEPILOT_DATABASE",str(tmp_path / "test-history.sqlite3"))
+
+
+@pytest.fixture(autouse=True)
+def no_real_model_transport(monkeypatch):
+    """Fail closed for provider HTTP paths; fake transports bypass this boundary.
+
+    Other HTTP paths remain available to local API/MCP integration fixtures.
+    Subprocess CLI tests explicitly start their own loopback fake model server.
+    """
+    async_send = httpx.AsyncHTTPTransport.handle_async_request
+    sync_send = httpx.HTTPTransport.handle_request
+
+    def check(request):
+        path = request.url.path.rstrip("/")
+        if path.endswith("/chat/completions") or "/embeddings" in path:
+            pytest.fail("Real model HTTP transport is disabled in tests; inject a fake provider or MockTransport")
+
+    async def guarded_async(self, request):
+        check(request)
+        return await async_send(self, request)
+
+    def guarded_sync(self, request):
+        check(request)
+        return sync_send(self, request)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", guarded_async)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", guarded_sync)
 
 
 @pytest.fixture(scope="session")

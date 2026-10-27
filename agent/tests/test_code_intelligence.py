@@ -132,7 +132,8 @@ async def test_real_clangd_cmake_definitions_references_and_fresh_source(symbol_
         result = await service.analyze(str(symbol_repo.root), "development semantic fixture"); journal.flush()
         assert result.state == "completed" and result.steps == 2 and result.tool_calls == 1
         saved = json.loads(store._db.execute("SELECT result_json FROM tool_calls WHERE name='find_symbol'").fetchone()[0])
-        assert saved["success"] and json.loads(saved["output"])["source"] == "clangd"
+        assert saved["success"] and saved["result_source"] == "clangd"
+        assert saved["output_omitted"] and "output" not in saved and len(saved["output_hash"]) == 64
         assert store._db.execute("PRAGMA foreign_key_check").fetchall() == []
     finally: service.close(); store.close()
     assert not (symbol_repo.root / ".cache").exists()
@@ -360,7 +361,8 @@ async def test_runtime_trace_fallback_keeps_task_success_and_existing_budget(sym
         started = next(e for e in trace.events if e.kind == "tool_started")
         finished = next(e for e in trace.events if e.kind == "tool_finished")
         assert started.task_id == finished.task_id == result.task_id and started.sequence < finished.sequence
-        assert finished.data["success"] and json.loads(finished.data["output"])["source"] == "rg"
+        assert finished.data["success"] and finished.data["result_source"] == "rg"
+        assert finished.data["output_omitted"] and "output" not in finished.data
     finally: service.close()
 
 

@@ -478,7 +478,7 @@ async def test_concurrent_approvals_execute_once(cpp_repo, rg_exe, git_exe):
 @pytest.mark.asyncio
 async def test_http_revised_plan_stale_approval_and_reject(cpp_repo, rg_exe, git_exe):
     sequence = messages()[:2] + [reply(calls=[call("read_file", '{"path":"main.cpp"}', "read-source"),
-        write("main.cpp", "int main(){return 1;}"), write("helper.cpp", "new")]),
+        write("main.cpp", "int main(){return 1;}"), write("helper.cpp", "new", "write-helper")]),
         reply(json.dumps(proposal("main.cpp", "helper.cpp")))]
     async with client_for(rg_exe, git_exe, replies=sequence) as (client, app, services):
         task_id = (await client.post("/api/v1/tasks", json={"repository_path": str(cpp_repo), "prompt": "fix"})).json()["task_id"]

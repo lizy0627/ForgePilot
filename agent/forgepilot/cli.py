@@ -11,7 +11,7 @@ from threading import Thread
 
 from .context import TaskState
 from .errors import ForgePilotError
-from .llm import OpenAICompatibleClient
+from .models.accounting import close_accounting_logging, configure_accounting_logging
 from .process import executable
 from .security import Redactor
 from .task_service import TaskService
@@ -21,7 +21,7 @@ from .sqlite_store import SqliteEventStore
 from .recording import TaskJournal
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments, mcp_from_args
-from .settings import task_model_from_args
+from .settings import model_gateway_from_args
 from .rag import (RagFileStore, RagManager, add_rag_arguments,
                   rag_runtime_availability_from_args)
 
@@ -130,17 +130,20 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
     trace = None
     rag_manager = None
     try:
-        if not args.base_url or not key:
-            raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
-        task_model = task_model_from_args(args)
+        gateway = model_gateway_from_args(args, task_only=True, transport=transport)
+        redactor = gateway.redactor.with_secrets((key,))
         rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
         rg = executable(args.rg, "rg")
         git = executable(args.git, "git")
         build_config = None
         if not (args.analysis_only or args.plan_only or args.modify_only):
             build_config = build_config_from_args(args)
-        async with OpenAICompatibleClient(args.base_url, key, task_model,
-                                          timeout=args.timeout, transport=transport) as llm:
+        async with gateway:
+            llm = gateway.for_route("task")
+            try:
+                configure_accounting_logging(str(Path(args.database).resolve().with_name("model-accounting.jsonl")))
+            except OSError:
+                raise ForgePilotError("metrics_storage", "Model accounting file is not writable") from None
             store = SqliteEventStore(args.database, redactor=redactor)
             vector_path = (Path(store.path).resolve().parent / "qdrant"
                            if store.path != ":memory:" else None)
@@ -206,6 +209,7 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
             await rag_manager.aclose()
         if store is not None:
             store.close()
+        close_accounting_logging()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -195,24 +195,30 @@ class MCPManager:
                 reservations.append(CallReservation(name, True, self.calls))
         return reservations
 
-    async def execute(self, registry, name, arguments, call_id, reservation=None):
+    async def execute(self, registry, name, arguments, call_id, reservation=None, *, preflight_result=None):
+        # Trusted local validation may reject a batch member before dispatch.
+        # It still owns a budget reservation and paired activity records.
+        if preflight_result is not None and (not isinstance(preflight_result, ToolResult)
+                                             or preflight_result.success is not False):
+            raise ForgePilotError("mcp_state", "Invalid preflight failure")
         if reservation is None:
             reservation = self.reserve_calls((name,))[0]
         if not isinstance(reservation, CallReservation) or reservation.name != name:
             raise ForgePilotError("mcp_state", "Invalid MCP call reservation")
         if not reservation.budgeted:
-            return await registry.execute(name, arguments)
+            return preflight_result if preflight_result is not None else await registry.execute(name, arguments)
         if reservation.sequence is None:
             return ToolResult(success=False, output="", error="mcp_budget: Request reached its 8 MCP calls limit", duration_ms=0)
         if name not in self.selected:
-            return await registry.execute(name, arguments)  # Legacy callers retain their existing Trace.
+            # Legacy callers retain their existing Trace.
+            return preflight_result if preflight_result is not None else await registry.execute(name, arguments)
         started = perf_counter()
         record = {"sequence": reservation.sequence, "tool_call_id": call_id, **self.metadata(name), "status": "running",
                   "arguments_excerpt": plain_excerpt(self.redactor.data(arguments), 1024),
                   "result_excerpt": "", "duration_ms": 0, "error_code": None, "sources": []}
         self._emit(record)
         try:
-            result = await registry.execute(name, arguments)
+            result = preflight_result if preflight_result is not None else await registry.execute(name, arguments)
         except asyncio.CancelledError:
             await self.sessions[self.selected[name][0].server_id].close()
             record.update(status="cancelled", error_code="cancelled", duration_ms=int((perf_counter()-started)*1000))

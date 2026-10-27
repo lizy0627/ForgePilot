@@ -10,11 +10,11 @@ import uvicorn
 from .api import create_app
 from .cli import SafeArgumentParser
 from .errors import ForgePilotError
-from .llm import OpenAIClientPool
+from .models.accounting import close_accounting_logging, configure_accounting_logging
 from .process import executable
 from .security import Redactor
 from .settings import (add_build_arguments, add_connection_arguments, build_config_from_args,
-                       add_storage_arguments, models_from_args)
+                       add_storage_arguments, model_gateway_from_args)
 from .sqlite_store import SqliteEventStore
 from .task_service import TaskService
 from .repository import Repository
@@ -66,11 +66,9 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
     key = os.environ.get("FORGEPILOT_API_KEY", "")
     redactor = Redactor((key,))
     try:
-        if not args.base_url or not key:
-            raise ForgePilotError("llm_config", "Set FORGEPILOT_BASE_URL and FORGEPILOT_API_KEY")
-        models = models_from_args(args)
+        model_clients = model_gateway_from_args(args)
+        redactor = model_clients.redactor.with_secrets((key,))
         rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
-        model_clients = OpenAIClientPool(args.base_url, key, timeout=args.timeout)
         if not 1 <= args.port <= 65535:
             raise ForgePilotError("server_config", "Port must be between 1 and 65535")
         rag_manager = None
@@ -78,18 +76,18 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
             # Plain Q&A must start even when development tools are absent/misconfigured.
             rg, git = executable(args.rg, "rg"), executable(args.git, "git")
             config = build_config_from_args(args)
-            llm = model_clients.lease(models.task)
+            llm = model_clients.for_route("task")
             return TaskService(llm, rg_executable=rg, git_executable=git, trace=trace,
                                redactor=redactor, build_config=config,
                                code_intelligence_config=code_intelligence_from_args(args),
                                rag_manager=rag_manager)
         def chat_factory():
-            return ChatService(model_clients.lease(models.chat),
+            return ChatService(model_clients.for_route("chat"),
                 rg_executable=args.rg,git_executable=args.git,redactor=redactor,
                 max_tool_concurrency=args.chat_tool_concurrency)
         def summary_factory():
             # Summary generation has no tools, but retains the same redaction boundary.
-            return ChatService(model_clients.lease(models.summary),
+            return ChatService(model_clients.for_route("summary"),
                 rg_executable=args.rg,git_executable=args.git,redactor=redactor)
         # Request-scoped services get non-owning model handles. The shared clients
         # are created and closed on the worker loop with the application lifecycle.
@@ -97,8 +95,11 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
             Path(args.database).resolve().with_name("chat-performance.jsonl"))
         try:
             configure_metrics_logging(metrics_file)
+            configure_accounting_logging(str(Path(args.database).resolve().with_name("model-accounting.jsonl")))
         except OSError:
-            raise ForgePilotError("metrics_storage", "Chat performance metrics file is not writable") from None
+            close_metrics_logging()
+            close_accounting_logging()
+            raise ForgePilotError("metrics_storage", "Model accounting or chat metrics file is not writable") from None
         try:
             store=SqliteEventStore(args.database,redactor=redactor)
             try:
@@ -134,6 +135,7 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                 store.close()
         finally:
             close_metrics_logging()
+            close_accounting_logging()
         return 0
     except ForgePilotError as exc:
         print(redactor.text(str(exc)), file=sys.stderr)

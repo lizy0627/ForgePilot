@@ -52,7 +52,7 @@
   "properties": {
     "agent_id": {
       "maxLength": 128,
-      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\\.v[1-9][0-9]*$",
       "title": "Agent Id",
       "type": "string"
     },
@@ -133,7 +133,7 @@
     },
     "prompt_version": {
       "maxLength": 128,
-      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\\.v[1-9][0-9]*$",
       "title": "Prompt Version",
       "type": "string"
     },
