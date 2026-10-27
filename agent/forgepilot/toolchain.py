@@ -25,7 +25,8 @@ _PROTECTED_COMPONENTS = {".git", ".oracle", "oracle", "protected-oracle", "prote
                          "hidden-oracle", "hidden_oracle", ".hidden-tests", ".hidden_tests",
                          "hidden-tests", "hidden_tests", "__hidden_tests__", ".forgepilot-tests"}
 _PLACEHOLDERS = frozenset({"source_dir", "build_dir", "configuration", "jobs", "generator", "architecture",
-                           "make_program", "configure_preset", "build_preset", "test_preset", "report_path"})
+                           "make_program", "configure_preset", "build_preset", "test_preset", "report_path",
+                           "workspace_dir", "target_build_dir"})
 
 
 def validate_executable(value: str, *, expected: str | None = None) -> Path:
@@ -132,6 +133,21 @@ class ToolchainProfile:
             args += ("-C", "{configuration}", "--output-on-failure", "--no-tests=error", "--output-junit", "{report_path}")
         executable = validate_executable(self.cmake if kind == "cmake" else self.ctest, expected=kind)
         return ResolvedCommand(str(executable), tuple(_expand(arg, values) for arg in args), source)
+
+    def resolve_oracle(self, phase: str, values: dict[str, str], **options) -> ResolvedCommand:
+        """Host-only Oracle project; neither paths nor commands are model inputs.
+
+        Oracle source and output remain outside the task Worktree. The trusted
+        project selects production sources using these two fixed CMake fields.
+        """
+        command = self.resolve(phase, values, **options)
+        args = command.args
+        if phase == "cmake_configure":
+            args += tuple(_expand(value, values) for value in (
+                "-DFORGEPILOT_WORKTREE={workspace_dir}",
+                "-DFORGEPILOT_TARGET_BUILD={target_build_dir}",
+            ))
+        return ResolvedCommand(command.executable, args, command.cwd)
 
 
 def _custom_cwd(root: Path, relative: str) -> Path:

@@ -275,13 +275,19 @@ class ValidationReport(ArtifactModel):
     tests_failed: int = Field(ge=0)
     hidden_oracle: Literal["not_run", "passed", "failed"] = "not_run"
     test_integrity: Literal["not_checked", "passed", "failed"] = "not_checked"
+    workspace_integrity: Literal["not_checked", "passed", "failed"] = Field(
+        default="not_checked", exclude_if=lambda value: value == "not_checked")
+    diff_scope: Literal["not_checked", "passed", "failed"] = Field(
+        default="not_checked", exclude_if=lambda value: value == "not_checked")
+    pipeline_stages: tuple[ShortText, ...] = Field(default=(), max_length=8, exclude_if=lambda value: not value)
     failure_classification: Literal[
-        "none", "compile", "test", "timeout", "policy", "infrastructure", "cancelled", "unknown"
+        "none", "compile", "test", "timeout", "policy", "infrastructure", "cancelled", "unknown",
+        "code_failure", "infrastructure_failure", "policy_failure"
     ] = "none"
     log_artifact_ids: tuple[UuidText, ...] = Field(default=(), max_length=128)
     summary: Text
 
-    _arrays = field_validator("commands", "compile_errors", "log_artifact_ids", mode="before")(_tuple)
+    _arrays = field_validator("commands", "compile_errors", "log_artifact_ids", "pipeline_stages", mode="before")(_tuple)
 
     @model_validator(mode="after")
     def consistent_status(self):
@@ -324,6 +330,8 @@ class ReviewReport(ArtifactModel):
         _unique(tuple(item.issue_id for item in self.blocking_issues), "Review issue IDs")
         if self.recommend_delivery and (self.verdict != "approve" or self.blocking_issues):
             raise ValueError("Delivery can only be recommended with approval and no blocking issues")
+        if self.recommend_delivery and any(item.status != "met" for item in self.acceptance_criteria):
+            raise ValueError("Delivery requires every acceptance criterion to be met")
         return self
 
 

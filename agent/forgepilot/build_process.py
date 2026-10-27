@@ -118,7 +118,9 @@ async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
             if len(chunk) > remaining:
                 truncated = True
                 job.terminate()
-                break
+                # Continue draining the now-terminated tree's pipe through EOF.
+                # Leaving a Proactor pipe unread leaks its transport when a
+                # noisy process is killed at the output bound.
 
     try:
         async with asyncio.timeout(timeout):
@@ -165,6 +167,12 @@ async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
         job.close()
         async def drain():
             if proc is not None:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                    try:
+                        await proc.stdin.wait_closed()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                 await proc.wait()
             if readers:
                 await asyncio.gather(*readers)

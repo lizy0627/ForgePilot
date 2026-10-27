@@ -204,10 +204,16 @@ async def test_delete_does_not_stop_another_active_conversation():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('phase',['analyzing','waiting_approval','modifying','cleanup'])
 async def test_delete_task_in_each_execution_phase(phase,cpp_repo,rg_exe,git_exe):
-    closing=Event(); release=Event(); services=[]
+    closing=Event(); release=Event(); modifying_entered=Event(); services=[]
     class Model(ScriptedLLM):
         async def chat(self,history,tools=None):
-            if (phase=='analyzing' and not self.requests) or (phase=='modifying' and len(self.requests)==3):
+            if phase=='analyzing' and not self.requests:
+                await asyncio.Future()
+            if phase=='modifying' and len(self.requests)==3:
+                # The next model call proves the complete write/tool audit has
+                # returned and released its exclusive Windows file handles.
+                # Seeing new main.cpp bytes alone is earlier than this boundary.
+                modifying_entered.set()
                 await asyncio.Future()
             return await super().chat(history,tools)
         async def aclose(self):
@@ -221,8 +227,8 @@ async def test_delete_task_in_each_execution_phase(phase,cpp_repo,rg_exe,git_exe
         await until(c,tid,{'analyzing'} if phase=='analyzing' else {'waiting_approval'})
         if phase in {'modifying','cleanup'}:
             await c.post(f'/api/v1/tasks/{tid}/approve',json={'plan_version':1})
-            await eventually(lambda:source_matches(cpp_repo/'main.cpp','int main(){return 0;}\n'))
-            if phase=='cleanup': await eventually(closing.is_set)
+            await eventually(modifying_entered.is_set if phase=='modifying' else closing.is_set)
+            assert source_matches(cpp_repo/'main.cpp','int main(){return 0;}\n')
         before={p.relative_to(cpp_repo):p.read_bytes() for p in cpp_repo.rglob('*') if p.is_file()}
         assert (await c.delete(f'/api/v1/conversations/{cid}')).status_code==409
         operation=asyncio.create_task(c.delete(f'/api/v1/conversations/{cid}?stop_active=true'))

@@ -22,6 +22,7 @@ from .repository import Repository
 from .orchestration.workspace import WorkspaceSnapshot
 from .workspace_safety import (
     Guard, WriterLease, manifest, validate_relative, remove_worktree_files, remove_worktree_registration,
+    _exists,
 )
 from .workspace_delivery import DeliveryMixin
 from .policy import Capability, PolicyEngine, Principal, Role
@@ -369,7 +370,7 @@ class WorkspaceManager(DeliveryMixin):
         relative = f"artifacts/{state['repository_id']}/{state['task_id']}/{digest}-{name}"
         self.guard.mkdir(f"artifacts/{state['repository_id']}/{state['task_id']}")
         path = self.guard.path(relative, missing=True)
-        if path.exists():
+        if _exists(path):
             if self.guard.read(relative, max_bytes=len(data) + 1) != data:
                 raise ForgePilotError("artifact_integrity", "Artifact contents changed")
         else:

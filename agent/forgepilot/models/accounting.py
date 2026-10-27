@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -74,10 +76,23 @@ class Accounting:
         self._records = deque(maxlen=max_records)
         self._lock = Lock()
         self.sink = sink
+        self._scoped_sink = ContextVar("forgepilot_model_accounting_sink", default=None)
+
+    @contextmanager
+    def scoped_sink(self, sink):
+        """Bind a durable task/node ledger without mixing concurrent requests."""
+        token = self._scoped_sink.set(sink)
+        try:
+            yield
+        finally:
+            self._scoped_sink.reset(token)
 
     def record(self, record: AttemptRecord) -> None:
         with self._lock:
             self._records.append(record)
+        scoped = self._scoped_sink.get()
+        if scoped is not None:
+            scoped(asdict(record))
         # Only the fixed allowlist above reaches a sink; no provider extras/exception text.
         if self.sink is not None:
             try:

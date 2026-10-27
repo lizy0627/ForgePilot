@@ -44,7 +44,13 @@ class SqliteArtifactStore:
         self.events = event_store
         candidate = Path(root) if root is not None else default_artifact_root()
         try:
-            self.root = candidate.resolve(strict=False)
+            # Windows packaged apps can virtualize a newly created LocalAppData
+            # directory. Freeze the actual existing path, not its pre-creation
+            # lexical alias, before external DeliveryBundle paths are checked.
+            candidate.mkdir(parents=True, exist_ok=True)
+            self.root = candidate.resolve(strict=True)
+            if is_link(self.root.lstat()) or not self.root.is_dir():
+                raise ValueError()
         except (OSError, ValueError, RuntimeError):
             raise ForgePilotError("artifact_path", "Artifact root is invalid") from None
 

@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import secrets
 
-from .artifacts.models import ChangeSet, DeliveryBundle, ReviewReport, ValidationReport
+from .artifacts.models import ChangedFile, ChangeSet, DeliveryBundle, ReviewReport, ValidationReport
 from .artifacts.validation import validate_artifact
 from .errors import ForgePilotError
 from .workspace_safety import manifest, validate_relative
@@ -34,6 +34,63 @@ def _fail(code, message):
 
 
 class DeliveryMixin:
+    def final_change_set(self, task_id, changes):
+        """Derive the cumulative base-to-checkpoint diff from Git and verified bytes.
+
+        Incremental ChangeSets supply only plan/AC provenance, never final bytes.
+        This keeps repairs that touch the same file from hiding earlier changes.
+        """
+        changes = tuple(ChangeSet.model_validate(item) for item in changes)
+        if not changes or len({item.execution_plan_artifact_id for item in changes}) != 1:
+            _fail("delivery_changes", "Expected changes from one frozen execution plan")
+        with self._operation(task_id) as state:
+            current = self._snapshot(state)
+            self._assert_expected(state, current)
+            git = self._git(state)
+            self._verify_commit(state, current.head_commit, current.file_hashes)
+            before = self._tree_bytes(git, state["base_ref"])
+            files = []
+            for path in self._changed_files(state, git, current):
+                provenance = [file for change in changes for file in change.files if file.path == path]
+                if not provenance:
+                    _fail("delivery_changes", "Final diff has no approved writer provenance")
+                original = before.get(path)
+                final_hash = current.file_hashes.get(path)
+                diff = git.run(["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
+                    "--no-color", "--no-renames", state["base_ref"], current.head_commit, "--", path]).stdout.decode("utf-8")
+                files.append(ChangedFile(path=path,
+                    change_type="added" if original is None else "deleted" if final_hash is None else "modified",
+                    before_sha256=sha256(original).hexdigest() if original is not None else None,
+                    after_sha256=final_hash, unified_diff=diff,
+                    plan_step_ids=tuple(sorted({value for item in provenance for value in item.plan_step_ids})),
+                    acceptance_criteria_ids=tuple(sorted({value for item in provenance for value in item.acceptance_criteria_ids})),
+                    test_change=provenance[0].test_change))
+            self._assert_expected(state, current)
+            if not files:
+                _fail("delivery_changes", "A delivery requires a nonempty final diff")
+            return ChangeSet(execution_plan_artifact_id=changes[0].execution_plan_artifact_id,
+                files=tuple(files), summary="Cumulative approved implementation and repair diff")
+
+    def export_validated_patch(self, task_id):
+        """Prepare a reviewable patch; no merge, branch publication or final approval."""
+        with self._operation(task_id) as state:
+            current = self._snapshot(state)
+            self._assert_expected(state, current)
+            git = self._delivery_validated(state, current)
+            result = self._artifact(state, "delivery.patch", self._delivery_patch(state, git, current))
+            self._assert_expected(state, current)
+            return result
+
+    def prepare_delivery_bundle(self, task_id, bundle):
+        """Persist the verified delivery package while retaining final user control."""
+        with self._operation(task_id) as state:
+            current = self._snapshot(state)
+            self._assert_expected(state, current)
+            git = self._delivery_validated(state, current)
+            result = self._bundle(state, bundle, current, git, self._delivery_patch(state, git, current))
+            self._assert_expected(state, current)
+            return result
+
     def _delivery_recovery_observation(self, state):
         intent = state.get("intent")
         if (state["status"] != "pending_delivery" or not intent

@@ -125,6 +125,21 @@ def test_canonical_hash_is_stable_and_unicode_preserving():
     assert content_sha256(left) == content_sha256(right)
 
 
+def test_previous_validation_v1_payload_keeps_its_persisted_hash():
+    report = next(item for item in all_contents() if isinstance(item, ValidationReport))
+    artifact = create_artifact(task_id=TASK_ID, producer="validator.v1",
+                               producer_node="validation", content=report)
+    payload = artifact.model_dump(mode="json")
+    for field in ("workspace_integrity", "diff_scope", "pipeline_stages"):
+        payload["content"].pop(field, None)
+    payload["content_sha256"] = content_sha256(payload["content"])
+    restored = validate_artifact(payload)
+    assert restored.content_sha256 == content_sha256(restored.content)
+    # A historical report remains readable but cannot certify the new pipeline.
+    from forgepilot.agents.delivery import validation_passed
+    assert not validation_passed(restored.content)
+
+
 def test_envelope_rejects_tampered_content_hash():
     artifact = create_artifact(
         task_id=TASK_ID, artifact_id=TASK_SPEC_ID, producer="orchestrator.v1",

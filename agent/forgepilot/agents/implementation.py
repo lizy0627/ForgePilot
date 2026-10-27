@@ -353,6 +353,10 @@ class ImplementationService:
                 await monitor
 
     async def _agent(self, context):
+        definition = self.agents.get(context.node.agent_id or self.definition.agent_id)
+        from ..orchestration.models import _plain_json
+        limits = self.agents.validate_limits(definition.agent_id,
+            _plain_json(context.node.settings["limits"]) if "limits" in context.node.settings else self.limits)
         spec, plan, evidence = self._package(context.task_id, context.input_artifact_ids)
         repository = self._repository(context.task_id)
         approved_tests = spec.content.test_policy.modifiable_existing_test_patterns if self._granted(
@@ -372,12 +376,12 @@ class ImplementationService:
         check_approval()
         # Validate only repository evidence; external claims remain untrusted
         # context and cannot authorize any tool or path.
-        for artifact in evidence:
+        for artifact in evidence if definition.role == "implementer" else ():
             local = tuple(item for item in artifact.content.items if item.source in {"local_repository", "rag"})
             if local:
                 validate_evidence(EvidenceBundle(items=local, summary=artifact.content.summary), repository)
         if not spec.content.data_policy.cloud_model_allowed:
-            route = self.gateway.router.validate_agent(self.definition)
+            route = self.gateway.router.validate_agent(definition)
             if any(profile and urlsplit(profile.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}
                    for profile in (route.primary, route.fallback)):
                 raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud route")
@@ -385,27 +389,28 @@ class ImplementationService:
         if key not in self._budgets:
             if context.attempt > 1:
                 raise ForgePilotError("llm_budget", "Restart cannot replenish an unknown implementation budget")
-            self._budgets[key] = ModelBudget.from_limits(self.limits)
+            self._budgets[key] = ModelBudget.from_limits(limits)
         budget = self._budgets[key]
         # The factory is host-owned and receives the task Worktree, never a main
         # checkout. Cloud-disabled tasks do not invoke an unknown RAG adapter.
         retrieval = (self.retrieval_factory(repository) if self.retrieval_factory
                      and spec.content.data_policy.cloud_model_allowed else None)
         controlled = ImplementationTools(repository, spec, plan,
-            capabilities=self.definition.capabilities, approved_test_paths=approved_tests,
+            capabilities=definition.capabilities, approved_test_paths=approved_tests,
             retrieval=retrieval, redactor=self.gateway.redactor,
             is_cancelled=lambda: self._cancelled(context), approval_check=check_approval)
         registry = controlled.registry
         payload = {"task_spec": spec.content.model_dump(mode="json"),
                    "execution_plan": plan.content.model_dump(mode="json"),
-                   "evidence": [item.content.model_dump(mode="json") for item in evidence],
+                   "evidence": [item.content.model_dump(mode="json") for item in evidence] if definition.role == "implementer" else [],
                    "allowed_paths": sorted({path for step in plan.content.steps
-                                            if step.owner in {"implementer", self.definition.agent_id} for path in step.expected_files}),
+                                            if step.owner in {"implementer", "implementer.v1"} for path in step.expected_files}),
                    "approved_existing_tests": list(approved_tests)}
-        messages = [{"role": "system", "content": get_prompt(self.definition.agent_id, "implementer")},
+        payload.update(self._extra_agent_payload(context))
+        messages = [{"role": "system", "content": get_prompt(definition.agent_id, definition.role)},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
-        client = self.gateway.for_agent(self.definition, budget=budget)
-        with registry.as_capabilities(self.definition.capabilities):
+        client = self.gateway.for_agent(definition, budget=budget)
+        with registry.as_capabilities(definition.capabilities):
             tools = registry.get_specs()
             while True:
                 check_approval()
@@ -417,7 +422,7 @@ class ImplementationService:
                 # dispatching its first write. Writes themselves stay serial.
                 for call in response.message.tool_calls:
                     registry.validate_call(call.function.name, call.function.arguments,
-                                           capabilities=self.definition.capabilities)
+                                           capabilities=definition.capabilities)
                 budget.consume_tools(len(response.message.tool_calls))
                 messages.append(response.message.model_dump(exclude_none=True))
                 for call in response.message.tool_calls:
@@ -439,13 +444,16 @@ class ImplementationService:
             return NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary=self.gateway.redactor.text(outcome.summary),
                               metrics=self._metrics(context))
         changes = controlled.change_set(summary=self.gateway.redactor.text(outcome.summary))
-        artifact = create_artifact(task_id=context.task_id, producer=self.definition.agent_id,
+        artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
             producer_node=context.node.node_id, parent_artifact_ids=context.input_artifact_ids, content=changes)
         with self.events._lock:
             check_approval()
             self.events.artifacts.put(artifact)
         return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=(artifact.artifact_id,),
                           decision_summary="ChangeSet verified against approved plan", metrics=self._metrics(context))
+
+    def _extra_agent_payload(self, context):
+        return {}
 
 
 __all__ = ["ImplementationService", "ImplementationOutcome"]

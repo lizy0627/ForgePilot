@@ -229,6 +229,10 @@ RAG 默认关闭。桌面启动器实际读取上文所示本机 `config.json` �
 
 离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。
 
+Bug Fix / Feature 的完整后端入口 `DeliveryWorkflow` 已连接确定性 Validator、共用三轮额度的 Repair、
+独立 Reviewer 和 DeliveryBundle。接入方式、失败分类、Oracle 边界与真实 CMake 集成测试见
+[受控实现与完整闭环](docs/controlled-implementer.md#完整-bug-fix--feature-闭环)。
+
 代码检索可复现评测不会调用 LLM 或收费 Embedding，并与上述 Agent 评测分开报告：
 
 ```powershell

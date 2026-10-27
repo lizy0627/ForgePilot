@@ -11,12 +11,12 @@
     "agent-root-cause-analysis-output.v1.schema.json": "a78abfb6a500a8d672d0c8def0c3bc180a7519869f9573b9d9149b90ef93e0d9",
     "artifact-changeset.v1.schema.json": "efd3ec231f6df18cce2d8af83876012f62f821c004fab28cfc03cd960994a09d",
     "artifact-deliverybundle.v1.schema.json": "57744203ffccc0366abab4e3feea2ab1d428092256da077ec83d3ca7f3787686",
-    "artifact-envelope.v1.schema.json": "fdadd96e7a6472f53c4ea408c82c768c0f0ed2b425f7fc1956676e14adaef321",
+    "artifact-envelope.v1.schema.json": "8a059086209cbf6d3f9e88ee3926dbcccad44c56bc5a856025a1fcc9af583434",
     "artifact-evidencebundle.v1.schema.json": "8e6a1f766e557945b972b66bf01e385be8d847b9ac111b38994da34ab620b49b",
     "artifact-executionplan.v1.schema.json": "d33940fb0accded16eb2dd4e6654328b5a78f7313a2a02f560e45cdabfdb88e3",
     "artifact-reviewreport.v1.schema.json": "91ebe2b1757be94ee69ccc9b664cd6db0858035632ca0036ba5152c4fcbfd7aa",
     "artifact-taskspec.v1.schema.json": "9b9c1e4185fffa02f9ff390fc1c17c4054cd4355fd45b2b7c13f046b5f60c7d7",
-    "artifact-validationreport.v1.schema.json": "159e09f8f81bad4d622602ea98843feaa82d224bdf2ec7662ee615cc557970b6"
+    "artifact-validationreport.v1.schema.json": "a5d35acbb09d4ebf1d46f130e8879b8927a8ce88f39ba5c403bfff4de3edda3b"
   },
   "schema_version": "1.0"
 }

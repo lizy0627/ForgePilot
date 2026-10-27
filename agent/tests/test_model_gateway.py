@@ -42,6 +42,34 @@ def gateway_for(handler, **kwargs):
                         transport_factory=lambda _: httpx.MockTransport(handler))
 
 
+@pytest.mark.asyncio
+async def test_concurrent_task_accounting_scopes_do_not_mix_or_leak():
+    arrived = 0
+    both = asyncio.Event()
+    ledgers = {"one": [], "two": []}
+
+    async def handler(request):
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both.set()
+        await both.wait()
+        return httpx.Response(200, json=completion(usage={
+            "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}))
+
+    async with gateway_for(handler) as gateway:
+        async def invoke(name):
+            with gateway.accounting.scoped_sink(ledgers[name].append):
+                await gateway.for_route("analysis").chat([{"role": "user", "content": name}])
+        await asyncio.gather(invoke("one"), invoke("two"))
+        await gateway.for_route("analysis").chat([])
+        assert len(gateway.accounting.snapshot()) == 3
+        assert len(ledgers["one"]) == len(ledgers["two"]) == 1
+        assert ledgers["one"][0]["input_hash"] != ledgers["two"][0]["input_hash"]
+        assert all(row["input_tokens"] == 3 and row["output_tokens"] == 2
+                   for ledger in ledgers.values() for row in ledger)
+
+
 @pytest.mark.parametrize("url,timeout", [("https://user:secret@model.test", 60),
                                         ("https://model.test", 0)])
 def test_legacy_invalid_configuration_keeps_safe_error_contract(url, timeout):

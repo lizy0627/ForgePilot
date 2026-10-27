@@ -55,10 +55,10 @@ BUILTIN_AGENT_DEFINITIONS = (
         agent_id="reviewer.v1", display_name="Reviewer", role="reviewer",
         role_description="Independently reviews diffs, test integrity, scope, and acceptance coverage.",
         prompt_version="reviewer-prompt.v1", model_route="review",
-        input_artifacts=("TaskSpec", "ExecutionPlan", "ChangeSet", "ValidationReport"),
+        input_artifacts=("TaskSpec", "ChangeSet", "ValidationReport", "EvidenceBundle"),
         output_artifacts=("ReviewReport",),
-        capabilities=("repository.read", "repository.search", "repository.symbols", "repository.references", "validation.read"),
-        limits=_limits(model=6, tools=40),
+        capabilities=("validation.read",),
+        limits=_limits(model=6, tools=0),
     ),
     AgentDefinition(
         agent_id="repair.v1", display_name="Repair", role="repair",

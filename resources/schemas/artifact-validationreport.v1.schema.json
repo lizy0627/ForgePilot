@@ -77,6 +77,16 @@
           "title": "Compile Errors",
           "type": "array"
         },
+        "diff_scope": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Diff Scope",
+          "type": "string"
+        },
         "failure_classification": {
           "default": "none",
           "enum": [
@@ -87,7 +97,10 @@
             "policy",
             "infrastructure",
             "cancelled",
-            "unknown"
+            "unknown",
+            "code_failure",
+            "infrastructure_failure",
+            "policy_failure"
           ],
           "title": "Failure Classification",
           "type": "string"
@@ -110,6 +123,17 @@
           },
           "maxItems": 128,
           "title": "Log Artifact Ids",
+          "type": "array"
+        },
+        "pipeline_stages": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Pipeline Stages",
           "type": "array"
         },
         "status": {
@@ -152,6 +176,16 @@
           "maxLength": 128,
           "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
           "title": "Toolchain Profile",
+          "type": "string"
+        },
+        "workspace_integrity": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Workspace Integrity",
           "type": "string"
         }
       },

@@ -178,6 +178,33 @@ def test_inline_external_windows_paths_tamper_and_partial_write(tmp_path, monkey
         store.close()
 
 
+def test_external_artifact_root_resolves_after_first_creation(tmp_path, monkeypatch):
+    """Packaged Windows apps resolve newly materialized app-data paths differently."""
+    alias, physical = tmp_path / "new-appdata", tmp_path / "physical-appdata"
+    physical.mkdir()
+    resolve = Path.resolve
+
+    def redirected(path, strict=False):
+        if path == alias and path.exists():
+            return resolve(physical, strict=strict)
+        return resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", redirected)
+    store = SqliteEventStore(tmp_path / "virtualized.sqlite3", artifact_root=alias)
+    try:
+        task_id = str(uuid4())
+        spec = _spec(task_id)
+        execution_plan = _plan(task_id, spec.artifact_id)
+        large = _large_change(task_id, execution_plan.artifact_id)
+        for item in (spec, execution_plan, large):
+            store.artifacts.put(item)
+        assert store.artifacts.root == physical
+        assert store.artifacts.get(large.artifact_id) == large
+        assert (physical / task_id / "artifacts" / f"{large.artifact_id}.json").is_file()
+    finally:
+        store.close()
+
+
 def test_concurrent_writers_approval_invalidation_and_safe_model_metadata(tmp_path):
     store = SqliteEventStore(tmp_path / "concurrent.sqlite3", artifact_root=tmp_path / "tasks")
     task_id = str(uuid4())
