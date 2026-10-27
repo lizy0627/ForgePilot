@@ -47,9 +47,9 @@ BUILTIN_AGENT_DEFINITIONS = (
         agent_id="implementer.v1", display_name="Implementer", role="implementer",
         role_description="Applies only approved plan changes and adds required regression tests.",
         prompt_version="implementer-prompt.v1", model_route="implementation",
-        input_artifacts=("TaskSpec", "ExecutionPlan", "EvidenceBundle", "ValidationReport"),
+        input_artifacts=("TaskSpec", "ExecutionPlan", "EvidenceBundle"),
         output_artifacts=("ChangeSet",),
-        capabilities=("repository.read", "repository.search", "repository.patch", "validation.read"), limits=_limits(),
+        capabilities=("repository.read", "repository.search", "repository.rag", "repository.patch"), limits=_limits(),
     ),
     AgentDefinition(
         agent_id="reviewer.v1", display_name="Reviewer", role="reviewer",

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, field_validator, model_validator
 
 from .canonical import content_sha256
 from ..path_identity import path_key
@@ -218,7 +218,7 @@ class ExecutionPlan(ArtifactModel):
 class ChangedFile(ArtifactModel):
     path: Annotated[str, Field(min_length=1, max_length=1_024)]
     change_type: Literal["added", "modified", "deleted"]
-    unified_diff: Annotated[str, Field(min_length=1, max_length=1_048_576)]
+    unified_diff: Annotated[str, StringConstraints(strip_whitespace=False), Field(min_length=1, max_length=1_048_576)]
     before_sha256: Sha256Text | None = None
     after_sha256: Sha256Text | None = None
     plan_step_ids: tuple[Annotated[str, Field(pattern=STEP_ID_PATTERN, max_length=32)], ...] = Field(min_length=1, max_length=64)
