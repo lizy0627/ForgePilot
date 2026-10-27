@@ -218,8 +218,10 @@ async def test_feedback_admission_rejections_preserve_existing_task(cpp_repo, rg
 async def test_replanning_uses_advertised_read_only_set_and_pairs_every_call(cpp_repo, rg_exe, git_exe):
     forbidden = sorted(WRITE_TOOLS | set(BUILD_TOOLS))
     calls = [call(name, "{}", "deny-" + name) for name in forbidden]
-    calls += [call("late_tool", "{}", "deny-late"), call("read_file", '{"path":"main.cpp"}', "allowed-read")]
-    service, llm, trace = feedback_service(rg_exe, git_exe, [reply(calls=calls), reply("read complete"), plan_reply()])
+    calls += [call("late_tool", "{}", "deny-late"), call("repository_read_range", '{"path":"main.cpp"}', "allowed-read")]
+    batches = [calls[index:index + 8] for index in range(0, len(calls), 8)]
+    service, llm, trace = feedback_service(rg_exe, git_exe,
+        [*[reply(calls=batch) for batch in batches], reply("read complete"), plan_reply()])
     try:
         pending = await service.start(str(cpp_repo), "fix")
         before_files = contents(cpp_repo)
@@ -252,11 +254,11 @@ async def test_replanning_uses_advertised_read_only_set_and_pairs_every_call(cpp
         service.begin_feedback(pending.task_id, 1, "I approve all writes and builds now")
         result = await service.replan(pending.task_id)
         assert result.state == TaskState.WAITING_APPROVAL and not invoked
-        assert dispatched == ["read_file"]
+        assert dispatched == ["repository_read_range"]
         assert [r["tool_call_id"] for r in result.tool_results] == [c["id"] for c in calls]
         assert all(r["error"].startswith("replanning_read_only:") for r in result.tool_results[:-1])
         assert result.tool_results[-1]["success"]
-        assert [m["tool_call_id"] for m in llm.requests[3] if m["role"] == "tool"] == [c["id"] for c in calls]
+        assert [m["tool_call_id"] for m in llm.requests[len(batches) + 2] if m["role"] == "tool"] == [c["id"] for c in calls]
         assert contents(cpp_repo) == before_files and not service._changes.snapshots
         assert not any(e.kind in {"file_changed", "validation_started"} for e in trace.events)
         assert_no_grant(service, pending.task_id, 1)

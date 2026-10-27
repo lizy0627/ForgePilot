@@ -6,6 +6,7 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from .canonical import content_sha256
+from ..path_identity import path_key
 
 SCHEMA_VERSION = "1.0"
 UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -246,7 +247,7 @@ class ChangeSet(ArtifactModel):
 
     @model_validator(mode="after")
     def unique_paths(self):
-        folded = tuple(item.path.casefold() for item in self.files)
+        folded = tuple(path_key(item.path) for item in self.files)
         _unique(folded, "Changed file paths")
         return self
 
@@ -340,7 +341,7 @@ class DeliveryBundle(ArtifactModel):
 
     @model_validator(mode="after")
     def unique_files(self):
-        _unique(tuple(path.casefold() for path in self.changed_files), "Delivery file paths")
+        _unique(tuple(path_key(path) for path in self.changed_files), "Delivery file paths")
         return self
 
 

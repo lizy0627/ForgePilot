@@ -20,13 +20,15 @@ from .llm import (AssistantMessage, ContentDelta, ModelClient, StreamFinished,
 from .mcp_manager import MCPManager, MCP_RULES
 from .stream_metrics import StreamMetrics
 from .tools.mcp_tools import bounded_output
+from .policy import LEGACY_ALIASES
 
 MAX_CHAT_CONTEXT = 65_536
 TOOL_RESPONSE_RESERVE = 8_192
 DEFAULT_TOOL_CONCURRENCY = 3
 HISTORY_NOTICE = '\n部分早期完整问答轮次因上下文预算已省略。'
 FINAL_NOTICE = '\n已到请求次数或上下文预算的收尾阶段；未容纳的工具批次没有执行。根据已有证据回答，明确说明省略和未知内容，不再请求工具。'
-READ_TOOLS = frozenset({'list_files','read_file','search_code'})
+READ_TOOLS = frozenset({'repository_list_files', 'repository_read_range',
+                        'repository_search_text', 'repository_read_cmake_target'})
 CHAT_TOOL_MODES = frozenset({'fast','web','project','auto'})
 CHAT_SYSTEM = """你是 ForgePilot 问答助手，根据本轮对话历史理解追问。
 优先遵循本轮明确的语言和格式要求；没有明确要求时参考手动保存的偏好，未设置偏好则使用用户的语言。
@@ -215,12 +217,12 @@ class ReadOnlyRegistry(ToolRegistry):
         self.allowed = READ_TOOLS | frozenset(mcp_allowlist)
 
     def register(self, tool):
-        if tool.name not in self.allowed:
+        if LEGACY_ALIASES.get(tool.name, tool.name) not in self.allowed:
             raise ForgePilotError('chat_tool_forbidden', '问答模式只允许读取文件、列出文件和搜索代码。')
         super().register(tool)
 
     async def execute(self, name, arguments):
-        if name not in self.allowed:
+        if LEGACY_ALIASES.get(name, name) not in self.allowed:
             return ToolResult(success=False,output='',error='chat_tool_forbidden: 问答模式禁止写入、构建、测试和执行命令。',duration_ms=0)
         return await super().execute(name,arguments)
 
@@ -399,7 +401,7 @@ class ChatService:
     async def _execute_tool_batch(self, calls, allowed_tools, segment_id, callback,
                                   diagnostics: StreamMetrics | None):
         names=[call['function']['name'] for call in calls]
-        permitted=[allowed_tools is None or name in allowed_tools for name in names]
+        permitted=[allowed_tools is None or LEGACY_ALIASES.get(name, name) in allowed_tools for name in names]
         indexes=[index for index,allowed in enumerate(permitted) if allowed]
         reserved=self.mcp.reserve_calls([names[index] for index in indexes])
         reservations={index:value for index,value in zip(indexes,reserved)}

@@ -11,6 +11,7 @@ from forgepilot.build_process import CommandResult
 from forgepilot.context import TaskState
 from forgepilot.errors import ForgePilotError
 from forgepilot.presets import BuildConfig
+from forgepilot.process import executable
 from forgepilot.repair import ensure_validation_integrity
 from forgepilot.security import Redactor
 from forgepilot.task_service import TaskService
@@ -41,7 +42,7 @@ def service(root, rg, git, messages, config=None, trace=None, redactor=None):
     trace = trace or MemoryTrace(redactor)
     llm = ScriptedLLM(messages)
     return TaskService(llm, rg_executable=rg, git_executable=git, trace=trace, redactor=redactor,
-                       build_config=config or BuildConfig(sys.executable, sys.executable)), llm, trace
+                       build_config=config or BuildConfig(executable(None, "cmake"), executable(None, "ctest"))), llm, trace
 
 
 @pytest.fixture

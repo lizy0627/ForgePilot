@@ -14,6 +14,7 @@ from forgepilot.errors import ForgePilotError
 from forgepilot.repair import ensure_validation_integrity
 from forgepilot.repository import Repository
 from forgepilot.tools import ToolRegistry
+from forgepilot.policy import Principal, Role
 from forgepilot.tools.change_tools import register_change_tools
 from forgepilot.trace import MemoryTrace
 from test_changes import service_for, write
@@ -30,7 +31,7 @@ def local(tmp_path):
     trace = MemoryTrace()
     changes = ChangeSet(repo, lambda path: None, trace, "local-edit")
     changes.content_guard = ensure_validation_integrity
-    registry = ToolRegistry()
+    registry = ToolRegistry(principal=Principal(Role.IMPLEMENTER))
 
     async def status():
         return "{}"
@@ -78,7 +79,8 @@ async def test_large_file_local_read_and_byte_exact_edit(cpp_repo, rg_exe, git_e
         expected = prefix + b"int value() { return 2; }\n// untouched tail"
         assert target.read_bytes() == expected
         assert json.loads(output.output) == {"path": "main.cpp", "edits_applied": 1,
-            "bytes_written": len(expected), "created": False}
+            "bytes_written": len(expected), "created": False,
+            "before_sha256": changes_module.digest(original), "after_sha256": changes_module.digest(expected)}
         assert service._changes.snapshots["main.cpp"].original == original
     finally:
         service.close()
@@ -93,13 +95,13 @@ async def test_adjacent_edits_use_original_offsets_without_cascade(local, count,
     target = await prepare(local, "".join(old).encode())
     edits = [edit(a, b) for a, b in zip(old, new)]
     calls = []
-    original_write = changes_module.write_bytes
+    original_write = file_access.write_staged_bytes
 
     def record_write(stream, data):
         calls.append(data)
         return original_write(stream, data)
 
-    monkeypatch.setattr(changes_module, "write_bytes", record_write)
+    monkeypatch.setattr(file_access, "write_staged_bytes", record_write)
     result = await apply(local, edits[::-1] if reverse else edits)
     assert result.success, result
     expected = "".join(new).encode()
@@ -318,7 +320,7 @@ async def test_non_utf8_or_nul_file_is_rejected_even_with_recorded_digest(local,
 
 
 @pytest.mark.asyncio
-async def test_partial_io_split_utf8_cannot_be_edited_but_can_be_restored(local, monkeypatch):
+async def test_partial_staged_io_split_utf8_preserves_valid_destination(local, monkeypatch):
     target = await prepare(local, b"aX")
 
     def fail_partway(stream, data):
@@ -327,16 +329,17 @@ async def test_partial_io_split_utf8_cannot_be_edited_but_can_be_restored(local,
         raise OSError("split UTF-8 character")
 
     with monkeypatch.context() as patch:
-        patch.setattr(changes_module, "write_bytes", fail_partway)
+        patch.setattr(file_access, "write_staged_bytes", fail_partway)
         result = await apply(local, [edit("a", "é")])
     assert not result.success and result.error.startswith("file_access:")
-    assert target.read_bytes() == b"\xc3X"
-    snapshot = local.changes.snapshots["main.cpp"]
-    assert snapshot.original == b"aX" and snapshot.last_written == b"\xc3X"
-    result = await apply(local, [edit("X", "Y")])
-    assert not result.success and result.error.startswith("repository_encoding:")
-    assert target.read_bytes() == b"\xc3X" and snapshot.last_written == b"\xc3X"
+    assert target.read_bytes() == b"aX" and not local.changes.snapshots
+    assert not list(local.root.glob(".forgepilot-patch-*.tmp"))
     assert not any(e.kind == "file_changed" for e in local.trace.events)
+    result = await apply(local, [edit("X", "Y")])
+    assert result.success and target.read_bytes() == b"aY"
+    snapshot = local.changes.snapshots["main.cpp"]
+    assert snapshot.original == b"aX" and snapshot.last_written == b"aY"
+    assert len([e for e in local.trace.events if e.kind == "file_changed"]) == 1
     assert (await local.changes.restore())["conflicts"] == 0 and target.read_bytes() == b"aX"
 
 

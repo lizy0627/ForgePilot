@@ -9,7 +9,9 @@ from pathlib import Path, PureWindowsPath
 import re
 
 from .errors import ForgePilotError
+from .path_identity import path_key, path_within, same_path
 from .repository import excluded, is_link
+from .toolchain import validate_executable
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,10 @@ class BuildConfig:
         for path in (self.cmake, self.ctest, self.make_program):
             if path is not None and (not Path(path).is_absolute() or not Path(path).is_file()):
                 raise ForgePilotError("build_config", "Build executables must be configured absolute file paths")
+        validate_executable(self.cmake, expected="cmake")
+        validate_executable(self.ctest, expected="ctest")
+        if self.make_program:
+            validate_executable(self.make_program)
         for timeout in (self.configure_timeout, self.build_timeout, self.test_timeout):
             if isinstance(timeout, bool) or not math.isfinite(timeout) or not 0 < timeout <= 3600:
                 raise ForgePilotError("build_config", "Build timeouts must be finite and in (0, 3600] seconds")
@@ -49,6 +55,9 @@ def safe_build_path(root: Path, value: str) -> Path:
     if not candidate.is_absolute():
         candidate = root / candidate
     try:
+        if (not same_path(root.resolve(strict=True), root) or is_link(root.lstat())
+                or not path_within(candidate, root)):
+            raise ValueError()
         relative = candidate.relative_to(root)
         if not relative.parts:
             raise ValueError()
@@ -65,7 +74,7 @@ def safe_build_path(root: Path, value: str) -> Path:
                 if is_link(current.lstat()) or not current.is_dir():
                     raise ValueError()
         resolved = candidate.resolve()
-        if not resolved.is_relative_to(root) or resolved != candidate:
+        if not path_within(resolved, root) or not same_path(resolved, candidate):
             raise ValueError()
         # Refuse an obvious source tree used as a build destination.
         if (candidate / "CMakeLists.txt").exists():
@@ -88,7 +97,7 @@ class Presets:
     def __init__(self, root: Path, env: dict[str, str]):
         self.root = root
         self.env = env
-        self.files: dict[Path, str] = {}
+        self.files: dict[str, tuple[Path, str]] = {}
         self.raw = {kind: {} for kind in ("configure", "build", "test")}
         self.present = (root / "CMakePresets.json").exists() or (root / "CMakeUserPresets.json").exists()
         for name in ("CMakePresets.json", "CMakeUserPresets.json"):
@@ -124,8 +133,11 @@ class Presets:
             return self._expand(value, preset, (*stack, token)) if "$" in value else value
         return re.sub(r"\$(env|penv|vendor)?\{([^}]+)\}", substitute, value)
 
-    def _load(self, path: Path, visiting: set[Path]):
+    def _load(self, path: Path, visiting: set[str]):
         try:
+            if (not same_path(self.root.resolve(strict=True), self.root)
+                    or not path_within(path, self.root)):
+                raise ValueError()
             relative = path.relative_to(self.root)
             current = self.root
             for part in relative.parts:
@@ -134,10 +146,14 @@ class Presets:
                 current /= part
                 if is_link(current.lstat()):
                     raise ValueError()
-            path = path.resolve(strict=True)
-            if path in visiting or len(self.files) >= 64:
+            resolved = path.resolve(strict=True)
+            if not same_path(resolved, path):
                 raise ValueError()
-            if path in self.files:
+            path = resolved
+            key = path_key(str(path))
+            if key in visiting or len(self.files) >= 64:
+                raise ValueError()
+            if key in self.files:
                 return
             data = path.read_bytes()
             if len(data) > 1_048_576:
@@ -158,14 +174,14 @@ class Presets:
                 document = lexical(document)
             for include in document.get("include", []):
                 include_path = Path(self._expand(include, {"_file": path}))
-                self._load(include_path if include_path.is_absolute() else path.parent / include_path, visiting | {path})
+                self._load(include_path if include_path.is_absolute() else path.parent / include_path, visiting | {key})
             for kind in self.raw:
                 for preset in document.get(kind + "Presets", []):
                     name = preset["name"]
                     if not isinstance(name, str) or name in self.raw[kind]:
                         raise ValueError()
                     self.raw[kind][name] = {**preset, "_file": path}
-            self.files[path] = hashlib.sha256(data).hexdigest()
+            self.files[key] = (path, hashlib.sha256(data).hexdigest())
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             raise ForgePilotError("preset_invalid", "Preset JSON/include graph is invalid, too large, outside the repository, or contains links") from None
 
@@ -193,18 +209,19 @@ class Presets:
         return merged
 
     def unchanged(self):
-        current_names = {self.root / name for name in ("CMakePresets.json", "CMakeUserPresets.json") if (self.root / name).exists()}
-        original_names = {p for p in self.files if p.parent == self.root and p.name in {"CMakePresets.json", "CMakeUserPresets.json"}}
+        current_names = {path_key(str(self.root / name)) for name in ("CMakePresets.json", "CMakeUserPresets.json") if (self.root / name).exists()}
+        original_names = {path_key(str(path)) for path, _ in self.files.values()
+                          if same_path(path.parent, self.root) and path.name in {"CMakePresets.json", "CMakeUserPresets.json"}}
         try:
-            if current_names != original_names:
+            if current_names != original_names or not same_path(self.root.resolve(strict=True), self.root):
                 raise ValueError()
-            for path, expected in self.files.items():
+            for path, expected in self.files.values():
                 current = self.root
                 for part in path.relative_to(self.root).parts:
                     current /= part
                     if is_link(current.lstat()):
                         raise ValueError()
-                if path.resolve() != path or path.stat().st_size > 1_048_576 or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                if not same_path(path.resolve(), path) or path.stat().st_size > 1_048_576 or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
                     raise ValueError()
         except (OSError, ValueError):
             raise ForgePilotError("build_selection_changed", "Preset files changed after review; start a task with the new explicit build selection") from None

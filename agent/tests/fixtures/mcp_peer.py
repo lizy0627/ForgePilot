@@ -72,7 +72,8 @@ for line in sys.stdin.buffer:
             send({"id": "server-edit", "method": "workspace/applyEdit", "params": {"edit": "untrusted"}})
         if mode in ("generic", "generic_public", "generic_rpc"):
             result = {"tools": [{"name": name, "inputSchema": {"type": "object", "properties": {
-                "query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}}
+                "query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                "annotations": {"readOnlyHint": True}}
                 for name in ("search", "fetch")]}
     elif method == "tools/call":
         if mode == "stderr_128k":

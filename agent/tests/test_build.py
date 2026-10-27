@@ -14,6 +14,7 @@ from forgepilot.build_process import BuildCancelled, build_environment, run_buil
 from forgepilot.context import TaskState
 from forgepilot.errors import ForgePilotError
 from forgepilot.presets import BuildConfig, Presets, available_presets, safe_build_path
+from forgepilot.policy import Principal, Role
 from forgepilot.process import executable
 from forgepilot.security import Redactor
 from forgepilot.task_service import TaskService
@@ -104,8 +105,9 @@ async def test_real_mvp_modes_preserve_user_changes(build_repo, build_config, rg
         assert all(registry.get(t) for t in BUILD_TOOLS)
         for tool in BUILD_TOOLS:
             denied = await registry.execute(tool, {})
-            assert not denied.success and "build_not_allowed" in denied.error
-        assert "invalid_arguments" in (await registry.execute("cmake_build", {"command": "arbitrary"})).error
+            assert not denied.success and "policy_denied" in denied.error
+        with registry.as_principal(Principal(Role.VALIDATOR)):
+            assert "invalid_arguments" in (await registry.execute("cmake_build", {"command": "arbitrary"})).error
         service.approve(pending.task_id, 1)
         result = await service.execute(pending.task_id)
         assert result.state == TaskState.COMPLETED, json.dumps({"error": result.error, "build": result.build_result}, ensure_ascii=False)
@@ -130,7 +132,7 @@ async def test_real_mvp_modes_preserve_user_changes(build_repo, build_config, rg
         assert (build_repo / ".git/index").read_bytes() == index
         assert (build_repo / "notes.txt").read_text() == "user untracked\n"
         restored = await service.restore(result.task_id)
-        assert restored["conflicts"] == 0 and (build_repo / "main.cpp").read_bytes() == original
+        assert restored["conflicts"] == 0 and (build_repo / "main.cpp").read_bytes() == original, restored
         assert Path(selection["binary_dir"]).exists()  # Source restoration never deletes build artifacts.
         print("REAL BUILD MODE", mode, json.dumps(report, ensure_ascii=False))
     finally:
@@ -306,7 +308,8 @@ async def test_command_logs_redacted_and_secrets_not_inherited(build_repo, build
     assert not {"FORGEPILOT_API_KEY", "OPENAI_API_KEY", "PYTHONPATH"} & env.keys()
     trace = MemoryTrace(Redactor((key,)))
     pipeline = BuildPipeline(build_repo, build_config, lambda _: None, trace, "test", Redactor((key,)))
-    await pipeline._command("test", [sys.executable, "-I", "-c", f"print({key!r})"], 10)
+    result = await run_build_process([sys.executable, "-I", "-c", f"print({key!r})"], build_repo, timeout=10)
+    pipeline._save_command("redaction-test", result)
     assert key not in json.dumps(pipeline.report())
     assert key not in json.dumps([asdict(e) for e in trace.events])
     assert "[REDACTED]" in pipeline.report()["commands"][0]["stdout"]

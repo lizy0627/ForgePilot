@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 import asyncio
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import re
 from time import perf_counter
@@ -12,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..errors import ForgePilotError
 from ..security import Redactor
 from ..llm import ToolSpec
+from ..policy import (FORBIDDEN_TOOLS, LEGACY_ALIASES, PolicyEngine,
+                      Principal, Role, VALIDATOR_TOOLS)
 
 
 class ToolResult(BaseModel):
@@ -30,6 +34,7 @@ class Tool(ABC):
     read_only = False
     concurrent_safe = False
     concurrency_group: object | None = None
+    mcp_approved = False
 
     @property
     def input_schema(self) -> dict:
@@ -73,22 +78,67 @@ class FunctionTool(Tool):
 
 
 class ToolRegistry:
-    def __init__(self, *, redactor: Redactor | None = None, timeout: float = 30.0) -> None:
+    def __init__(self, *, redactor: Redactor | None = None, timeout: float = 30.0,
+                 principal: Principal | None = None, policy: PolicyEngine | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         self.redactor = redactor or Redactor()
         self.timeout = timeout
+        self.policy = policy or PolicyEngine()
+        self.principal = principal or Principal(Role.ANALYST)
+        self.principal_provider = None
+        self._approved_mcp = False
+        self._principal_override = ContextVar("forgepilot_principal", default=None)
+
+    @contextmanager
+    def as_principal(self, principal: Principal):
+        """Trusted service boundary; never reachable through tool arguments."""
+        token = self._principal_override.set(principal)
+        try:
+            yield
+        finally:
+            self._principal_override.reset(token)
+
+    def _principal(self):
+        principal = self._principal_override.get() or (
+            self.principal_provider() if self.principal_provider else self.principal)
+        return Principal(principal.role, principal.mcp_approved or self._approved_mcp)
+
+    def register_approved_mcp(self, tool: Tool) -> None:
+        """Trusted admission path for a user-selected, reviewed read-only adapter."""
+        if tool.mcp_approved is not True or tool.read_only is not True:
+            raise ForgePilotError("policy_denied", "MCP selection must be explicitly approved and read-only")
+        self.register(tool)
+        self._approved_mcp = True
 
     def register(self, tool: Tool) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", tool.name) or tool.name in self._tools:
             raise ValueError("Invalid or duplicate tool name")
+        if tool.name.casefold() in FORBIDDEN_TOOLS:
+            raise ForgePilotError("policy_denied", "Command and Git mutation tools cannot be registered")
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool | None:
-        return self._tools.get(name)
+        tool = self._tools.get(name)
+        if tool is not None:
+            return tool
+        canonical = LEGACY_ALIASES.get(name, name)
+        return next((item for key, item in self._tools.items()
+                     if LEGACY_ALIASES.get(key, key) == canonical), None)
 
-    def get_specs(self) -> list[ToolSpec]:
-        return [ToolSpec(name=t.name, description=t.description, input_schema=deepcopy(t.input_schema))
-                for t in self._tools.values()]
+    def get_specs(self, *, principal: Principal | None = None) -> list[ToolSpec]:
+        specs = {}
+        for tool in self._tools.values():
+            name = LEGACY_ALIASES.get(tool.name, tool.name)
+            if name in VALIDATOR_TOOLS:
+                continue  # Deterministic runtime actions are never model tools.
+            try:
+                self.policy.require_tool(principal or self._principal(), name,
+                    mcp_approved=tool.mcp_approved, mcp_read_only=tool.read_only)
+            except ForgePilotError:
+                continue
+            specs[name] = ToolSpec(name=name, description=tool.description,
+                                   input_schema=deepcopy(tool.input_schema))
+        return list(specs.values())
 
     def concurrency_policy(self, name: str) -> tuple[bool, object | None]:
         """Return an explicit safe-parallel decision without executing a tool."""
@@ -103,6 +153,8 @@ class ToolRegistry:
             tool = self.get(name)
             if tool is None:
                 raise ForgePilotError("unknown_tool", "Tool is not registered")
+            self.policy.require_tool(self._principal(), name,
+                mcp_approved=tool.mcp_approved, mcp_read_only=tool.read_only)
             if isinstance(arguments, str):
                 if len(arguments) > 16_384:
                     raise ForgePilotError("invalid_arguments", "Arguments exceed 16384 characters")

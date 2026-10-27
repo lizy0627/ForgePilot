@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ..artifacts.canonical import content_sha256
 from ..artifacts.models import ArtifactTypeName, IDENTIFIER_PATTERN
+from ..policy import ROLE_CAPABILITIES as POLICY_CAPABILITIES, normalize_role
 
 AGENT_SCHEMA_VERSION = "1.0"
 AgentRole: TypeAlias = Literal[
@@ -28,21 +29,7 @@ ROLE_ROUTES: dict[str, frozenset[str]] = {
     "repair": frozenset({"repair", "implementation"}),
 }
 ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
-    "orchestrator": frozenset({"repository.read", "repository.search", "repository.rag"}),
-    "root_cause_analyst": frozenset({
-        "repository.read", "repository.search", "repository.symbols", "repository.references",
-        "repository.rag", "mcp.read",
-    }),
-    "impact_test_analyst": frozenset({
-        "repository.read", "repository.search", "repository.symbols", "repository.references",
-        "repository.rag", "mcp.read",
-    }),
-    "implementer": frozenset({"repository.read", "repository.search", "repository.patch", "validation.read"}),
-    "reviewer": frozenset({
-        "repository.read", "repository.search", "repository.symbols", "repository.references",
-        "validation.read",
-    }),
-    "repair": frozenset({"repository.read", "repository.search", "repository.patch", "validation.read"}),
+    role: frozenset(POLICY_CAPABILITIES[normalize_role(role)]) for role in ROLE_ROUTES
 }
 
 

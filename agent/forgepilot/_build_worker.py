@@ -23,8 +23,13 @@ def main():
     api.CloseHandle(job)  # Parent owns the sole lifetime handle; its death kills this tree.
     try:
         data = json.loads(sys.stdin.buffer.readline(131_073))
+        command = data["command"]
+        if (type(command) is not list or not command or len(command) > 257 or not command[0]
+                or any(not isinstance(arg, str) or "\x00" in arg for arg in command)
+                or not isinstance(data["cwd"], str) or "\x00" in data["cwd"]):
+            raise ValueError()
         return subprocess.run(data["command"], cwd=data["cwd"], stdin=subprocess.DEVNULL,
-                              creationflags=subprocess.CREATE_NO_WINDOW).returncode
+                              shell=False, creationflags=subprocess.CREATE_NO_WINDOW).returncode
     except OSError as exc:
         # Numeric diagnostics explain OS launch failures without echoing command
         # arguments, environment values or arbitrary exception text.

@@ -22,7 +22,7 @@ def register_symbol_tools(registry, intelligence):
     fallback = " Check source/semantic/limits: rg fallback is text candidates, NOT proven definitions/references. No configure/build is performed."
     registry.register(FunctionTool("find_symbol",
         "Resolve the identifier at a C/C++ source position to clangd definition targets and source context." + position + fallback,
-        SymbolArguments, partial(intelligence.query, "find_symbol")))
+        SymbolArguments, partial(intelligence.query, "find_symbol"), read_only=True))
     registry.register(FunctionTool("find_references",
         "Find clangd semantic references to the identifier at a C/C++ source position, within bounded indexed coverage." + position + fallback,
-        ReferenceArguments, partial(intelligence.query, "find_references")))
+        ReferenceArguments, partial(intelligence.query, "find_references"), read_only=True))

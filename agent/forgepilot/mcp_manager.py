@@ -169,9 +169,10 @@ class MCPManager:
             catalog = {t["name"]: t for t in snapshot.catalog}
             for name in snapshot.config.selected_tools:
                 t = catalog[name]
-                registry.register(MCPToolAdapter(server_id=snapshot.server_id, remote_tool_name=name,
+                registry.register_approved_mcp(MCPToolAdapter(server_id=snapshot.server_id, remote_tool_name=name,
                     input_schema=t["input_schema"], output_schema=t["output_schema"], description=t["description"],
                     annotations=t["annotations"], execution=t["execution"], connection=self.sessions[snapshot.server_id],
+                    approved=True,
                     extract_sources=getattr(snapshot.config.connection, "preset_id", None) == "tavily"))
 
     def metadata(self, name):

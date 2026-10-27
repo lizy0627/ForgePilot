@@ -335,7 +335,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
 
     @app.post("/api/v1/tasks/{task_id}/approve", response_model=TaskResponse, status_code=202, responses=errors)
     async def approve(task_id: str, body: ApproveTask):
-        return await host.approve(task_id, body.plan_version)
+        return await host.approve(task_id, body.plan_version, approved_test_files=body.approved_test_files)
 
     @app.post("/api/v1/tasks/{task_id}/feedback", response_model=TaskResponse, status_code=202, responses=errors)
     async def feedback(task_id: str, body: PlanFeedback):

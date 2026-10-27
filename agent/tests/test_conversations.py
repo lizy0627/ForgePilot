@@ -1234,13 +1234,13 @@ async def test_chat_mcp_same_session_serial_different_sessions_overlap():
         input_schema={'type':'object','properties':{'value':{'type':'string'}},
                       'required':['value'],'additionalProperties':False},
         annotations={'readOnlyHint':True},execution={},connection=connection,
-        description='fixture') for server,name,connection in definitions]
+        description='fixture',approved=True) for server,name,connection in definitions]
     aliases=[adapter.name for adapter in adapters]
     model=ScriptedLLM([reply(calls=[call(alias,json.dumps({'value':str(index)}),id=str(index))
                                     for index,alias in enumerate(aliases)]),reply('done')])
     service=ChatService(model,max_tool_concurrency=3)
     service.registry=ReadOnlyRegistry(mcp_allowlist=aliases,redactor=service.redactor)
-    for adapter in adapters: service.registry.register(adapter)
+    for adapter in adapters: service.registry.register_approved_mcp(adapter)
     started=asyncio.get_running_loop().time()
     assert await service.answer([],'query')=='done'
     elapsed=asyncio.get_running_loop().time()-started
@@ -1383,7 +1383,7 @@ async def test_chat_budget_trims_complete_old_turns_with_large_definitions():
     finally: await service.close()
     assert len(model.requests)==1 and history==before
     outgoing,specs=model.requests[0]
-    assert len(specs)==3 and context_size(outgoing,specs)<=65_536-8192
+    assert len(specs)==len(READ_TOOLS) and context_size(outgoing,specs)<=65_536-8192
     kept=outgoing[1:-1]
     assert 0<len(kept)<len(history) and len(kept)%2==0
     assert kept==history[-len(kept):] and outgoing[-1]=={'role':'user','content':prompt}

@@ -475,6 +475,8 @@ def test_schema_rejects_external_recursive_invalid_and_unbounded_patterns(schema
 
 def test_write_and_task_augmented_tools_are_incompatible():
     base = {"name": "fetch", "inputSchema": INPUT, "outputSchema": OUTPUT}
+    assert not inspect_tool(base)["compatible"]  # No implicit read capability.
+    base["annotations"] = {"readOnlyHint": True}
     assert inspect_tool(base)["compatible"]  # User selection still required.
     for change in ({"annotations": {"readOnlyHint": False}}, {"execution": {"taskSupport": "required"}},
                    {"execution": []}, {"outputSchema": {"type": "invalid"}}):

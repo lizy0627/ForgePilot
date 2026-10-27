@@ -12,6 +12,7 @@ from pathlib import Path, PureWindowsPath
 import stat
 
 from .errors import ForgePilotError
+from .path_identity import path_key, path_within, same_path
 from .process import run_process
 
 MAX_FILE_BYTES = 262_144
@@ -28,6 +29,7 @@ EXCLUDED = (
     "node_modules", ".vs", ".idea", ".ssh", ".aws", ".azure", "logs",
     ".hidden-tests", ".hidden_tests", "hidden-tests", "hidden_tests",
     "__hidden_tests__", ".forgepilot-tests",
+    ".oracle", "oracle", "protected-oracle", "protected_oracle", "hidden-oracle", "hidden_oracle",
     ".env*", "*secret*", "*credential*", "*.pem", "*.key", "*.p12", "*.pfx",
     "id_rsa*", "id_ed25519*", ".netrc", ".npmrc", ".pypirc", "config.local.*",
     "cmakeuserpresets.json", "local-env.cmd", "*.exe", "*.dll", "*.obj", "*.pdb",
@@ -101,7 +103,7 @@ def _canonical_root(path: str) -> Path:
 
 def _cache_key(root: Path) -> str:
     """Return the stable, platform-normalized absolute cache key."""
-    return os.path.normcase(os.path.normpath(str(root.absolute())))
+    return path_key(os.path.normpath(str(root.absolute())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +115,7 @@ class _VerifiedRepositoryRoot:
 
     def valid(self) -> bool:
         try:
-            return (_canonical_root(str(self.root)) == self.root
+            return (same_path(_canonical_root(str(self.root)), self.root)
                     and _identity(self.root) == self.root_identity
                     and _identity(self.root / ".git", marker=True) == self.marker_identity)
         except (ForgePilotError, OSError, ValueError, RuntimeError):
@@ -138,7 +140,7 @@ async def _verify_repository_root(root: Path, key: str, git_executable: str) -> 
     )
     try:
         valid = (result.returncode == 0 and not result.truncated
-                 and Path(result.stdout.decode("utf-8").strip()).resolve() == root)
+                 and same_path(Path(result.stdout.decode("utf-8").strip()).resolve(), root))
         after_root = _identity(root)
         after_marker = _identity(root / ".git", marker=True)
     except (ValueError, OSError, UnicodeError):
@@ -147,7 +149,7 @@ async def _verify_repository_root(root: Path, key: str, git_executable: str) -> 
     if not valid:
         raise ForgePilotError("repository_not_git_root",
                               "Select the root of a local Git working repository")
-    if before_root != after_root or before_marker != after_marker or _canonical_root(str(root)) != root:
+    if before_root != after_root or before_marker != after_marker or not same_path(_canonical_root(str(root)), root):
         raise ForgePilotError("repository_boundary", "Repository root changed during validation")
     return _VerifiedRepositoryRoot(root, key, after_root, after_marker)
 
@@ -258,7 +260,7 @@ class Repository:
             raise ForgePilotError("repository_boundary", "Repository root changed") from None
         if ((expected_root_identity is not None and actual_root != expected_root_identity)
                 or (expected_marker_identity is not None and actual_marker != expected_marker_identity)
-                or root.resolve(strict=True) != root):
+                or not same_path(root.resolve(strict=True), root)):
             raise ForgePilotError("repository_boundary", "Repository root changed")
         self._root_identity = (info.st_dev, info.st_ino)
         self._read_versions: dict[str, str] = {}
@@ -270,7 +272,7 @@ class Repository:
         return entry.session(rg_executable)
 
     def _path(self, value: str, *, allow_missing: bool = False) -> Path:
-        if (len(value) > 1_024 or not value or any(ord(c) < 32 for c in value)
+        if (not isinstance(value, str) or len(value) > 1_024 or not value or any(ord(c) < 32 for c in value)
                 or ":" in value or PureWindowsPath(value).drive or value.startswith(("/", "\\"))):
             raise ForgePilotError("repository_boundary", "Use a relative repository path")
         parts = value.replace("\\", "/").split("/")
@@ -281,7 +283,7 @@ class Repository:
         path = self.root
         try:
             root_info = self.root.stat()
-            if self.root.resolve(strict=True) != self.root or (root_info.st_dev, root_info.st_ino) != self._root_identity:
+            if not same_path(self.root.resolve(strict=True), self.root) or (root_info.st_dev, root_info.st_ino) != self._root_identity:
                 raise ForgePilotError("repository_boundary", "Repository root changed")
             for part in parts:
                 if part in ("", "."):
@@ -295,12 +297,14 @@ class Repository:
                     raise
                 if is_link(info):
                     raise ForgePilotError("repository_boundary", "Links and reparse points are excluded")
+                if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                    raise ForgePilotError("repository_boundary", "Files with multiple hard links are excluded")
             resolved = path.resolve(strict=not allow_missing)
-            if not resolved.is_relative_to(self.root):
+            if not path_within(resolved, self.root):
                 raise ForgePilotError("repository_boundary", "Path is outside the repository")
             if any(excluded(part) for part in resolved.relative_to(self.root).parts):
                 raise ForgePilotError("repository_denied", "Canonical path is excluded")
-            return path
+            return resolved
         except (OSError, ValueError, RuntimeError):
             raise ForgePilotError("repository_path", "Path does not exist or is inaccessible") from None
 
@@ -344,6 +348,47 @@ class Repository:
                 raise ForgePilotError("repository_read", "Cannot enumerate repository directory") from None
         return sorted(files), False
 
+    def audit_manifest(self) -> dict[str, str]:
+        """Complete bounded source manifest; approvals must never silently truncate."""
+        from .file_access import pinned_file
+        pending = ["."]
+        result = {}
+        scanned = total = 0
+        while pending:
+            directory = self._path(pending.pop())
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        scanned += 1
+                        if scanned > MAX_SCAN_ENTRIES:
+                            raise ForgePilotError("scope_limit", "Approval scan entry limit exceeded")
+                        if excluded(entry.name):
+                            continue
+                        relative = Path(entry.path).relative_to(self.root).as_posix()
+                        info = entry.stat(follow_symlinks=False)
+                        if is_link(info):
+                            raise ForgePilotError("repository_boundary", "Approval scan found a link or reparse point")
+                        self._path(relative)
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(relative)
+                        elif stat.S_ISREG(info.st_mode):
+                            if len(result) >= MAX_FILES:
+                                raise ForgePilotError("scope_limit", "Approval file count limit exceeded")
+                            with pinned_file(self, relative) as (stream, _):
+                                data = stream.read(MAX_SEARCH_BYTES + 1)
+                            total += len(data)
+                            if total > MAX_SEARCH_BYTES:
+                                raise ForgePilotError("scope_limit", "Approval file or total byte limit exceeded")
+                            key = path_key(relative)
+                            if key in result:
+                                raise ForgePilotError("scope_ambiguous", "Distinct physical files share an ambiguous path key")
+                            result[key] = hashlib.sha256(data).hexdigest()
+                        else:
+                            raise ForgePilotError("repository_boundary", "Only ordinary files and directories are supported")
+            except OSError:
+                raise ForgePilotError("repository_read", "Cannot finish approval scope scan") from None
+        return result
+
     def _read(self, path: str) -> tuple[str, bool]:
         text, truncated, _ = self._read_snapshot(path)
         return text, truncated
@@ -353,10 +398,11 @@ class Repository:
         try:
             flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             with os.fdopen(os.open(candidate, flags), "rb") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or is_link(info) or info.st_nlink != 1:
                     raise ForgePilotError("repository_path", "Expected a regular file")
                 actual = opened_path(stream.fileno())
-                if actual is not None and (not actual.is_relative_to(self.root) or actual != candidate):
+                if actual is not None and (not path_within(actual, self.root) or not same_path(actual, candidate)):
                     raise ForgePilotError("repository_boundary", "Opened file location changed")
                 self._path(path)  # Reject a changed link/parent before reading the handle.
                 data = stream.read(MAX_FILE_BYTES + 1)
@@ -392,7 +438,7 @@ class Repository:
         if end_line < start_line:
             raise ForgePilotError("invalid_arguments", "end_line must be >= start_line")
         await asyncio.sleep(0)
-        key = self.normalize_plan_path(path).casefold() if record_version else None
+        key = path_key(self.normalize_plan_path(path)) if record_version else None
         text, limited, version = self._read_snapshot(path)
         # Only explicit reads establish a baseline; internal _read callers do not.
         if record_version:
@@ -416,7 +462,7 @@ class Repository:
             selected = selected[:len(selected) * 3 // 4]
             if "output_limit" not in reasons:
                 reasons.append("output_limit")
-        return json.dumps({"path": path, "content": selected, "truncated": bool(reasons),
+        return json.dumps({"path": path, "content": selected, "sha256": version, "truncated": bool(reasons),
                            "limits": reasons}, ensure_ascii=False)
 
     async def search_code(self, query: str, path: str = ".", max_results: int = 50, *, file_suffixes=None) -> str:

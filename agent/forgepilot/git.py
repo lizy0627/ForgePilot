@@ -12,6 +12,7 @@ import subprocess
 import threading
 
 from .errors import ForgePilotError
+from .path_identity import path_within, same_path
 from .process import ProcessResult, executable as resolve_executable, run_process, safe_environment
 from .repository import is_link, opened_path
 
@@ -257,7 +258,7 @@ class SafeGit:
         for key, value in (env or {}).items():
             if key == "GIT_INDEX_FILE":
                 path = Path(value)
-                if not path.is_absolute() or path in {self.git_dir / "index", self.common_dir / "index"}:
+                if not path.is_absolute() or any(same_path(path, index) for index in (self.git_dir / "index", self.common_dir / "index")):
                     raise ForgePilotError("git_denied", "Private Git index must be outside source indexes")
                 index_guard = Guard(path.parent)
                 index_guard.path(path.name, missing=True)
@@ -296,10 +297,10 @@ class SafeGit:
                 # Holding that directory without SHARE_DELETE would forbid its
                 # own removal. The manager separately pins the controlled parent.
                 worktrees = self.common_dir / "worktrees"
-                directories = [item for item in directories if not item.is_relative_to(worktrees)]
-            identities = {path: _identity(path) for path in directories}
+                directories = [item for item in directories if not path_within(item, worktrees)]
+            identities = [(path, _identity(path)) for path in directories]
             stack.enter_context(_windows_directory_handles(directories))
-            if any(_identity(path) != identity for path, identity in identities.items()):
+            if any(_identity(path) != identity for path, identity in identities):
                 raise ForgePilotError("workspace_boundary", "Git metadata changed before execution")
             prefix = _git_prefix(self.executable, self.root, self.git_dir)
             if self._cached_signature != self._config_signature:

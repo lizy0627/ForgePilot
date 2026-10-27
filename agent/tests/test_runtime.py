@@ -19,7 +19,7 @@ from conftest import ScriptedLLM, call, reply
 
 
 class EchoTool(Tool):
-    name = "echo"
+    name = "repository_read_range"
     description = "test-only typed tool"
     arguments_model = ListArguments
     async def execute(self, arguments):
@@ -59,7 +59,7 @@ async def test_analysis_hides_and_blocks_both_writers_and_builds():
     for name in forbidden:
         runtime.registry.register(FunctionTool(name, "forbidden during analysis", Arguments, mutation))
     assert not set(forbidden) & {s.name for s in runtime._model_schemas(analysis=True)}
-    assert WRITE_TOOLS <= {s.name for s in runtime._model_schemas()}
+    assert {"repository_apply_patch", "repository_create_file", "repository_delete_new_file"} <= {s.name for s in runtime._model_schemas()}
     await runtime.run(context)
     assert context.state == TaskState.COMPLETED and not executed
     assert [r["tool_call_id"] for r in context.tool_results] == forbidden
@@ -70,8 +70,8 @@ async def test_analysis_hides_and_blocks_both_writers_and_builds():
 @pytest.mark.asyncio
 async def test_multiple_calls_and_errors_are_observations_with_matching_ids():
     llm = ScriptedLLM([
-        reply(None, [call("echo", '{"path":"ok"}', "one"), call("shell", '{}', "two"),
-                     call("echo", '{"limit":"wrong"}', "three"), call("echo", '{bad-json', "four")],
+        reply(None, [call("repository_read_range", '{"path":"ok"}', "one"), call("shell", '{}', "two"),
+                     call("repository_read_range", '{"limit":"wrong"}', "three"), call("repository_read_range", '{bad-json', "four")],
               {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}),
         reply("done", usage={"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}),
     ])
@@ -127,7 +127,7 @@ async def test_cancellation_during_llm_and_tool():
         class SlowLLM:
             async def chat(self, messages, tools=None):
                 if during_tool:
-                    return reply(None, [call("echo", "{}")])
+                    return reply(None, [call("repository_read_range", "{}")])
                 started.set()
                 await asyncio.sleep(10)
         runtime, context, trace = setup(SlowLLM())
@@ -135,7 +135,7 @@ async def test_cancellation_during_llm_and_tool():
             async def slow(arguments):
                 started.set()
                 await asyncio.sleep(10)
-            runtime.registry.get("echo").execute = slow
+            runtime.registry.get("repository_read_range").execute = slow
         task = asyncio.create_task(runtime.run(context))
         await started.wait()
         task.cancel()
@@ -159,27 +159,27 @@ async def test_registry_validation_duplicate_schema_timeout_and_safe_failure():
     schema[0].input_schema["properties"].clear()
     assert registry.get_specs()[0].input_schema["properties"]
     for args in [[], {"limit": True}, {"limit": 0}, {"extra": "x"}, '{', '"text"']:
-        result = await registry.execute("echo", args)
+        result = await registry.execute("repository_read_range", args)
         assert not result.success and result.error.startswith("invalid_arguments")
     async def slow(arguments):
         await asyncio.sleep(10)
     tool.execute = slow
-    assert (await registry.execute("echo", {})).error.startswith("tool_timeout")
+    assert (await registry.execute("repository_read_range", {})).error.startswith("tool_timeout")
     async def broken(arguments):
         raise RuntimeError("sensitive-internal-value")
     tool.execute = broken
-    result = await registry.execute("echo", {})
+    result = await registry.execute("repository_read_range", {})
     assert result.error.startswith("tool_internal") and "sensitive" not in result.error
     async def broken_value(arguments):
         raise ValueError("internal value error")
     tool.execute = broken_value
-    assert (await registry.execute("echo", {})).error.startswith("tool_internal")
+    assert (await registry.execute("repository_read_range", {})).error.startswith("tool_internal")
 
 
 @pytest.mark.asyncio
 async def test_redaction_in_context_observations_trace_and_callbacks():
     secret = "fake-api-key-SHOULD-NEVER-BE-STORED"
-    llm = ScriptedLLM([reply(None, [call("echo", json.dumps({"path": secret}))]), reply(secret)])
+    llm = ScriptedLLM([reply(None, [call("repository_read_range", json.dumps({"path": secret}))]), reply(secret)])
     runtime, context, trace = setup(llm, secret=secret)
     await runtime.run(context)
     assert secret not in json.dumps(asdict(context), default=str)

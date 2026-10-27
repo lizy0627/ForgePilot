@@ -3,15 +3,18 @@
 import asyncio
 from dataclasses import asdict
 import json
+import re
 from pathlib import Path
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from .build_process import BuildCancelled, build_environment, run_build_process
 from .errors import ForgePilotError
+from .path_identity import same_path
 from .presets import BuildConfig, Presets, available_presets, safe_build_path
 from .repository import is_link
 from .tools import ToolResult
+from .toolchain import ToolchainProfile, validate_executable
 
 BUILD_TOOLS = ("cmake_configure", "cmake_build", "run_tests")
 
@@ -24,6 +27,7 @@ class BuildPipeline:
         self.identity = (stat.st_dev, stat.st_ino)
         self.env = build_environment()
         self.presets = Presets(root, self.env)
+        self.profile = ToolchainProfile(config.cmake, config.ctest)
         self.selection = None
         self.binary_dir = None
         self._report = self._new_report(0)
@@ -57,13 +61,69 @@ class BuildPipeline:
         self.binary_dir = safe_build_path(self.root, self.selection["binary_dir"])
         self.selection["binary_dir"] = str(self.binary_dir)
         self._report["selection"] = self.selection
+        self._validate_preset_policy()
+        # Existing configured trees can provide a genuine pre-modification CTest
+        # inventory. Never invent a baseline from the first post-edit configure.
+        if self.binary_dir.is_dir() and (self.binary_dir / "CTestTestfile.cmake").is_file():
+            result = await self._command("ctest_inventory", self._profile_command("ctest_inventory"), 30)
+            if result.status != "succeeded":
+                raise ForgePilotError("test_inventory", "Cannot capture the approval-time CTest inventory")
+            self._report["initial_ctest_names"] = self._inventory_names(result.stdout)
         self.trace.emit(self.task_id, "build_selection", self.report()["selection"])
+
+    @staticmethod
+    def _inventory_names(output):
+        try:
+            document = json.loads(output)
+            tests = document["tests"]
+            if not isinstance(tests, list) or len(tests) > 100_000:
+                raise ValueError()
+            names = [test["name"] for test in tests]
+            if any(not isinstance(name, str) or not name or len(name) > 4096 for name in names) or len(names) != len(set(names)):
+                raise ValueError()
+            return names
+        except (ValueError, TypeError, KeyError):
+            raise ForgePilotError("test_inventory", "CTest returned an invalid approval-time inventory") from None
+
+    def _validate_preset_policy(self):
+        if self.selection["source"] != "preset":
+            return
+        test = self.presets.effective("test", self.selection["test_preset"])
+        if test.get("filter"):
+            raise ForgePilotError("test_integrity", "CTest preset filters cannot exclude tests from validation")
+        build = self.presets.effective("build", self.selection["build_preset"])
+        if build.get("targets") or build.get("nativeToolOptions"):
+            raise ForgePilotError("test_integrity", "Selected build preset must build all targets without native command overrides")
+        configure = self.presets.effective("configure", self.selection["configure_preset"])
+        for key, value in configure.get("cacheVariables", {}).items():
+            value = value.get("value") if isinstance(value, dict) else value
+            if (re.search(r"(?:BUILD_TESTING|ENABLE_TESTS?|BUILD_TESTS?)$", key, re.I)
+                    and str(value).upper() in {"FALSE", "OFF", "NO", "0"}):
+                raise ForgePilotError("test_integrity", "Selected preset disables existing tests")
+            if re.search(r"(?:FLAGS|DEFINITIONS)$", key, re.I) and re.search(r"(?:[-/]D\s*NDEBUG|[-/]D\s*(?:DOCTEST_CONFIG_DISABLE|CATCH_CONFIG_DISABLE))", str(value), re.I):
+                raise ForgePilotError("test_integrity", "Selected preset disables test assertions")
+
+    def _profile_command(self, phase, *, report_path=None):
+        selection = self.selection or {}
+        values = {"source_dir": str(self.root), "build_dir": str(self.binary_dir or ""),
+                  "configuration": selection.get("configuration", "Debug"), "jobs": "1",
+                  "generator": self.config.generator or "", "architecture": self.config.architecture or "",
+                  "make_program": self.config.make_program or "",
+                  "configure_preset": selection.get("configure_preset") or "",
+                  "build_preset": selection.get("build_preset") or "",
+                  "test_preset": selection.get("test_preset") or "", "report_path": str(report_path or "")}
+        return self.profile.resolve(phase, values, preset=selection.get("source") == "preset",
+                                    multi_config=bool(selection.get("multi_config")),
+                                    generator=bool(self.config.generator), architecture=bool(self.config.architecture),
+                                    make_program=bool(self.config.make_program)).argv
 
     def _paths(self):
         stat = self.root.stat()
-        if is_link(self.root.lstat()) or (stat.st_dev, stat.st_ino) != self.identity:
+        if (is_link(self.root.lstat()) or not same_path(self.root.resolve(strict=True), self.root)
+                or (stat.st_dev, stat.st_ino) != self.identity):
             raise ForgePilotError("build_path", "Repository root changed after task creation")
-        safe_build_path(self.root, str(self.binary_dir))
+        if self.binary_dir is not None:
+            safe_build_path(self.root, str(self.binary_dir))
         self.presets.unchanged()
 
     def _artifact(self, name: str) -> Path:
@@ -86,13 +146,18 @@ class BuildPipeline:
             if not line.startswith(("#", "//")) and ":" in line and "=" in line:
                 key, value = line.split("=", 1)
                 cache[key.split(":", 1)[0]] = value
-        if Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() != self.root:
+        if not same_path(Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve(), self.root):
             raise ForgePilotError("build_cache", "Existing CMake cache belongs to another source directory")
-        if Path(cache.get("CMAKE_CACHEFILE_DIR", "")).resolve() != self.binary_dir:
+        if not same_path(Path(cache.get("CMAKE_CACHEFILE_DIR", "")).resolve(), self.binary_dir):
             raise ForgePilotError("build_cache", "CMake cache directory differs from the selected binaryDir")
         return cache
 
     async def _command(self, phase, command, timeout):
+        if phase not in {*BUILD_TOOLS, "preset_discovery", "ctest_inventory"}:
+            raise ForgePilotError("command_denied", "Only predefined validator phases can launch commands")
+        self._paths()
+        kind = "ctest" if phase in {"run_tests", "ctest_inventory"} else "cmake"
+        validate_executable(command[0], expected=kind)
         try:
             result = await run_build_process(command, self.root, timeout=timeout, env=self.env)
         except BuildCancelled as exc:
@@ -120,18 +185,13 @@ class BuildPipeline:
                 command = self._configure_command()
                 timeout = self.config.configure_timeout
             elif phase == "cmake_build":
-                command = [self.config.cmake, "--build"]
-                command += ["--preset", self.selection["build_preset"]] if self.selection["source"] == "preset" else [str(self.binary_dir)]
-                command += ["--config", self.selection["configuration"]]
+                command = self._profile_command(phase)
                 timeout = self.config.build_timeout
             else:
                 report_path = self._artifact("forgepilot-ctest-" + uuid4().hex + ".xml")
                 if report_path.exists():
                     raise ForgePilotError("test_report", "Test report must be new for this invocation")
-                command = [self.config.ctest]
-                command += ["--preset", self.selection["test_preset"]] if self.selection["source"] == "preset" else ["--test-dir", str(self.binary_dir)]
-                command += ["-C", self.selection["configuration"], "--output-on-failure", "--no-tests=error",
-                            "--output-junit", str(report_path)]
+                command = self._profile_command(phase, report_path=report_path)
                 timeout = self.config.test_timeout
             result = await self._command(phase, command, timeout)
             if phase == "cmake_configure" and result.status == "succeeded":
@@ -160,23 +220,7 @@ class BuildPipeline:
             raise ForgePilotError("build_internal", "Validation infrastructure failed") from None
 
     def _configure_command(self):
-        selection = self.selection
-        if selection["source"] == "preset":
-            command = [self.config.cmake, "--preset", selection["configure_preset"]]
-        else:
-            command = [self.config.cmake, "-S", str(self.root), "-B", str(self.binary_dir)]
-            if self.config.generator:
-                command += ["-G", self.config.generator]
-            if self.config.architecture:
-                command += ["-A", self.config.architecture]
-            if self.config.make_program:
-                command += ["-DCMAKE_MAKE_PROGRAM=" + self.config.make_program]
-        command += ["-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
-        # In a multi-config generator CMAKE_BUILD_TYPE is ignored; --config/-C own selection.
-        # For single-config this also fills the default when a preset omits CMAKE_BUILD_TYPE.
-        if not selection["multi_config"]:
-            command += ["-DCMAKE_BUILD_TYPE=" + selection["configuration"]]
-        return command
+        return self._profile_command("cmake_configure")
 
     def _configured(self):
         cache = self._cache()

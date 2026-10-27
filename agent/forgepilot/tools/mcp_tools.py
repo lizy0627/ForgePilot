@@ -16,6 +16,7 @@ from ..mcp import MCPClient
 from ..mcp_config import REMOTE_TOOL, SERVER_NAME, TOOL_NAME, sensitive_values
 from ..mcp_schema import checked_schema, validate
 from ..security import Redactor
+from ..policy import FORBIDDEN_TOOLS
 from .registry import Tool, ToolResult
 
 TOPICS = {"overview", "architecture", "workflow"}
@@ -43,8 +44,10 @@ def inspect_tool(tool):
             raise ForgePilotError("mcp_schema_unsupported", "Required task execution is unsupported")
         if not isinstance(annotations, dict) or ("readOnlyHint" in annotations and type(annotations["readOnlyHint"]) is not bool):
             raise ForgePilotError("mcp_schema_unsupported", "Invalid read-only annotation")
-        if annotations.get("readOnlyHint") is False:
-            raise ForgePilotError("mcp_read_only", "Tool explicitly declares write effects")
+        if (entry["name"].casefold() in FORBIDDEN_TOOLS
+                or annotations.get("readOnlyHint") is not True
+                or annotations.get("destructiveHint", False) is not False):
+            raise ForgePilotError("mcp_read_only", "Tool must explicitly declare read-only, non-destructive effects")
         entry["input_schema"] = checked_schema(tool.get("inputSchema"))
         if "outputSchema" in tool:
             entry["output_schema"] = checked_schema(tool["outputSchema"])
@@ -96,7 +99,7 @@ class MCPToolAdapter(Tool):
 
     def __init__(self, config=None, *, client_factory=MCPClient, server_id=None, remote_tool_name=None,
                  input_schema=None, output_schema=None, connection=None, description="",
-                 annotations=None, execution=None, extract_sources=False):
+                 annotations=None, execution=None, extract_sources=False, approved=False):
         self.config, self.client_factory = config, client_factory
         self.extract_sources = extract_sources
         self.client = None
@@ -122,6 +125,7 @@ class MCPToolAdapter(Tool):
             # Cross-session scheduling is allowed only for an explicit read-only
             # declaration. Calls sharing this server/session remain serialized.
             self.read_only = entry["annotations"].get("readOnlyHint") is True
+            self.mcp_approved = approved is True and self.read_only
             self.concurrent_safe = self.read_only
             self.concurrency_group = ("mcp_session", self.server_id)
             self.client = connection
@@ -164,6 +168,8 @@ class MCPToolAdapter(Tool):
         if self._schema is not None and schema != self._schema:
             raise ForgePilotError("mcp_schema_changed", "MCP schema changed after review boundary; start a new task")
         self._schema = schema
+        self.read_only = True
+        self.mcp_approved = True  # The finite legacy contract above was checked locally.
 
     async def register(self, registry):
         try:
@@ -176,9 +182,10 @@ class MCPToolAdapter(Tool):
             if self.redactor.data(schemas) != schemas or registry.redactor.data(schemas) != schemas:
                 raise ForgePilotError("mcp_schema_unsupported", "MCP schema contains sensitive content")
             self.description = registry.redactor.text(self.redactor.text(self.description))
+            self.mcp_approved = self.read_only is True
             if registry.get(self.name) is not None:
                 raise ForgePilotError("mcp_name_conflict", "Namespaced MCP tool already exists in registry")
-            registry.register(self)
+            registry.register_approved_mcp(self)
         except TimeoutError:
             self.unavailable = True
             await self.close()

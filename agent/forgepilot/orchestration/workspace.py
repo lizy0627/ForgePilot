@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
 from ..errors import ForgePilotError
+from ..path_identity import path_key
 from .models import IDENTIFIER, SHA256
 
 
@@ -60,13 +61,13 @@ def _manifest(values: Mapping[str, str | None]) -> Mapping[str, str | None]:
                        or component.split(".", 1)[0].casefold() in _WINDOWS_RESERVED
                        for component in components)):
             raise ValueError("Invalid controlled file path")
-        if path.casefold() in canonical:
+        if path_key(path) in canonical:
             raise ValueError("Controlled file paths have a case collision")
-        canonical.add(path.casefold())
+        canonical.add(path_key(path))
         if digest is not None and (not isinstance(digest, str) or not SHA256.fullmatch(digest)):
             raise ValueError("Invalid controlled file SHA256")
         result[path] = digest
-    present = {path.casefold() for path, digest in result.items() if digest is not None}
+    present = {path_key(path) for path, digest in result.items() if digest is not None}
     if any("/".join(path.split("/")[:index]) in present
            for path in present for index in range(1, len(path.split("/")))):
         raise ValueError("Controlled file paths contain a file/directory collision")

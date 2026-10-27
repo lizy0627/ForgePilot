@@ -968,7 +968,13 @@ async def test_catalog_changed_on_approved_resume_is_blocked(peers,database,cpp_
         peer.tools[0]['inputSchema']['description']='Changed after approval'
         work.approve(pending.task_id,pending.plan_version); await work.execute(pending.task_id)
         assert len(methods(peer,'tools/call'))==1
-        assert 'mcp_catalog_changed' in model.requests[-1][0][-1]['content']
+        assert 'policy_denied' in model.requests[-1][0][-1]['content']
+        assert not any(t.name.startswith('mcp_') for t in model.requests[-1][1] or [])
+        # A trusted analyst continuation still checks the frozen catalog before dispatch.
+        from forgepilot.policy import Principal, Role
+        with work._runtime.registry.as_principal(Principal(Role.ANALYST, mcp_approved=True)):
+            result=await work.mcp_manager.execute(work._runtime.registry,alias,'{"query":"analyst resume"}','analyst-resume')
+        assert 'mcp_catalog_changed' in result.error
     finally: work.close(); await model.aclose()
 
 
@@ -1021,8 +1027,9 @@ async def test_work_approval_reconnect_uses_old_snapshot_and_shared_budget(peers
         work.approve(pending.task_id,pending.plan_version)
         result=await work.execute(pending.task_id)
         assert result.state==TaskState.COMPLETED and work.mcp_manager.calls==8
-        assert len(methods(peer,'initialize'))==4  # two management, two runtime segments
-        assert len(methods(peer,'tools/call'))==8 and not methods(replacement,'tools/call')
+        assert len(methods(peer,'initialize'))==3  # two management, one analyst segment
+        assert len(methods(peer,'tools/call'))==7 and not methods(replacement,'tools/call')
+        assert any('policy_denied' in (r.get('error') or '') for r in result.tool_results)
         assert any('mcp_budget' in (e.data.get('error') or '') for e in trace.events if e.kind=='tool_finished')
         assert all(e.data['server_id']==record['server_id'] for e in trace.events if e.kind=='mcp_tool_activity')
         assert (cpp_repo/'Counter.cpp').read_bytes()==before
@@ -1231,9 +1238,14 @@ async def test_work_host_persists_trace_calls_and_resumes_deleted_configuration(
         tool['name']=name; tool.pop('outputSchema')
     peer.call_result={'content':[{'type':'text','text':json.dumps({'results':[
         {'raw_content':'完整正文'*8000, 'title':'工作来源','url':'https://example.test/work/1'}]})}]}
+    selected_names=[]
     def choose(messages,tools):
-        selected=next(t for t in tools if t.name.startswith('mcp_'))
-        return reply(calls=[call(selected.name,'{"query":"work lookup"}',id='work-'+str(len(messages)))])
+        names=[t.name for t in tools if t.name.startswith('mcp_')]
+        if names:
+            selected_names.append(names[0])
+        else:
+            assert selected_names  # Implementer has no MCP schemas, even after approval.
+        return reply(calls=[call(selected_names[0],'{"query":"work lookup"}',id='work-'+str(len(messages)))])
     def configure(app):
         original=app.state.task_host.mcp_service.connection_factory
         app.state.task_host.mcp_service.connection_factory=lambda config: original(config.model_copy(update={'endpoint':peer.endpoint}))
@@ -1256,9 +1268,10 @@ async def test_work_host_persists_trace_calls_and_resumes_deleted_configuration(
             assert (await client.post(f'/api/v1/tasks/{tid}/approve',json={'plan_version':1})).status_code==202
             state=await wait_request(client,cid,rid); assert state['status']=='completed'
             records=(await client.get(endpoint)).json()['items']
-            assert [r['status'] for r in records]==['succeeded','succeeded']
-            assert all(r['sources']==[{'title':'工作来源','url':'https://example.test/work/1'}] for r in records)
-            assert len(methods(peer,'tools/call'))==2
+            assert [r['status'] for r in records]==['succeeded','failed']
+            assert records[0]['sources']==[{'title':'工作来源','url':'https://example.test/work/1'}]
+            assert records[1]['error_code']=='policy_denied' and not records[1]['sources']
+            assert len(methods(peer,'tools/call'))==1
             assert store._db.execute('SELECT mcp_calls_json FROM conversation_requests WHERE request_id=?',(rid,)).fetchone()[0]=='[]'
             assert store._db.execute("SELECT COUNT(*) FROM task_events WHERE kind='mcp_tool_activity'").fetchone()[0]==4
             assert_no_plaintext(store,SECRET)

@@ -51,7 +51,7 @@ def git(root, exe, *args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_write", [False, True])
 @pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
-async def test_partial_write_records_actual_bytes_for_restore(cpp_repo, rg_exe, git_exe, monkeypatch, previous_write, tool_name):
+async def test_partial_staged_write_preserves_destination_and_prior_snapshot(cpp_repo, rg_exe, git_exe, monkeypatch, previous_write, tool_name):
     # Exercise I/O with supported uniform newlines, independent of checkout EOLs.
     (cpp_repo / "main.cpp").write_bytes(b"original user content\r\n")
     service, trace = service_for(rg_exe, git_exe, [])
@@ -72,16 +72,19 @@ async def test_partial_write_records_actual_bytes_for_restore(cpp_repo, rg_exe, 
             raise OSError("simulated partial write")
 
         with monkeypatch.context() as patch:
-            patch.setattr(changes_module, "write_bytes", fail_partway)
+            patch.setattr(file_access, "write_staged_bytes", fail_partway)
             with pytest.raises(ForgePilotError, match="file_access"):
                 if tool_name == "write_file":
                     await service._changes.write_file("main.cpp", "new replacement")
                 else:
                     await service._changes.edit_file("main.cpp", [{"old_text": before.decode(), "new_text": "new replacement"}])
-        actual = b"new" + before[3:]
-        assert (cpp_repo / "main.cpp").read_bytes() == actual
-        snapshot = service._changes.snapshots["main.cpp"]
-        assert snapshot.original == original and snapshot.last_written == actual
+        assert (cpp_repo / "main.cpp").read_bytes() == before
+        assert not list(cpp_repo.glob(".forgepilot-patch-*.tmp"))
+        if previous_write:
+            snapshot = service._changes.snapshots["main.cpp"]
+            assert snapshot.original == original and snapshot.last_written == before
+        else:
+            assert not service._changes.snapshots
         assert len([e for e in trace.events if e.kind == "file_changed"]) == events
         service.cancel()
         assert (await service.restore(pending.task_id))["conflicts"] == 0
@@ -195,12 +198,12 @@ async def test_first_write_preserves_unread_or_changed_files(cpp_repo, rg_exe, g
 async def test_new_file_race_at_create_new_never_overwrites(cpp_repo, rg_exe, git_exe, monkeypatch):
     service, _ = service_for(rg_exe, git_exe, [], paths=("raced.cpp",))
     pending = await service.start(str(cpp_repo), "modify")
-    original_open = file_access._open
-    def race(api, path, access, share, disposition, flags):
+    original_open = file_access.FileTransaction.open_handle
+    def race(transaction, path, access, share, disposition, flags):
         if path.name == "raced.cpp" and disposition == 1:
             path.write_bytes(b"user won creation")
-        return original_open(api, path, access, share, disposition, flags)
-    monkeypatch.setattr(file_access, "_open", race)
+        return original_open(transaction, path, access, share, disposition, flags)
+    monkeypatch.setattr(file_access.FileTransaction, "open_handle", race)
     try:
         service.approve(pending.task_id, 1)
         with pytest.raises(ForgePilotError, match="file_access"):
@@ -274,14 +277,17 @@ async def test_no_writes_before_approval_or_after_terminal(cpp_repo, rg_exe, git
     try:
         registry = service._runtime.registry
         assert {s.name for s in registry.get_specs()} == {
-            "list_files", "read_file", "search_code", "find_symbol", "find_references",
-            "git_status", "git_diff", "write_file", "edit_file"}
+            "repository_list_files", "repository_read_range", "repository_search_text",
+            "repository_get_symbol", "repository_find_references", "repository_read_cmake_target",
+            "repository_git_diff"}
         assert (await registry.execute("read_file", {"path": "main.cpp"})).success
         arguments = {"path": "main.cpp", **({"content": "bad"} if tool_name == "write_file" else
             {"edits": [{"old_text": "int", "new_text": "long"}]})}
         denied = await registry.execute(tool_name, arguments)
-        assert not denied.success and denied.error.startswith("write_not_allowed")
+        assert not denied.success and denied.error.startswith("policy_denied")
         service.approve(pending.task_id, 1)
+        assert {"repository_apply_patch", "repository_create_file", "repository_delete_new_file"} <= {
+            spec.name for spec in registry.get_specs()}
         assert service.cancel()
         denied = await registry.execute(tool_name, arguments)
         assert not denied.success
@@ -399,7 +405,7 @@ async def test_restore_conflicts_and_subsequent_writes_preserve_user_edits(cpp_r
         (cpp_repo / "main.cpp").write_bytes(b"later user edit\r\n")
         (cpp_repo / "New.cpp").write_bytes(b"user new edit")
         await service._changes.repository.read_file("main.cpp")
-        with pytest.raises(ForgePilotError, match="write_conflict"):
+        with pytest.raises(ForgePilotError, match="scope_violation"):
             await service._changes.write_file("main.cpp", "override")
         service.cancel()
         assert len(service.task_diff(pending.task_id)["files"]) == 3
@@ -542,15 +548,15 @@ async def test_mutation_pins_ancestors_and_refuses_first_snapshot_truncation(cpp
     (cpp_repo / "huge.cpp").write_bytes(huge)
     service, _ = service_for(rg_exe, git_exe, [], paths=("main.cpp", "huge.cpp"))
     pending = await service.start(str(cpp_repo), "modify")
-    original_open = file_access._open
+    original_open = file_access.FileTransaction.open_handle
     rename_denied = []
-    def guarded(api, path, access, share, disposition, flags):
+    def guarded(transaction, path, access, share, disposition, flags):
         if path.name == "main.cpp" and access & 0x40000000:
             with pytest.raises(OSError):
                 cpp_repo.rename(cpp_repo.with_name("cannot-rename-pinned-root"))
             rename_denied.append(True)
-        return original_open(api, path, access, share, disposition, flags)
-    monkeypatch.setattr(file_access, "_open", guarded)
+        return original_open(transaction, path, access, share, disposition, flags)
+    monkeypatch.setattr(file_access.FileTransaction, "open_handle", guarded)
     try:
         service.approve(pending.task_id, 1)
         await service._changes.repository.read_file("main.cpp")

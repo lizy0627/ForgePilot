@@ -19,6 +19,7 @@ import time
 import uuid
 
 from .errors import ForgePilotError
+from .path_identity import path_key, same_path
 from .repository import is_link, opened_path
 
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -75,7 +76,7 @@ def _identity(path: Path) -> tuple[int, int, int, int]:
 
 
 def _same_path(left: Path, right: Path) -> bool:
-    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+    return same_path(left, right)
 
 
 def _native_path(path: Path) -> str:
@@ -225,15 +226,15 @@ class Guard:
     def protect(self, relative: str = ".", *, missing: bool = False):
         target, directories = self._components(relative, missing=missing)
         candidates = list(dict.fromkeys([*self._pins, *directories]))
-        before = {path: _identity(path) for path in candidates}
+        before = [(path, _identity(path)) for path in candidates]
         with _windows_directory_handles(candidates):
             self.check()
-            if any(_identity(path) != identity for path, identity in before.items()):
+            if any(_identity(path) != identity for path, identity in before):
                 raise _error("Directory changed while acquiring handles")
             self._components(relative, missing=missing)
             yield target
             self.check()
-            if any(_identity(path) != identity for path, identity in before.items()):
+            if any(_identity(path) != identity for path, identity in before):
                 raise _error("Directory changed during operation")
 
     def _tree_directories(self):
@@ -265,15 +266,15 @@ class Guard:
         """Hold all existing worktree directories during Git file mutations."""
         with self.protect():
             directories = self._tree_directories()
-            before = {path: _identity(path) for path in directories}
+            before = [(path, _identity(path)) for path in directories]
             with _windows_directory_handles(directories):
-                if any(_identity(path) != identity for path, identity in before.items()):
+                if any(_identity(path) != identity for path, identity in before):
                     raise _error("Workspace directory changed before Git operation")
                 self._tree_directories()
                 yield
                 self.check()
                 self._tree_directories()
-                for path, identity in before.items():
+                for path, identity in before:
                     if _exists(path) and _identity(path) != identity:
                         raise _error("Workspace directory changed during Git operation")
 
@@ -451,9 +452,9 @@ def manifest(root: str | Path) -> dict[str, str]:
                         continue
                     name = item.name if relative == "." else relative + "/" + item.name
                     name = validate_relative(name)
-                    if name.casefold() in seen:
+                    if path_key(name) in seen:
                         raise _error("Workspace paths have a case collision")
-                    seen.add(name.casefold())
+                    seen.add(path_key(name))
                     info = item.stat(follow_symlinks=False)
                     if is_link(info):
                         raise _error("Workspace contains a link or reparse point")

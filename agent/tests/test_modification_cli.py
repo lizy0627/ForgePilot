@@ -1,5 +1,6 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +10,6 @@ from threading import Thread
 import pytest
 
 from conftest import call
-from test_changes import write
 from test_planning import proposal, contents
 
 
@@ -17,6 +17,10 @@ from test_planning import proposal, contents
     ("approve 2", True, 0), ("approve 2", False, 0), ("reject 2", True, 130),
 ])
 def test_real_modifying_cli_reapproval_and_explicit_restore(cpp_repo, rg_exe, git_exe, decision, restore, expected_code):
+    # Canonical patches require uniform newlines; mixed-newline rejection has
+    # separate editor coverage. Keep the pre-existing user change in this fixture.
+    source = cpp_repo / "main.cpp"
+    source.write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
     original = (cpp_repo / "main.cpp").read_bytes()
     before = contents(cpp_repo)
     requests, errors = [], []
@@ -30,23 +34,28 @@ def test_real_modifying_cli_reapproval_and_explicit_restore(cpp_repo, rg_exe, gi
                 requests.append(data)
                 step = len(requests)
                 if step == 1:
-                    assert "write_file" not in [t["function"]["name"] for t in data["tools"]]
+                    assert "repository_apply_patch" not in [t["function"]["name"] for t in data["tools"]]
                     message = {"role": "assistant", "content": "分析完成，需要修改 main.cpp。"}
                 elif step == 2:
                     assert "tools" not in data
                     message = {"role": "assistant", "content": json.dumps(proposal("main.cpp"))}
                 elif step == 3:
-                    assert "write_file" in [t["function"]["name"] for t in data["tools"]]
+                    assert "repository_apply_patch" in [t["function"]["name"] for t in data["tools"]]
                     message = {"role": "assistant", "content": None, "tool_calls": [
-                        call("read_file", '{"path":"main.cpp"}', "read-source"),
-                        write("main.cpp", original.decode() + "// CLI Agent change\n"), write("Extra.cpp", "extra\n", "extra")]}
+                        call("repository_read_range", '{"path":"main.cpp"}', "read-source"),
+                        call("repository_apply_patch", json.dumps({"path": "main.cpp",
+                            "expected_hash": hashlib.sha256(original).hexdigest(), "edits": [
+                                {"old_text": original.decode(), "new_text": original.decode() + "// CLI Agent change\n"}]}), "write"),
+                        call("repository_create_file", '{"path":"Extra.cpp","content":"extra\\n"}', "extra")]}
                 elif step == 4:
                     assert not (cpp_repo / "Extra.cpp").exists()
                     observations = [m for m in data["messages"] if m["role"] == "tool"]
+                    assert json.loads(observations[-2]["content"])["success"], observations[-2]["content"]
                     assert "approval_required" in observations[-1]["content"]
                     message = {"role": "assistant", "content": json.dumps(proposal("main.cpp", "Extra.cpp"))}
                 elif step == 5:
-                    message = {"role": "assistant", "content": None, "tool_calls": [write("Extra.cpp", "extra\n")]}
+                    message = {"role": "assistant", "content": None, "tool_calls": [
+                        call("repository_create_file", '{"path":"Extra.cpp","content":"extra\\n"}', "write")]}
                 else:
                     assert step == 6
                     message = {"role": "assistant", "content": "文件修改完成，尚未编译或测试。"}
@@ -84,7 +93,8 @@ def test_real_modifying_cli_reapproval_and_explicit_restore(cpp_repo, rg_exe, gi
             assert '"conflicts": 0' in result.stdout and contents(cpp_repo) == before
         else:
             assert (cpp_repo / "Extra.cpp").read_bytes() == b"extra\n"
-            assert (cpp_repo / "main.cpp").read_bytes() == original + b"// CLI Agent change\n"
+            newline = b"\r\n" if b"\r\n" in original else b"\n"
+            assert (cpp_repo / "main.cpp").read_bytes() == original + b"// CLI Agent change" + newline
         if decision == "approve 2" and restore:
             print("OFFLINE PHASE 3 — real CLI/HTTP/Git/file writes, scripted LLM, explicit reapproval and restore")
             print(result.stdout)

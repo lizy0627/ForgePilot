@@ -35,9 +35,11 @@ class PlanningModel:
         data = json.loads(request.content)
         self.requests.append(data)
         if len(self.requests) == 1:
-            assert {t["function"]["name"] for t in data["tools"]} == {"list_files", "read_file", "search_code", "find_symbol", "find_references"}
+            assert {t["function"]["name"] for t in data["tools"]} == {
+                "repository_list_files", "repository_read_range", "repository_search_text",
+                "repository_get_symbol", "repository_find_references", "repository_read_cmake_target"}
             message = {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "read", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"Counter.cpp"}'}}]}
+                {"id": "read", "type": "function", "function": {"name": "repository_read_range", "arguments": '{"path":"Counter.cpp"}'}}]}
             reason = "tool_calls"
         elif len(self.requests) == 2:
             observation = data["messages"][-1]

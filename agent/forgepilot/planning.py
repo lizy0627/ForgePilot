@@ -8,6 +8,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .errors import ForgePilotError
+from .path_identity import path_key
 
 Text = Annotated[str, Field(min_length=1, max_length=4_096)]
 
@@ -82,9 +83,9 @@ def validate_plan(value: str | dict, normalize_path: Callable[[str], str]) -> Ta
     for index, change in enumerate(plan.files_to_modify):
         try:
             path = normalize_path(change.path)
-            if path.casefold() in seen:
+            if path_key(path) in seen:
                 raise ForgePilotError("duplicate_path", "Duplicate file after Windows path normalization")
-            seen.add(path.casefold())
+            seen.add(path_key(path))
             normalized.append({"path": path, "reason": change.reason})
         except ForgePilotError as exc:
             errors.append({"field": f"files_to_modify.{index}.path", "type": exc.code, "message": exc.message})

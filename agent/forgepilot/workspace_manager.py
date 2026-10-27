@@ -15,6 +15,7 @@ import threading
 from uuid import uuid4
 
 from .errors import ForgePilotError
+from .path_identity import path_key, path_within, same_path
 from .git import SafeGit
 from .process import executable
 from .repository import Repository
@@ -23,6 +24,7 @@ from .workspace_safety import (
     Guard, WriterLease, manifest, validate_relative, remove_worktree_files, remove_worktree_registration,
 )
 from .workspace_delivery import DeliveryMixin
+from .policy import Capability, PolicyEngine, Principal, Role
 
 
 AUTHOR = "ForgePilot"
@@ -53,12 +55,15 @@ def _identity(path):
 
 
 class WorkspaceManager(DeliveryMixin):
-    def __init__(self, data_root=None, *, git_executable=None, artifacts=None):
+    def __init__(self, data_root=None, *, git_executable=None, artifacts=None,
+                 principal=None, policy=None):
         root = data_root or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ForgePilot" / "data"
         self.guard = Guard(root, create=True)
         self.root = self.guard.root
         self.git_executable = executable(git_executable, "git")
         self.artifacts = artifacts
+        self.principal = principal or Principal(Role.WORKSPACE_MANAGER)
+        self.policy = policy or PolicyEngine()
         self._local = threading.local()
         self.guard.mkdir("tasks")
         self.guard.mkdir("worktrees")
@@ -75,9 +80,9 @@ class WorkspaceManager(DeliveryMixin):
                 raise ValueError()
             _id(state["repository_id"])
             expected = self.root / "worktrees" / state["repository_id"] / task_id
-            if Path(state["worktree_path"]) != expected:
+            if not same_path(Path(state["worktree_path"]), expected):
                 raise ValueError()
-            if Path(state["repository_path"]).is_relative_to(self.root):
+            if path_within(Path(state["repository_path"]), self.root):
                 raise ValueError()
             return state
         except (ValueError, KeyError, TypeError):
@@ -105,7 +110,7 @@ class WorkspaceManager(DeliveryMixin):
             git = SafeGit(root, self.git_executable)
             cache[str(root)] = git
         common = git.common_dir
-        if os.path.normcase(str(common)) != os.path.normcase(state["common_dir"]) or _identity(common) != state["common_identity"]:
+        if not same_path(common, state["common_dir"]) or _identity(common) != state["common_identity"]:
             raise ForgePilotError("workspace_boundary", "Worktree belongs to a different repository")
         admin_key = "main_admin" if main else "task_admin"
         if admin_key in state and (str(git.git_dir) != state[admin_key]["path"]
@@ -227,11 +232,13 @@ class WorkspaceManager(DeliveryMixin):
             raise ForgePilotError("workspace_base", "Select a local committed ref")
         main_guard = Guard(repository_path)
         main = main_guard.root
-        if main == self.root or main.is_relative_to(self.root) or self.root.is_relative_to(main):
+        if path_within(main, self.root) or path_within(self.root, main):
             raise ForgePilotError("workspace_boundary", "Data directory and source repository must be separate")
         git = SafeGit(main, self.git_executable)
         common = git.common_dir
-        repository_id = sha256(os.path.normcase(str(common)).encode()).hexdigest()[:24]
+        # Retain native separators in durable IDs so existing ASCII/Chinese
+        # repositories keep their lease namespace after the Unicode key fix.
+        repository_id = sha256(path_key(str(common)).replace("/", os.sep).encode()).hexdigest()[:24]
         with WriterLease(self.root, repository_id, task_id):
             if self.guard.path(self._state_path(task_id), missing=True).exists():
                 raise ForgePilotError("workspace_exists", "Task already has a workspace")
@@ -468,13 +475,14 @@ class WorkspaceManager(DeliveryMixin):
             raise ForgePilotError("checkpoint_policy", "Use a fixed checkpoint kind and repair round 1..3")
         return MESSAGES[kind]
 
-    @staticmethod
-    def _commit(git, tree, parent, message):
+    def _commit(self, git, tree, parent, message):
+        self.policy.require(self.principal, Capability.COMMIT)
         return git.run(["commit-tree", tree, "-p", parent], data=(message + "\n").encode(),
                        env={"GIT_AUTHOR_NAME": AUTHOR, "GIT_AUTHOR_EMAIL": EMAIL,
                             "GIT_COMMITTER_NAME": AUTHOR, "GIT_COMMITTER_EMAIL": EMAIL}).stdout.decode().strip()
 
     def checkpoint_commit(self, task_id, *, kind, expected, repair_round=None, checkpoint_id=None):
+        self.policy.require(self.principal, Capability.COMMIT)
         message = self._message(kind, repair_round)
         checkpoint_id = _id(checkpoint_id or "cp-" + uuid4().hex)
         with self._operation(task_id) as state:

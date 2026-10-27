@@ -6,6 +6,7 @@ from time import perf_counter
 
 from .context import TaskContext, TaskState
 from .changes import ChangeSet
+from .path_identity import path_key
 from .errors import ForgePilotError
 from .file_access import RepositoryLock
 from .git import GitRepository
@@ -18,13 +19,13 @@ from .trace import TraceSink
 from .build import BuildPipeline
 from .presets import BuildConfig
 from .tools.build_tools import register_build_tools
-from .repair import ensure_validation_integrity
 from .code_intelligence import CodeIntelligence, CodeIntelligenceConfig
 from .tools.symbol_tools import register_symbol_tools
 from .mcp_config import MCPConfig
 from .tools.mcp_tools import MCPToolAdapter
 from .llm import ModelClient
 from .mcp_manager import MCPManager
+from .integrity import IntegrityMonitor, IntegrityTaskSpec
 
 
 class TaskService:
@@ -32,7 +33,7 @@ class TaskService:
                  trace: TraceSink, redactor: Redactor | None = None,
                  build_config: BuildConfig | None = None,
                  code_intelligence_config: CodeIntelligenceConfig | None = None,
-                 mcp_config: MCPConfig | None = None, rag_manager=None) -> None:
+                 mcp_config: MCPConfig | None = None, rag_manager=None, task_spec=None) -> None:
         self.llm = llm
         self.rg_executable = rg_executable
         self.git_executable = git_executable
@@ -49,6 +50,9 @@ class TaskService:
         self._changes: ChangeSet | None = None
         self._lock: RepositoryLock | None = None
         self.mcp_manager = MCPManager(redactor=self.redactor)
+        self.task_spec = task_spec or IntegrityTaskSpec()
+        self._integrity = None
+        self._extra_test_approval = ()
 
     def configure_mcp(self, snapshots, *, connection_factory, disabled=False):
         # Called once, synchronously at host admission, before any repository I/O.
@@ -101,6 +105,7 @@ class TaskService:
         self._context = context
         self._runtime = None
         self._changes = None
+        self._integrity = None
         started = perf_counter()
         try:
             self.trace.emit(context.task_id, "task_created", {
@@ -157,6 +162,29 @@ class TaskService:
                     runtime.ensure_write(path)
                 self._changes = ChangeSet(repository, ensure_write, self.trace, context.task_id)
                 self._runtime.changes = self._changes
+                monitor = IntegrityMonitor(repository, self.task_spec)
+                self._integrity = monitor
+                changes = self._changes
+                changes.content_guard = monitor.guard
+                def capture_approval(version):
+                    extra = self._extra_test_approval
+                    planned = {path_key(file.path) for file in runtime._review.plan.files_to_modify}
+                    if any(path_key(repository.normalize_plan_path(path)) not in planned for path in extra):
+                        raise ForgePilotError("validation_integrity", "Extra test approval must name files in this plan")
+                    pipeline = runtime.build_pipeline
+                    names = pipeline.report().get("initial_ctest_names") if pipeline is not None else None
+                    metadata = monitor.capture(version, approved_test_files=extra, ctest_names=names)
+                    changes.capture_scope()
+                    context.test_integrity = metadata
+                    self.trace.emit(context.task_id, "test_integrity_approved", metadata)
+                def verify_integrity():
+                    pipeline = runtime.build_pipeline
+                    names = pipeline.report().get("test_names") if pipeline is not None else None
+                    context.test_integrity = monitor.verify(ctest_names=names)
+                    changes.verify_scope()
+                    self.trace.emit(context.task_id, "test_integrity_verified", context.test_integrity)
+                runtime.before_approve = capture_approval
+                runtime.verify_integrity = verify_integrity
                 def mark_rag_dirty(path):
                     if rag_services is None or not rag_services.indexer.available:
                         return
@@ -172,7 +200,6 @@ class TaskService:
                 register_change_tools(
                     registry, git, self._changes, on_changed=mark_rag_dirty)
                 if self.build_config is not None:
-                    self._changes.content_guard = ensure_validation_integrity
                     def ensure_build(phase):
                         if owned_lock.handle is None:
                             raise ForgePilotError("repository_lock", "Build task does not own the repository")
@@ -280,8 +307,15 @@ class TaskService:
                 inspect_current=result.state in {TaskState.COMPLETED,TaskState.FAILED,TaskState.CANCELLED}))
         return result
 
-    def approve(self, task_id: str, plan_version: int) -> TaskContext:
-        return deepcopy(self._review_runtime(task_id).approve(task_id, plan_version))
+    def approve(self, task_id: str, plan_version: int, *, approved_test_files=()) -> TaskContext:
+        """Additional exact test-file approval is a trusted human action, never plan data."""
+        if type(approved_test_files) not in {tuple, list, set, frozenset}:
+            raise ForgePilotError("invalid_arguments", "Extra test approval requires an exact file list")
+        self._extra_test_approval = tuple(approved_test_files)
+        try:
+            return deepcopy(self._review_runtime(task_id).approve(task_id, plan_version))
+        finally:
+            self._extra_test_approval = ()
 
     def reject(self, task_id: str, plan_version: int) -> TaskContext:
         result = self._review_runtime(task_id).reject(task_id, plan_version)

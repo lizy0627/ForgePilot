@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 from .context import TaskContext, TaskState
+from .path_identity import path_key
 from .errors import ForgePilotError
 from .sqlite_store import SqliteEventStore
 from .recording import now, project_events, snapshot_context
@@ -227,7 +228,7 @@ class TaskHost:
             raise ForgePilotError("server_stopping", "Server is shutting down")
         if len(self._tasks) + self.extra_active() >= self.max_tasks:
             raise ForgePilotError("task_capacity", "活动任务数量已达上限，请等待当前任务完成。")
-        key = str(Path(repository_path).resolve()).casefold()
+        key = path_key(str(Path(repository_path).resolve()))
         if key in self._repositories:
             error = ForgePilotError("repository_busy", "Another task owns this repository")
             error.task_id = self._repositories[key]
@@ -352,10 +353,10 @@ class TaskHost:
             raise ForgePilotError("invalid_state", "Historical tasks are read-only; execution cannot be resumed")
         return self._tasks[task_id]
 
-    async def approve(self, task_id, plan_version):
-        return await self._submit(self._approve(task_id, plan_version))
+    async def approve(self, task_id, plan_version, *, approved_test_files=()):
+        return await self._submit(self._approve(task_id, plan_version, approved_test_files=approved_test_files))
 
-    async def _approve(self, task_id, plan_version):
+    async def _approve(self, task_id, plan_version, *, approved_test_files=()):
         entry = self._entry(task_id)
         if entry.cancel_requested:
             raise ForgePilotError("invalid_state", "任务正在停止或删除，不能批准方案。")
@@ -366,7 +367,10 @@ class TaskHost:
                 raise ForgePilotError("task_busy", "Task is still executing")
             try:
                 self.store._ensure_task_available(task_id)
-                entry.service.approve(task_id, plan_version)
+                if approved_test_files:
+                    entry.service.approve(task_id, plan_version, approved_test_files=approved_test_files)
+                else:
+                    entry.service.approve(task_id, plan_version)
                 self._publish(entry)
                 entry.running = asyncio.create_task(self._drive(entry))
                 return self.store.get(task_id)

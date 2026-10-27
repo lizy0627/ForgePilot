@@ -29,6 +29,7 @@ class CreateTask(RequestModel):
 
 class ApproveTask(RequestModel):
     plan_version: int = Field(ge=1)
+    approved_test_files: list[str] = Field(default_factory=list, max_length=100)
 
 
 class PlanFeedback(RequestModel):
@@ -323,6 +324,7 @@ class TaskResponse(TaskSummary):
     failure_kind: str | None
     validation_errors: list[dict]
     build_result: dict | None
+    test_integrity: dict | None = None
     task_diff: dict | None
     diff_summary: list[dict] = Field(default_factory=list)
     duration_complete: bool = True

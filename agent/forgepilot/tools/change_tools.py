@@ -5,7 +5,8 @@ from pydantic import Field, field_validator, model_validator
 from .registry import FunctionTool
 from .repository_tools import Arguments, PathArgument
 
-WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+WRITE_TOOLS = frozenset({"write_file", "edit_file", "repository_apply_patch",
+                         "repository_create_file", "repository_delete_new_file"})
 
 
 class WriteArguments(Arguments):
@@ -42,6 +43,15 @@ class EditArguments(Arguments):
         return self
 
 
+class PatchArguments(EditArguments):
+    expected_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DeleteNewFileArguments(Arguments):
+    path: PathArgument
+    expected_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def register_change_tools(registry, git, changes, *, on_changed=None):
     async def diff():
         return json.dumps(changes.diff(), ensure_ascii=False)
@@ -61,7 +71,33 @@ def register_change_tools(registry, git, changes, *, on_changed=None):
             except Exception:
                 pass
         return output
+    async def patch(path, expected_hash, edits):
+        output = await changes.apply_patch(path, expected_hash, edits)
+        if on_changed is not None:
+            on_changed(path)
+        return output
+    async def create(path, content):
+        output = await changes.create_file(path, content)
+        if on_changed is not None:
+            on_changed(path)
+        return output
+    async def delete_new(path, expected_hash):
+        output = await changes.delete_new_file(path, expected_hash)
+        if on_changed is not None:
+            on_changed(path)
+        return output
     registry.register(FunctionTool("git_status", "Read current Git status, including pre-existing user changes; excludes protected paths.", Arguments, git.status))
     registry.register(FunctionTool("git_diff", "Show only this task's Agent changes relative to original byte snapshots, plus restore/conflict status.", Arguments, diff))
+    registry.register(FunctionTool("repository_git_diff", "Show this task's approved file changes and conflicts.",
+                                   Arguments, diff, read_only=True))
     registry.register(FunctionTool("write_file", "Write complete UTF-8 text to an approved file during modifying. Read existing files with read_file before overwriting; retrieved RAG context is not a current-file read. After a first-write conflict, read again and regenerate the change. New scope requires another human-approved plan. Never delete or commit.", WriteArguments, write_file))
     registry.register(FunctionTool("edit_file", "Prefer for local changes to an existing approved UTF-8 file after read_file; retrieved RAG context is not a current-file read. Supply 1-8 unique exact old_text/new_text pairs; all match the pre-call content and ranges must not overlap. Preserve indentation; LF snippets also match CRLF files. After a first-write conflict, read again and regenerate edits. Never creates files; new scope requires human approval.", EditArguments, edit_file))
+    registry.register(FunctionTool("repository_apply_patch",
+        "Apply exact edits to an approved existing UTF-8 file using its current SHA256 as CAS. Read repository_read_range first; preserve BOM/newlines; approval cannot be supplied in arguments.",
+        PatchArguments, patch))
+    registry.register(FunctionTool("repository_create_file",
+        "Create one approved new UTF-8 file; existing files require repository_apply_patch with their old hash.",
+        WriteArguments, create))
+    registry.register(FunctionTool("repository_delete_new_file",
+        "Delete only a file created by this task, with current SHA256 CAS and approved scope. Existing files cannot be deleted.",
+        DeleteNewFileArguments, delete_new))

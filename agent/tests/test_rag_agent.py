@@ -13,6 +13,8 @@ from forgepilot.security import Redactor
 from forgepilot.task_service import TaskService
 from forgepilot.tools import ToolRegistry, register_retrieval_tool
 from forgepilot.trace import MemoryTrace
+from forgepilot.trace import TraceEvent
+from forgepilot.recording import project_events
 from conftest import ScriptedLLM, call, reply
 
 
@@ -89,6 +91,15 @@ def proposal(path="main.cpp"):
     }
 
 
+@pytest.mark.parametrize("name", ["retrieve_code_context", "rag_retrieve"])
+def test_public_rag_tool_projects_usage_without_exposing_source_contents(name):
+    trace = TraceEvent(1, "rag-task", "tool_finished", datetime.now(timezone.utc).isoformat(),
+                       {"name": name, "success": True})
+    events = project_events([trace], {"task_id": "rag-task", "rag_used": True, "rag_status": "used"})
+    assert [event.event for event in events] == ["tool_finished", "rag_usage"]
+    assert events[-1].data == {"rag_used": True, "rag_status": "used"}
+
+
 @pytest.mark.asyncio
 async def test_retrieve_tool_schema_structured_output_and_registry_controls():
     retrieval = FakeRetrieval()
@@ -96,7 +107,7 @@ async def test_retrieve_tool_schema_structured_output_and_registry_controls():
     register_retrieval_tool(registry, retrieval, planned_files=lambda: ("src/target.py",))
 
     spec = next(spec for spec in registry.get_specs()
-                if spec.name == "retrieve_code_context")
+                if spec.name == "rag_retrieve")
     assert set(spec.input_schema["properties"]) == {
         "query", "path_filters", "languages", "top_k"}
     assert spec.input_schema["additionalProperties"] is False
@@ -155,7 +166,7 @@ async def test_analysis_auto_retrieval_injects_at_most_six_untrusted_results():
     messages = llm.requests[0]
     assert injection in messages[-2]["content"]
     assert "untrusted repository data" in messages[0]["content"]
-    assert "use read_file" in messages[0]["content"]
+    assert "use repository_read_range" in messages[0]["content"]
     event = next(event for event in trace.events
                  if event.kind == "rag_initial_retrieval")
     assert event.data["status"] == "ready" and event.data["result_count"] == 1
@@ -267,7 +278,7 @@ async def test_planner_can_retrieve_but_receives_no_write_tools(
         pending = await service.start(str(cpp_repo), "Fix target_symbol")
         assert pending.state == TaskState.WAITING_APPROVAL
         planner_tools = {spec.name for spec in llm.specs[1]}
-        assert planner_tools == {"retrieve_code_context"}
+        assert planner_tools == {"rag_retrieve"}
         assert len(manager.retrieval.calls) == 2  # automatic analysis + planner
         assert next(item for item in pending.tool_results
                     if item["tool_call_id"] == "plan-rag")["success"]

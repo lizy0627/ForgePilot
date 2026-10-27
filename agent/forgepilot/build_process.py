@@ -95,6 +95,10 @@ class BuildCancelled(asyncio.CancelledError):
 
 async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
                             env: dict[str, str] | None = None, output_limit: int = 1_048_576) -> CommandResult:
+    if (type(command) is not list or not command or len(command) > 257 or not command[0]
+            or any(not isinstance(arg, str) or "\x00" in arg for arg in command)
+            or len(json.dumps(command, ensure_ascii=True)) > 120_000):
+        raise ForgePilotError("command_denied", "Build processes require a bounded executable/argument array")
     started = perf_counter()
     job = ProcessJob()
     proc = None
@@ -122,7 +126,7 @@ async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
             # executable. This avoids a launch/AssignProcess race in compiler descendants.
             launcher = asyncio.create_task(asyncio.create_subprocess_exec(
                 sys.executable, "-I", str(Path(__file__).with_name("_build_worker.py")), job.name,
-                cwd=cwd, env=env or build_environment(), creationflags=subprocess.CREATE_NO_WINDOW,
+                cwd=cwd, env=env or build_environment(), shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE))
             proc = await asyncio.shield(launcher)
             readers = [asyncio.create_task(read(proc.stdout, buffers[0])),

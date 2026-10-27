@@ -16,7 +16,7 @@ def snapshot_context(context, *, created_at, updated_at, finished_at=None, cance
         "task_id", "repository_path", "state", "plan", "plan_version", "approved_plan_version",
         "analysis_result", "final_result", "steps", "tool_calls", "duration_ms", "outcome", "error",
         "repair_round", "max_repair_rounds", "repair_records", "validation_history", "last_validation_error",
-        "failure_kind", "validation_errors", "build_result", "task_diff",
+        "failure_kind", "validation_errors", "build_result", "test_integrity", "task_diff",
         "rag_requested", "rag_used", "rag_status")}
     values.update(prompt=context.user_request, approved_files=sorted(context.approved_files),
         usage=context.token_usage, created_at=created_at, updated_at=updated_at,
@@ -40,7 +40,7 @@ def project_events(traces, snapshot):
                 "rag_used": snapshot["rag_used"],
                 "rag_status": snapshot["rag_status"],
             })
-        if kind == "tool_finished" and data.get("name") == "retrieve_code_context":
+        if kind == "tool_finished" and data.get("name") in {"retrieve_code_context", "rag_retrieve"}:
             add("rag_usage", {
                 "rag_used": snapshot["rag_used"],
                 "rag_status": snapshot["rag_status"],

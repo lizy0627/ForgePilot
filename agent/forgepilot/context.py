@@ -46,6 +46,7 @@ class TaskContext:
     task_diff: dict | None = None
     restore_result: dict | None = None
     build_result: dict | None = None  # Pure data: selection, command evidence and actual CTest counts.
+    test_integrity: dict | None = None  # Approval hashes, registrations and final verification evidence.
     repair_round: int = 0  # Initial Change is 0; repairs are exactly 1, 2, 3.
     max_repair_rounds: int = 3
     repair_records: list[dict] = field(default_factory=list)

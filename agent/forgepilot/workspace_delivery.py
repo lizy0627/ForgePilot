@@ -368,6 +368,8 @@ class DeliveryMixin:
             _fail("delivery_changed", "Delivery outcome requires user inspection")
 
     def deliver(self, task_id, mode, *, approved, token, bundle=None):
+        from .policy import Capability
+        self.policy.require(self.principal, Capability.DELIVER)
         if approved is not True:
             _fail("delivery_approval", "Final delivery requires explicit user approval")
         if not isinstance(mode, str) or mode not in _MODES:

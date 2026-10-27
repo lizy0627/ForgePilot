@@ -106,7 +106,7 @@ async def test_multiple_generic_stdio_tools_share_process_and_redact_explicit_en
         server_id = uuid4()
         for tool in catalog:
             adapter = MCPToolAdapter(server_id=server_id, remote_tool_name=tool["name"],
-                input_schema=tool["inputSchema"], connection=client)
+                input_schema=tool["inputSchema"], annotations=tool.get("annotations"), connection=client)
             await adapter.register(registry)
             result = await registry.execute(adapter.name, {"query": "generic non-topic query"})
             assert result.success and "[REDACTED]" in result.output and secret not in result.model_dump_json()

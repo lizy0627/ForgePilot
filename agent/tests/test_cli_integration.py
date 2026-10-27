@@ -32,15 +32,17 @@ class FixtureModel:
     def __call__(self, request):
         data = json.loads(request.content)
         self.requests.append(data)
-        assert {t["function"]["name"] for t in data["tools"]} == {"list_files", "read_file", "search_code", "find_symbol", "find_references"}
+        assert {t["function"]["name"] for t in data["tools"]} == {
+            "repository_list_files", "repository_read_range", "repository_search_text",
+            "repository_get_symbol", "repository_find_references", "repository_read_cmake_target"}
         if len(self.requests) == 1:
-            calls = [call("list_files", "{}", "list"), call("search_code", '{"query":"Counter"}', "search")]
+            calls = [call("repository_list_files", "{}", "list"), call("repository_search_text", '{"query":"Counter"}', "search")]
             response = reply(None, calls, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
         elif len(self.requests) == 2:
             observations = {m["tool_call_id"]: json.loads(m["content"]) for m in data["messages"] if m["role"] == "tool"}
             assert "Counter.cpp" in observations["list"]["output"]
             assert "App.cpp" in observations["search"]["output"]
-            response = reply(None, [call("read_file", json.dumps({"path": name}), name)
+            response = reply(None, [call("repository_read_range", json.dumps({"path": name}), name)
                                     for name in ("Counter.hpp", "Counter.cpp", "App.cpp", "main.cpp")])
         else:
             observations = {m["tool_call_id"]: json.loads(m["content"]) for m in data["messages"] if m["role"] == "tool"}

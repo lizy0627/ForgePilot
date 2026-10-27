@@ -4,6 +4,14 @@
       "ApproveTask": {
         "additionalProperties": false,
         "properties": {
+          "approved_test_files": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Approved Test Files",
+            "type": "array"
+          },
           "plan_version": {
             "minimum": 1.0,
             "title": "Plan Version",
@@ -3015,6 +3023,18 @@
           "task_id": {
             "title": "Task Id",
             "type": "string"
+          },
+          "test_integrity": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Integrity"
           },
           "tool_calls": {
             "title": "Tool Calls",
