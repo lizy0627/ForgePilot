@@ -1,6 +1,7 @@
 #include "AgentApiClient.h"
 #include "Protocol.h"
 #include "JsonHttp.h"
+#include "workbench/MissionProtocol.h"
 #include <QNetworkProxy>
 #include <QTimer>
 #include <QUrlQuery>
@@ -32,13 +33,27 @@ void AgentApiClient::abortPending()
 {
     const auto pending = m_pending;
     m_pending.clear();
+    m_requests.clear();
+    m_rejections.clear();
     for (auto *reply : pending) { reply->disconnect(this); reply->abort(); reply->deleteLater(); }
+}
+void AgentApiClient::abortRequest(quint64 serial)
+{
+    m_rejections.remove(serial);
+    auto *reply = m_requests.take(serial);
+    if (!reply) return;
+    m_pending.remove(reply);
+    reply->disconnect(this);
+    reply->abort();
+    reply->deleteLater();
 }
 quint64 AgentApiClient::send(const QString &operation, const QString &id, const QJsonObject &body)
 {
     const auto serial = ++m_next;
     if (!id.isEmpty() && !Protocol::validTaskId(id)) {
+        m_rejections.insert(serial);
         QTimer::singleShot(0, this, [this, serial, operation, id] {
+            if (!m_rejections.remove(serial)) return;
             emit requestError(serial, operation, id, 0, "invalid_task_id", "任务标识无效。");
         });
         return serial;
@@ -60,6 +75,7 @@ quint64 AgentApiClient::send(const QString &operation, const QString &id, const 
     auto *reply = JsonHttp::send(m_network, this, readOnly ? "GET" : "POST", url, body, 64 * 1024 * 1024,
         [=, this](QNetworkReply *completed, const JsonHttp::Response &response) {
         if (!m_pending.remove(completed)) return;
+        m_requests.remove(serial);
         const auto &object = response.body;
         const int status = response.status;
         QString code, message;
@@ -85,5 +101,68 @@ quint64 AgentApiClient::send(const QString &operation, const QString &id, const 
         }
     }, operation != "feedback");
     m_pending.insert(reply);
+    m_requests.insert(serial, reply);
+    return serial;
+}
+
+quint64 AgentApiClient::createMission(const QJsonObject &body) { return sendMission("mission.create", {}, body); }
+quint64 AgentApiClient::getMission(const QString &id) { return sendMission("mission.get", id); }
+quint64 AgentApiClient::getMissionGraph(const QString &id) { return sendMission("mission.graph", id); }
+quint64 AgentApiClient::getMissionArtifacts(const QString &id) { return sendMission("mission.artifacts", id); }
+quint64 AgentApiClient::getMissionArtifact(const QString &id, const QString &artifactId) { return sendMission("mission.artifact", id, {{"artifact_id", artifactId}}); }
+quint64 AgentApiClient::getMissionDiff(const QString &id) { return sendMission("mission.diff", id); }
+quint64 AgentApiClient::getMissionValidation(const QString &id) { return sendMission("mission.validation", id); }
+quint64 AgentApiClient::approveMission(const QString &id, const QJsonObject &body) { return sendMission("mission.approve", id, body); }
+quint64 AgentApiClient::cancelMission(const QString &id, qint64 revision) { return sendMission("mission.cancel", id, {{"expected_revision", revision}}); }
+quint64 AgentApiClient::retryMission(const QString &id, qint64 revision, const QString &nodeId) {
+    QJsonObject body{{"expected_revision", revision}};
+    if (!nodeId.isEmpty()) body.insert("node_id", nodeId);
+    return sendMission("mission.retry", id, body);
+}
+quint64 AgentApiClient::resumeMission(const QString &id, qint64 revision, const QString &token) {
+    QJsonObject body{{"expected_revision", revision}};
+    if (!token.isEmpty()) body.insert("recovery_token", token);
+    return sendMission("mission.resume", id, body);
+}
+quint64 AgentApiClient::deliverMission(const QString &id, const QJsonObject &body) { return sendMission("mission.delivery", id, body); }
+quint64 AgentApiClient::rejectRequest(const QString &op, const QString &id, const QString &code) {
+    const auto serial = ++m_next;
+    m_rejections.insert(serial);
+    QTimer::singleShot(0, this, [this, serial, op, id, code] {
+        if (m_rejections.remove(serial)) emit requestError(serial, op, id, 0, code, MissionProtocol::errorMessage(code));
+    });
+    return serial;
+}
+quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body) {
+    if (op != "mission.create" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
+    if (!MissionProtocol::validRequest(op, body)) return rejectRequest(op, id, "invalid_request");
+    const auto serial = ++m_next;
+    QString path = id.isEmpty() ? QString{} : '/' + id;
+    const auto action = op.mid(8);
+    const bool readOnly = QSet<QString>{"get", "graph", "artifacts", "artifact", "diff", "validation"}.contains(action);
+    if (action == "approve") path += "/approvals";
+    else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();
+    else if (action != "create" && action != "get") path += '/' + action;
+    auto *reply = JsonHttp::send(m_network, this, readOnly ? "GET" : "POST", MissionProtocol::endpoint(m_base, path),
+        readOnly ? QJsonObject{} : body, 64 * 1024 * 1024,
+        [=, this](QNetworkReply *completed, const JsonHttp::Response &response) {
+            if (!m_pending.remove(completed)) return;
+            m_requests.remove(serial);
+            QString code;
+            const auto status = response.status;
+            if (response.exceededLimit) code = "response_limit";
+            else if (!status) code = "network_error";
+            else if (status < 200 || status >= 300) {
+                code = !response.invalidJson && MissionProtocol::validError(response.body, id)
+                    ? response.body.value("error").toObject().value("code").toString() : "invalid_response";
+            } else if (response.networkError != QNetworkReply::NoError) code = "network_error";
+            else if (response.invalidJson || !MissionProtocol::validResponse(op, id, response.body)
+                || ((action == "create" || action == "approve" || action == "retry" || action == "resume") && status != 202)
+                || (action == "artifact" && response.body.value("artifact_id") != body.value("artifact_id"))) code = "invalid_response";
+            if (!code.isEmpty()) emit requestError(serial, op, id, status, code, MissionProtocol::errorMessage(code, status));
+            else emit responseReceived(serial, op, id, response.body);
+        }, readOnly, true); // Mutations are never replayed by Qt after a dropped connection.
+    m_pending.insert(reply);
+    m_requests.insert(serial, reply);
     return serial;
 }

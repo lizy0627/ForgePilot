@@ -469,6 +469,9 @@ def main():
             (output/'http-requests.json').write_text(json.dumps(request_counts,indent=2),encoding='utf-8')
             if thread.is_alive(): raise RuntimeError("Backend failed to stop")
             store.close()
+    if args.scenario == "baseline" and not any((args.manual, args.live_model, args.conversations, args.deletion)):
+        from run_mission_integration import run as run_mission
+        return run_mission(root, args.output_root)
     return 0
 
 

@@ -25,6 +25,18 @@ add_library(ForgePilotCommunication STATIC
     src/McpController.h src/McpController.cpp
     src/RecordListModel.h src/RecordListModel.cpp
     src/RepositoryModel.h src/RepositoryModel.cpp)
+target_sources(ForgePilotCommunication PRIVATE
+    src/workbench/MissionProtocol.h src/workbench/MissionProtocol.cpp
+    src/workbench/WorkbenchListModel.h src/workbench/WorkbenchListModel.cpp
+    src/workbench/MissionListModel.h src/workbench/MissionListModel.cpp
+    src/workbench/GraphModel.h src/workbench/GraphModel.cpp
+    src/workbench/ArtifactModel.h src/workbench/ArtifactModel.cpp
+    src/workbench/EvidenceModel.h src/workbench/EvidenceModel.cpp
+    src/workbench/DiffModel.h src/workbench/DiffModel.cpp
+    src/workbench/ValidationModel.h src/workbench/ValidationModel.cpp
+    src/workbench/ApprovalController.h src/workbench/ApprovalController.cpp
+    src/workbench/DeliveryController.h src/workbench/DeliveryController.cpp
+    src/workbench/MissionController.h src/workbench/MissionController.cpp)
 target_include_directories(ForgePilotCommunication PUBLIC src)
 target_link_libraries(ForgePilotCommunication PUBLIC Qt6::Network Qt6::Concurrent Qt6::Gui)
 target_compile_features(ForgePilotCommunication PUBLIC cxx_std_20)
@@ -62,6 +74,15 @@ if(BUILD_TESTING)
     # Windows debug/CI hosts even when every individual case is healthy.
     set_tests_properties(client_communication PROPERTIES TIMEOUT 120)
     set_target_properties(ForgePilotClientTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    foreach(suite mission_api mission_sse workbench_models mission_controller)
+        qt_add_executable(ForgePilot_${suite}_tests tests/tst_${suite}.cpp)
+        target_link_libraries(ForgePilot_${suite}_tests PRIVATE ForgePilotCommunication Qt6::Test)
+        target_compile_options(ForgePilot_${suite}_tests PRIVATE /utf-8)
+        target_compile_definitions(ForgePilot_${suite}_tests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+        set_target_properties(ForgePilot_${suite}_tests PROPERTIES WIN32_EXECUTABLE FALSE)
+        add_test(NAME client_${suite} COMMAND ForgePilot_${suite}_tests -o "${CMAKE_CURRENT_BINARY_DIR}/${suite}-results.txt,txt")
+        set_tests_properties(client_${suite} PROPERTIES TIMEOUT 120)
+    endforeach()
     function(forgepilot_backend_test target source)
         qt_add_executable(${target} ${source})
         target_link_libraries(${target} PRIVATE ForgePilotCommunication Qt6::Test Qt6::Quick Qt6::Qml Qt6::QuickControls2)
@@ -73,6 +94,7 @@ if(BUILD_TESTING)
     forgepilot_backend_test(ForgePilotDeletionTests tests/tst_deletion_backend.cpp)
     forgepilot_backend_test(ForgePilotMemoryTests tests/tst_memory_backend.cpp)
     forgepilot_backend_test(ForgePilotMcpTests tests/tst_mcp_backend.cpp)
+    forgepilot_backend_test(ForgePilotMissionBackendTests tests/tst_mission_backend.cpp)
 endif()
 
 message(STATUS "ForgePilot Qt: ${Qt6_VERSION}")
