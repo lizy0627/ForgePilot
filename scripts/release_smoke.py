@@ -26,7 +26,18 @@ def free_port() -> int:
 def main() -> int:
     port = free_port()
     environment = os.environ.copy()
+    for name in (
+        "FORGEPILOT_API_KEY", "FORGEPILOT_BASE_URL", "FORGEPILOT_MODEL_CONFIG",
+        "FORGEPILOT_MCP_CONFIG", "FORGEPILOT_QDRANT_URL",
+        "FORGEPILOT_EMBEDDING_API_KEY", "FORGEPILOT_EMBEDDING_BASE_URL",
+        "FORGEPILOT_LOCAL_API_TOKEN", "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY", "GOOGLE_API_KEY",
+        "QDRANT_API_KEY", "TAVILY_API_KEY",
+    ):
+        environment.pop(name, None)
     environment["FORGEPILOT_API_KEY"] = "offline-release-smoke-placeholder"
+    environment.update(HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9",
+                       ALL_PROXY="http://127.0.0.1:9", NO_PROXY="127.0.0.1,localhost,::1")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     with tempfile.TemporaryDirectory(prefix="forgepilot-release-", ignore_cleanup_errors=True) as directory:
         database = Path(directory) / "health.sqlite3"
@@ -46,6 +57,7 @@ def main() -> int:
             str(database),
             "--disable-mcp",
         ]
+        launched_at = time.monotonic()
         process = subprocess.Popen(
             command,
             cwd=AGENT,
@@ -69,6 +81,7 @@ def main() -> int:
                         schema = json.load(response)
                     if schema.get("openapi") and "/api/v1/conversations" in schema.get("paths", {}):
                         print("Offline backend health check passed.")
+                        print(f"backend_ready_ms={(time.monotonic() - launched_at) * 1000:.3f}")
                         return 0
                     return 1
                 except OSError:

@@ -27,7 +27,7 @@ from forgepilot.rag import (QdrantVectorStore, RagConfig, RagFileStore,
                             RepositoryIndexer, RetrievalQuery, RetrievalService)
 from forgepilot.rag.integration import repository_id_for
 from forgepilot.rag.models import checked_relative_path
-from forgepilot.repository import Repository
+from forgepilot.repository import EXCLUDED, Repository
 from forgepilot.sqlite_store import SqliteEventStore
 
 
@@ -252,6 +252,10 @@ async def evaluate(repository_path: Path, tasks: list[RetrievalTask], modes: tup
         try:
             config = RagConfig(
                 enabled=True,
+                # The evaluator writes its reports under artifacts/. Exclude
+                # prior run outputs and the generated oversized OpenAPI file
+                # from the indexed source corpus.
+                exclude=(*EXCLUDED, "artifacts", "protocol/openapi.json"),
                 embedding_model=embedding.name,
                 embedding_base_url="https://offline.invalid/v1",
                 retrieval_top_k=10,

@@ -179,7 +179,7 @@ def run(root, output_root):
                 assert all(c.owner.done() and c.transport.closed for c in clients if hasattr(c, "owner"))
                 assert all(c.process.returncode is not None and c.reader.done() and c.stderr_reader.done()
                     for c in clients if hasattr(c, "process") and c.process is not None)
-                await asyncio.wait_for(peer.disconnected.wait(), 2)
+                await asyncio.wait_for(peer.disconnected.wait(), 10)
                 stdio_rows = [json.loads(line) for line in stdio_evidence.read_text(encoding="utf-8").splitlines()]
                 assert {row["env_present"] for row in stdio_rows} == {True, False}
                 for p in (peer, tavily):

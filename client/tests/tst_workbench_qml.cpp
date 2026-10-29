@@ -7,12 +7,15 @@
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QElapsedTimer>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QtTest>
+#include <algorithm>
 #include <functional>
+#include <memory>
 
 namespace {
 const QString MissionA = "10000000-0000-4000-a000-000000000001";
@@ -215,6 +218,44 @@ private slots:
         QVERIFY(ui.find("sendMessageButton"));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void modeSwitchLatencyBaseline()
+    {
+        Fixture f; Ui ui(f);
+        auto startupClock = std::make_shared<QElapsedTimer>();
+        auto firstFrameMs = std::make_shared<qint64>(-1);
+        QObject::connect(&ui.engine, &QQmlApplicationEngine::objectCreated, &ui.engine,
+            [startupClock, firstFrameMs](QObject *root, const QUrl &) {
+                auto *window = qobject_cast<QQuickWindow *>(root);
+                if (window) QObject::connect(window, &QQuickWindow::frameSwapped, window,
+                    [startupClock, firstFrameMs] { if (*firstFrameMs < 0) *firstFrameMs = startupClock->elapsed(); });
+            });
+        startupClock->start();
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        if (*firstFrameMs < 0) QTest::qWait(100);
+        if (*firstFrameMs >= 0)
+            qInfo().noquote() << "BENCH Qt QML fixture load to first frame (offscreen) ms=" << *firstFrameMs;
+        else
+            qInfo().noquote() << "BENCH Qt QML fixture first frame unavailable on offscreen platform";
+        auto *workbench = ui.find("agentWorkbenchPage");
+        auto *workbenchButton = ui.find("agentWorkbenchModeButton");
+        auto *chatButton = ui.find("freeChatModeButton");
+        QVERIFY(workbench); QVERIFY(workbenchButton); QVERIFY(chatButton);
+        QList<qint64> microseconds;
+        for (int i = 0; i < 7; ++i) {
+            QElapsedTimer clock;
+            clock.start();
+            QVERIFY(QMetaObject::invokeMethod(workbenchButton, "clicked"));
+            QCoreApplication::processEvents();
+            QTRY_VERIFY(workbench->isVisible());
+            microseconds.append(clock.nsecsElapsed() / 1000);
+            QVERIFY(QMetaObject::invokeMethod(chatButton, "clicked"));
+            QCoreApplication::processEvents();
+            QTRY_VERIFY(!workbench->isVisible());
+        }
+        std::sort(microseconds.begin(), microseconds.end());
+        qInfo().noquote() << "BENCH UI mode switch state latency (offscreen, warm) p50_ms="
+            << microseconds[3] / 1000.0 << "p95_ms=" << microseconds[6] / 1000.0;
+    }
     void showsFrozenApprovalAndSubmitsOnce()
     {
         Fixture f; Ui ui(f);
@@ -238,6 +279,37 @@ private slots:
         QTRY_COMPARE(ui.missions.status(), QString("running"));
         QVERIFY(!approve->isEnabled());
         QCOMPARE(f.approvalPosts, 1);
+    }
+    void rejectionNeedsDialogConfirmationAndUsesFrozenRevision()
+    {
+        Fixture f; Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_VERIFY(ui.missions.approval()->available());
+        const auto frozenReview = ui.missions.approval()->review();
+
+        QVERIFY(ui.click("missionRejectButton"));
+        QCOMPARE(f.approvalPosts, 0);
+        QTest::keyClick(ui.window, Qt::Key_Escape);
+        QVERIFY(ui.click("missionRejectButton"));
+        QCOMPARE(f.approvalPosts, 0);
+        auto *confirm = ui.textItem(ui.window->contentItem(), "确认拒绝");
+        QVERIFY(confirm);
+        QVERIFY(confirm->isVisible());
+        QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier,
+            confirm->mapToScene(QPointF(confirm->width()/2, confirm->height()/2)).toPoint());
+        QTRY_COMPARE(f.approvalPosts, 1);
+        QTRY_COMPARE(ui.missions.status(), QString("cancelled"));
+        const auto approvals = std::find_if(f.source.requests.cbegin(), f.source.requests.cend(), [](const Request &r) {
+            return r.method == "POST" && r.path.endsWith("/approvals");
+        });
+        QVERIFY(approvals != f.source.requests.cend());
+        QCOMPARE(approvals->body.value("decision").toString(), QString("rejected"));
+        QCOMPARE(approvals->body.value("expected_revision").toInteger(), 8);
+        QCOMPARE(approvals->body.value("task_spec_hash").toString(), frozenReview.value("task_spec_hash").toString());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void keepsInterruptedTaskRecoverableAfterSwitch()
     {

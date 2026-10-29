@@ -87,7 +87,9 @@ def run(root,output_root):
         assert any('42' in m['content'] for m in for_prompt('请检查当前文件 fixture')['messages'] if m['role']=='tool')
         assert background(for_prompt('使用编辑后的摘要 fixture'))['对话摘要']['content']=='手工纠正的摘要：旧代码结论须重新读取确认'
         assert '对话摘要' not in background(for_prompt('删除摘要后继续 fixture'))
-        assert '对话摘要' in background(for_prompt('重新生成摘要 fixture'))
+        # Re-enabling a deleted summary schedules regeneration after this
+        # request finishes; its own model input cannot contain that future data.
+        assert '对话摘要' not in background(for_prompt('重新生成摘要 fixture'))
         for prompt in ('新对话仅有全局记忆 fixture','重启后的偏好确认'):
             data=background(for_prompt(prompt)); assert len(data['用户手动保存的偏好'])==1 and '对话摘要' not in data
             assert data['用户手动保存的偏好'][0]['content']=='保留的全局偏好：先给结论'

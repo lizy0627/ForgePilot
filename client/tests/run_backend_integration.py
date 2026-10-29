@@ -27,7 +27,8 @@ from forgepilot.presets import BuildConfig
 from forgepilot.process import executable
 from forgepilot.task_service import TaskService
 from forgepilot.sqlite_store import SqliteEventStore
-from forgepilot.chat_service import ChatService
+from forgepilot.chat_service import ChatService, READ_TOOLS as CHAT_READ_TOOLS
+from forgepilot.policy import LEGACY_ALIASES, WRITE_TOOLS, VALIDATOR_TOOLS, FORBIDDEN_TOOLS
 from forgepilot.rag import (RagConfig, RagFileStore, RagIndexCoordinator, RagManager,
                             RagRuntimeSettings)
 from forgepilot.repository import Repository
@@ -450,7 +451,10 @@ def main():
             if run.returncode: return run.returncode
             if args.conversations:
                 for capture in chat_captures:
-                    assert {tool['name'] for tool in capture['tools'] or []}<={'list_files','read_file','search_code'}
+                    advertised = {LEGACY_ALIASES.get(tool['name'], tool['name'])
+                                  for tool in capture['tools'] or []}
+                    assert advertised <= CHAT_READ_TOOLS
+                    assert not advertised & (WRITE_TOOLS.keys() | VALIDATOR_TOOLS.keys() | FORBIDDEN_TOOLS)
                 assert any(m['role']=='tool' and 'return 1' in m['content'] for c in chat_captures for m in c['messages'])
                 assert chat_captures[0]['tools'] is None
                 (output/'actual-chat-requests.json').write_text(json.dumps(chat_captures,ensure_ascii=False,indent=2),encoding='utf-8')

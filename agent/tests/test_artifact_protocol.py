@@ -5,13 +5,13 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from forgepilot.artifacts import (
-    AcceptanceCriterion, AllowedScope, ArtifactRelationshipError, ChangeSet, ChangedFile,
+    AcceptanceCriterion, AllowedScope, ArtifactNotFoundError, ArtifactRelationshipError, ChangeSet, ChangedFile,
     CommandResult, CriterionReview, DataPolicy, DeliveryBundle, EvidenceBundle, EvidenceItem,
     ExecutionPlan, InMemoryArtifactStore, PlanStep, RepositorySpec, ReviewReport, TaskProblem,
     TaskSpec, TestPolicy as ArtifactTestPolicy, UnsupportedSchemaVersion, ValidationReport, canonical_json_bytes,
-    content_sha256, create_artifact, validate_artifact, validate_plan_coverage,
+    content_sha256, create_artifact, validate_artifact, validate_plan_coverage, validate_relationships,
 )
-from forgepilot.artifacts.schemas import generated_schemas, schema_drift
+from forgepilot.artifacts.schemas import export_schemas, generated_schemas, schema_drift
 
 TASK_ID = "10000000-0000-4000-a000-000000000001"
 TASK_SPEC_ID = "10000000-0000-4000-a000-000000000002"
@@ -244,3 +244,92 @@ def test_v1_json_round_trip_remains_compatible_and_schemas_do_not_drift():
     restored = validate_artifact(artifact.model_dump_json())
     assert restored == artifact
     assert schema_drift() == ()
+
+
+def test_artifact_relationships_reject_cross_task_and_unbound_declared_parents():
+    spec = create_artifact(task_id=TASK_ID, artifact_id=TASK_SPEC_ID,
+                           producer="orchestrator.v1", producer_node="spec", content=task_spec())
+    other_task_spec = create_artifact(task_id="20000000-0000-4000-a000-000000000002",
+                                      producer="orchestrator.v1", producer_node="spec", content=task_spec())
+    plan_artifact = create_artifact(task_id=TASK_ID, artifact_id=PLAN_ID,
+                                    producer="orchestrator.v1", producer_node="plan",
+                                    parent_artifact_ids=(TASK_SPEC_ID,), content=plan())
+    with pytest.raises(ArtifactRelationshipError, match="same task"):
+        validate_relationships(plan_artifact, (other_task_spec,))
+    with pytest.raises(ArtifactRelationshipError, match="declared TaskSpec"):
+        validate_relationships(plan_artifact, ())
+    wrong_spec = create_artifact(task_id=TASK_ID, producer="orchestrator.v1",
+                                 producer_node="spec", content=task_spec())
+    with pytest.raises(ArtifactRelationshipError, match="declared TaskSpec"):
+        validate_relationships(plan_artifact, (wrong_spec,))
+
+    store = InMemoryArtifactStore()
+    store.put(spec)
+    missing_parent = create_artifact(task_id=TASK_ID, producer="orchestrator.v1",
+                                     producer_node="plan", parent_artifact_ids=(PLAN_ID,),
+                                     content=plan())
+    with pytest.raises(ArtifactNotFoundError):
+        store.put(missing_parent)
+    assert not store.is_referenced(TASK_SPEC_ID)
+
+
+def test_review_cannot_omit_an_acceptance_criterion_from_its_task_spec():
+    spec = create_artifact(task_id=TASK_ID, artifact_id=TASK_SPEC_ID,
+                           producer="orchestrator.v1", producer_node="spec", content=task_spec())
+    review = all_contents()[5]
+    incomplete = review.model_copy(update={"acceptance_criteria": review.acceptance_criteria[:1]})
+    artifact = create_artifact(task_id=TASK_ID, producer="reviewer.v1",
+                               producer_node="review", parent_artifact_ids=(TASK_SPEC_ID,),
+                               content=incomplete)
+    with pytest.raises(ArtifactRelationshipError, match="criterion coverage"):
+        validate_relationships(artifact, (spec,))
+
+
+@pytest.mark.parametrize("bad_step,bad_criterion,expected", [
+    ("STEP-9", "AC-1", "unknown plan step"),
+    ("STEP-1", "AC-9", "unknown acceptance criterion"),
+])
+def test_change_set_cannot_claim_work_outside_approved_plan(bad_step, bad_criterion, expected):
+    approved_plan = create_artifact(task_id=TASK_ID, artifact_id=PLAN_ID,
+                                    producer="orchestrator.v1", producer_node="plan", content=plan())
+    original = all_contents()[3]
+    changed_file = original.files[0].model_copy(update={
+        "plan_step_ids": (bad_step,), "acceptance_criteria_ids": (bad_criterion,),
+    })
+    changed = original.model_copy(update={"files": (changed_file,)})
+    artifact = create_artifact(task_id=TASK_ID, producer="implementer.v1",
+                               producer_node="implement", parent_artifact_ids=(PLAN_ID,), content=changed)
+    with pytest.raises(ArtifactRelationshipError, match=expected):
+        validate_relationships(artifact, (approved_plan,))
+
+
+def test_delivery_requires_exact_change_validation_and_review_parent_types():
+    contents = all_contents()
+    parents = [create_artifact(task_id=TASK_ID, artifact_id=artifact_id,
+                               producer="orchestrator.v1", producer_node="parent", content=content)
+               for artifact_id, content in ((CHANGE_ID, contents[3]),
+                                            (VALIDATION_ID, contents[4]),
+                                            (REVIEW_ID, contents[5]))]
+    delivery = create_artifact(task_id=TASK_ID, producer="orchestrator.v1",
+                               producer_node="delivery",
+                               parent_artifact_ids=(CHANGE_ID, VALIDATION_ID, REVIEW_ID),
+                               content=contents[6])
+    assert validate_relationships(delivery, parents) == tuple(parents)
+    with pytest.raises(ArtifactRelationshipError, match="all declared reports"):
+        validate_relationships(delivery, parents[:2])
+    wrong_type = create_artifact(task_id=TASK_ID, artifact_id=REVIEW_ID,
+                                 producer="orchestrator.v1", producer_node="parent", content=contents[1])
+    with pytest.raises(ArtifactRelationshipError, match="parent type"):
+        validate_relationships(delivery, (*parents[:2], wrong_type))
+
+
+def test_schema_drift_reports_missing_modified_unexpected_and_manifest_changes(tmp_path):
+    export_schemas(tmp_path)
+    assert schema_drift(tmp_path) == ()
+    names = sorted(generated_schemas())
+    (tmp_path / names[0]).unlink()
+    (tmp_path / names[1]).write_text("{}\n", encoding="utf-8")
+    (tmp_path / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text("{}\n", encoding="utf-8")
+    assert schema_drift(tmp_path) == (
+        f"changed:{names[1]}", "changed:manifest.json", f"missing:{names[0]}", "unexpected:unexpected.json")

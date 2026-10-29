@@ -68,6 +68,7 @@ class WorkbenchModelTests : public QObject {
 private slots:
     void missionRowsPreserveRevisionAndNotify();
     void graphRolesAndUpdates();
+    void parallelAnalystsAndJoinExposeOnlyActiveAgents();
     void graphRecoveryActions();
     void graphApprovalActions();
     void malformedAndLateSnapshotsAreAtomic();
@@ -128,6 +129,54 @@ void WorkbenchModelTests::graphRolesAndUpdates()
     QCOMPARE(model.count(), 0);
     QCOMPARE(model.revision(), 0);
     QVERIFY(model.taskId().isEmpty());
+}
+
+void WorkbenchModelTests::parallelAnalystsAndJoinExposeOnlyActiveAgents()
+{
+    GraphModel model;
+    QAbstractItemModelTester tester(&model, QAbstractItemModelTester::FailureReportingMode::QtTest);
+    auto snapshot = graph(20);
+    auto definition = snapshot.value("definition").toObject();
+    auto analystA = definition.value("nodes").toArray().first().toObject();
+    analystA["node_id"] = "root_cause";
+    analystA["agent_id"] = "root-cause-analyst.v1";
+    auto analystB = analystA;
+    analystB["node_id"] = "impact";
+    analystB["agent_id"] = "impact-analyst.v1";
+    auto join = analystA;
+    join["node_id"] = "join";
+    join["node_type"] = "join";
+    join["handler"] = "join";
+    join["agent_id"] = QJsonValue::Null;
+    join["dependencies"] = QJsonArray{"root_cause", "impact"};
+    definition["nodes"] = QJsonArray{analystA, analystB, join};
+    snapshot["definition"] = definition;
+    auto first = snapshot.value("nodes").toArray().first().toObject();
+    first["node_id"] = "root_cause";
+    auto second = first;
+    second["node_id"] = "impact";
+    auto joinState = first;
+    joinState["node_id"] = "join";
+    joinState["node_type"] = "join";
+    joinState["status"] = "pending";
+    snapshot["nodes"] = QJsonArray{first, second, joinState};
+    model.setSnapshot(snapshot);
+    QCOMPARE(model.count(), 3);
+    QCOMPARE(model.currentAgents(), (QStringList{"root-cause-analyst.v1", "impact-analyst.v1"}));
+    QCOMPARE(model.get(1).value("currentAgent").toString(), "impact-analyst.v1");
+    QCOMPARE(model.get(2).value("dependencies").toList(), (QVariantList{"root_cause", "impact"}));
+    QVERIFY(model.get(2).value("currentAgent").toString().isEmpty());
+
+    snapshot["current_revision"] = 21;
+    first["status"] = "succeeded";
+    second["status"] = "succeeded";
+    joinState["status"] = "running";
+    snapshot["nodes"] = QJsonArray{first, second, joinState};
+    model.setSnapshot(snapshot);
+    QCOMPARE(model.revision(), 21);
+    QVERIFY(model.currentAgents().isEmpty());
+    QVERIFY(model.get(0).value("currentAgent").toString().isEmpty());
+    QCOMPARE(model.get(2).value("status").toString(), "running");
 }
 
 void WorkbenchModelTests::graphRecoveryActions()

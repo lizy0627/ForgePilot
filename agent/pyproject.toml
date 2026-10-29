@@ -20,6 +20,8 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
+    "coverage==7.17.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff==0.14.6",
 ]

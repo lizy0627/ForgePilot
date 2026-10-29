@@ -1,18 +1,25 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main, 'release/**']
+    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  windows-agent:
-    name: Windows / Python and protocol
+  windows:
+    name: Windows / ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 240
+    env:
+      UV_PYTHON_DOWNLOADS: never
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}\agent.venv
     steps:
       - name: Checkout clean repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -30,76 +37,124 @@ jobs:
         shell: pwsh
         run: python -m pip install --disable-pip-version-check uv==0.12.15
 
-      - name: Install agent from lock file
-        shell: cmd
-        run: scripts\Setup-Agent.cmd
-
-      - name: Verify environment location and lock file
+      - name: Create locked isolated agent environment
         shell: pwsh
         run: |
-          if (-not (Test-Path -LiteralPath 'agent.venv\Scripts\python.exe' -PathType Leaf)) {
-            throw 'Root agent.venv was not created.'
-          }
-          if (Test-Path -LiteralPath 'agent\.venv') {
-            throw 'Unsupported agent/.venv was created.'
-          }
+          if (Test-Path -LiteralPath scripts/local-env.cmd) { throw 'CI must not read personal local-env.cmd' }
+          if (Test-Path -LiteralPath agent/.venv) { throw 'Unexpected agent/.venv in clean checkout' }
+          $python = (Get-Command python.exe -CommandType Application).Source
           Push-Location agent
-          try { uv lock --check } finally { Pop-Location }
-          git diff --exit-code -- agent/uv.lock
+          try { uv sync --locked --python $python } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw 'Locked agent setup failed' }
+          if (-not (Test-Path -LiteralPath agent.venv/Scripts/python.exe)) { throw 'Root agent.venv is missing' }
 
-      - name: Compile agent sources
-        shell: cmd
-        run: agent.venv\Scripts\python.exe -m compileall -q agent
-
-      - name: Run offline core agent tests
+      - name: Python lint and static checks
         shell: pwsh
         run: |
-          & .\agent.venv\Scripts\python.exe -m pytest -q `
-            -k 'not test_stop_cancels_startup_before_window_and_waits_for_both_workers and not test_mcp_budget_survives_real_build_failure_and_repair' `
-            agent/tests/test_environment.py `
-            agent/tests/test_security.py `
-            agent/tests/test_llm.py `
-            agent/tests/test_api.py `
-            agent/tests/test_conversations.py `
-            agent/tests/test_desktop_launcher.py `
-            agent/tests/test_mcp.py `
-            agent/tests/test_mcp_api.py `
-            agent/tests/test_mcp_generic.py `
-            agent/tests/test_mcp_http.py `
-            agent/tests/test_mcp_runtime.py `
-            agent/tests/test_mcp_service.py
+          & ./agent.venv/Scripts/python.exe -m compileall -q agent scripts eval
+          if ($LASTEXITCODE -ne 0) { throw 'Python compileall failed' }
+          & ./agent.venv/Scripts/ruff.exe check --target-version py312 --select E9,F63,F7,F82 agent/forgepilot agent/tests scripts eval
+          if ($LASTEXITCODE -ne 0) { throw 'Ruff static check failed' }
 
-      - name: Run workspace, Git safety and recovery tests
+      - name: Python tests / PR fast set
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: ./scripts/ci-python-tests.ps1 -Fast
+
+      - name: Python tests / main and release full set
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: ./scripts/ci-python-tests.ps1 -Full
+
+      - name: Offline retrieval evaluation / main and release
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
-          $workspaceTests = Get-ChildItem -Path `
-            'agent/tests/test_*workspace*.py', `
-            'agent/tests/test_recovery*.py', `
-            'agent/tests/test_artifact_recovery.py', `
-            'agent/tests/test_security.py' -File |
-            Sort-Object FullName -Unique | ForEach-Object { $_.FullName }
-          & .\agent.venv\Scripts\python.exe -m pytest -q @workspaceTests
+          foreach ($name in @(
+            'FORGEPILOT_API_KEY','FORGEPILOT_BASE_URL','FORGEPILOT_MODEL_CONFIG',
+            'FORGEPILOT_MCP_CONFIG','FORGEPILOT_QDRANT_URL',
+            'FORGEPILOT_EMBEDDING_API_KEY','FORGEPILOT_EMBEDDING_BASE_URL',
+            'FORGEPILOT_LOCAL_API_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY',
+            'AZURE_OPENAI_API_KEY','GOOGLE_API_KEY','QDRANT_API_KEY','TAVILY_API_KEY'
+          )) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
+          $env:HTTP_PROXY = 'http://127.0.0.1:9'
+          $env:HTTPS_PROXY = 'http://127.0.0.1:9'
+          $env:ALL_PROXY = 'http://127.0.0.1:9'
+          $env:NO_PROXY = '127.0.0.1,localhost,::1'
+          & ./agent.venv/Scripts/python.exe ./eval/run_retrieval.py --mode all --repository . --json-out ./artifacts/retrieval-eval.json --markdown-out ./artifacts/retrieval-eval.md
+          if ($LASTEXITCODE -ne 0) { throw 'Offline retrieval evaluation failed' }
 
-      - name: Run deterministic code RAG tests and retrieval evaluation
-        shell: pwsh
-        run: |
-          & .\agent.venv\Scripts\python.exe -m pytest -q `
-            agent/tests/test_rag.py `
-            agent/tests/test_rag_adapters.py `
-            agent/tests/test_rag_indexer.py `
-            agent/tests/test_rag_retrieval.py `
-            agent/tests/test_rag_agent.py `
-            agent/tests/test_rag_api.py `
-            agent/tests/test_retrieval_evaluator.py
-          & .\agent.venv\Scripts\python.exe .\eval\run_retrieval.py `
-            --mode all `
-            --repository . `
-            --json-out .\artifacts\retrieval-eval.json `
-            --markdown-out .\artifacts\retrieval-eval.md
-
-      - name: Export and verify protocol contracts
+      - name: Protocol and OpenAPI drift
         shell: pwsh
         run: |
           Push-Location agent
-          try { & ..\agent.venv\Scripts\python.exe -m forgepilot.export_protocol } finally { Pop-Location }
+          try { & ../agent.venv/Scripts/python.exe -m forgepilot.export_protocol } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw 'Protocol export failed' }
           git diff --exit-code -- protocol
+          if ($LASTEXITCODE -ne 0) { throw 'Protocol or OpenAPI drift detected' }
+
+      - name: Install Qt 6.8.3 MSVC x64
+        uses: jurplel/install-qt-action@12aa0336e1e410b3c6dff5e0722547f7a37e8c60 # v4.2.1
+        with:
+          version: '6.8.3'
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Qt configure
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "$env:QT_ROOT_DIR/bin/windeployqt.exe")) { throw 'Qt MSVC kit is missing' }
+          "FORGEPILOT_QT_KIT=$env:QT_ROOT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:FORGEPILOT_QT_KIT = $env:QT_ROOT_DIR
+          Push-Location client
+          try { cmake --preset msvc2022-x64 } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw 'Qt configure failed' }
+
+      - name: Qt build
+        shell: pwsh
+        run: |
+          Push-Location client
+          try { cmake --build --preset release --parallel 4 } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw 'Qt build failed' }
+
+      - name: Qt tests / PR fast set
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          ctest --test-dir client/build -C Release --output-on-failure -R '^client_(mission_api|mission_sse|workbench_models|mission_controller|workbench_qml)$'
+          if ($LASTEXITCODE -ne 0) { throw 'Qt fast tests failed' }
+
+      - name: Qt tests / main and release full set
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          ctest --test-dir client/build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Qt full tests failed' }
+
+      - name: Qt offline HTTP and QML integration / main and release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: ./scripts/ci-qt-integration.ps1
+
+      - name: Deploy client runtime
+        shell: pwsh
+        run: |
+          Push-Location client
+          try { & "$env:FORGEPILOT_QT_KIT/bin/windeployqt.exe" --release --no-translations --qmldir . build/Release/ForgePilotClient.exe } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed' }
+
+      - name: Package smoke / PR fast set
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Package-Windows.ps1 -Version ci-pr -OutputDirectory ./artifacts
+          if ($LASTEXITCODE -ne 0) { throw 'PR package creation failed' }
+          & ./agent.venv/Scripts/python.exe -I ./scripts/release_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw 'Offline backend smoke failed' }
+
+      - name: Package smoke / main and release full set
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Package-Windows.ps1 -Version ci-full -OutputDirectory ./artifacts -Verify
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted package verification failed' }
