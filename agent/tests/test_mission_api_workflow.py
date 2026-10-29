@@ -12,7 +12,11 @@ from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.api import create_app
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.validation import ValidationService
+from forgepilot.workspace_manager import WorkspaceManager
+from test_mission_service import ControlledWorkflow
+from test_workspace_manager import committed_repo
 
 
 def frames(text):
@@ -129,3 +133,78 @@ async def test_http_mission_analysis_approval_validation_delivery_and_sse(tmp_pa
     finally:
         await gateway.aclose()
         await case.gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_recovery_and_delivery_require_fresh_explicit_confirmation(tmp_path, git_exe, committed_repo):
+    """Exercise the UI's preview/confirm boundary over HTTP, including stale state."""
+    workspace = WorkspaceManager(tmp_path / "workspaces", git_executable=git_exe)
+    store = SqliteEventStore(tmp_path / "missions.sqlite3", artifact_root=tmp_path / "artifacts",
+                             workspace_backend=workspace)
+    app = create_app(lambda trace: None, store=store,
+                     mission_factory=lambda events: ControlledWorkflow(events, workspace, pause=True))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+            created = await client.post("/api/v2/missions", json={
+                "repository_path": str(committed_repo), "request": "Fix the worker", "task_type": "bug_fix"})
+            assert created.status_code == 202, created.text
+            path = f"/api/v2/missions/{created.json()['task_id']}"
+            waiting = await poll(client, path, {"awaiting_human"})
+            assert waiting["review"] is not None
+            review = waiting["review"]
+            artifacts = (await client.get(path + "/artifacts")).json()["items"]
+            assert {item["artifact_type"] for item in artifacts} == {"TaskSpec", "ExecutionPlan"}
+            assert review["task_spec_artifact_id"] in {item["artifact_id"] for item in artifacts}
+            assert review["plan_artifact_id"] in {item["artifact_id"] for item in artifacts}
+            approval = {"expected_revision": waiting["current_revision"], "decision": "approved",
+                        **{field: review[field] for field in ("task_spec_hash", "plan_hash", "scope_hash")}}
+            stale = await client.post(path + "/approvals", json={**approval, "expected_revision": approval["expected_revision"] - 1})
+            assert stale.status_code == 409 and stale.json()["error"]["code"] == "mission_revision_conflict"
+            assert (await client.get(path)).json()["current_revision"] == waiting["current_revision"]
+            accepted = await client.post(path + "/approvals", json=approval)
+            assert accepted.status_code == 202, accepted.text
+            paused = await poll(client, path, {"retryable"})
+            assert paused["recovery_required"] is False
+            assert (await client.get(path + "/validation")).json()["latest"] is None
+            assert (await client.get(path + "/diff")).json()["patch"] == ""
+
+            recovery = await client.post(path + "/resume", json={"expected_revision": paused["current_revision"]})
+            assert recovery.status_code == 202, recovery.text
+            preview = recovery.json()
+            assert preview["mission"]["recovery_required"] is True
+            assert preview["recovery"]["blocked_reason"] is None
+            assert preview["recovery"]["token"]
+            wrong = await client.post(path + "/resume", json={
+                "expected_revision": preview["mission"]["current_revision"], "recovery_token": "0" * 64})
+            assert wrong.status_code == 409 and wrong.json()["error"]["code"] == "graph_conflict"
+            assert (await client.get(path)).json()["status"] == "retryable"
+            resumed = await client.post(path + "/resume", json={
+                "expected_revision": preview["mission"]["current_revision"],
+                "recovery_token": preview["recovery"]["token"]})
+            assert resumed.status_code == 202, resumed.text
+            completed = await poll(client, path, {"succeeded"})
+            assert completed["recovery_required"] is False
+            assert next(node for node in (await client.get(path + "/graph")).json()["nodes"]
+                        if node["node_id"] == "finish")["attempt"] == 2
+
+            delivery = await client.post(path + "/delivery", json={"expected_revision": completed["current_revision"]})
+            assert delivery.status_code == 200, delivery.text
+            package = delivery.json()
+            assert package["delivery"]["token"]
+            wrong = await client.post(path + "/delivery", json={
+                "expected_revision": package["mission"]["current_revision"],
+                "mode": "abandon", "token": "0" * 64})
+            assert wrong.status_code == 403 and wrong.json()["error"]["code"] == "delivery_approval"
+            assert (await client.get(path)).json()["status"] == "succeeded"
+            delivery = await client.post(path + "/delivery", json={
+                "expected_revision": (await client.get(path)).json()["current_revision"]})
+            assert delivery.status_code == 200, delivery.text
+            package = delivery.json()
+            delivered = await client.post(path + "/delivery", json={
+                "expected_revision": package["mission"]["current_revision"],
+                "mode": "abandon", "token": package["delivery"]["token"]})
+            assert delivered.status_code == 200, delivered.text
+            assert delivered.json()["delivery"]["status"] == "abandoned"
+            stream = frames((await client.get(path + "/events")).text)
+            assert [event["event_type"] for _, event in stream].count("workspace.delivered") == 1
+            assert (await client.get(path + "/events", headers={"Last-Event-ID": stream[-1][0]})).status_code == 204

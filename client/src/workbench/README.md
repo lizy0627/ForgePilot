@@ -1,8 +1,8 @@
-# Qt Mission 数据层
+# Qt Mission 工作台
 
-本阶段只提供 C++ 数据模型、后端控制器和测试挂接。`main.cpp` 将实例暴露为
-`missionController`，尚未实现 Workbench QML 页面。自由聊天、v1 API 和旧
-`TaskController` 保留；聊天历史、记忆或 MCP 配置不会自动进入 Mission 请求。
+`main.cpp` 将 MissionController 作为 `missions` 注入主窗口，
+`client/workbench/` 提供 QML 工作台。自由聊天、v1 API 和旧 `TaskController`
+保留；聊天历史、记忆或 MCP 配置不会自动进入 Mission 请求。
 
 实现前核对了 `docs/development-technical-plan.md` 第 5、20、21 节和实际后端 v2
 模型/路由。原 `AgentApiClient` 仅支持 v1，JSON 检查只覆盖顶层对象；原 `SseClient`
@@ -48,7 +48,7 @@ Graph 的指标来自后端 `NodeResult.metrics`；没有后端结果时为零�
 
 ## 验证入口
 
-- `scripts/Test-Client.cmd -V`：保留既有通信回归，增加 API、SSE、模型与控制器 QtTest。
+- `scripts/Test-Client.cmd -V`：保留既有通信回归，增加 API、SSE、模型、控制器与工作台 QML QtTest。
 - `scripts/Test-ClientIntegration.cmd`：保留聊天/旧任务集成，增加离线真实后端 Mission 场景。
 - `scripts/Test-Agent.cmd`：后端全量测试。
 

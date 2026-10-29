@@ -51,7 +51,12 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/DiffPanel.qml panels/RepositoryPanel.qml panels/TaskHistoryPanel.qml panels/SettingsPanel.qml
     panels/McpSettingsPanel.qml panels/McpServerDialog.qml panels/McpToolsDialog.qml
     panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
-    panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml)
+    panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
+    workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
+    workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
+    workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml
+    workbench/ValidationPanel.qml workbench/ReviewPanel.qml workbench/DeliveryPanel.qml
+    workbench/StateNotice.qml workbench/NodeStatusBadge.qml workbench/WorkbenchUi.js)
 
 # Ship the existing Qt Chinese catalogs inside the executables, independent of OS locale.
 get_target_property(qmake_path Qt6::qmake IMPORTED_LOCATION)
@@ -95,6 +100,20 @@ if(BUILD_TESTING)
     forgepilot_backend_test(ForgePilotMemoryTests tests/tst_memory_backend.cpp)
     forgepilot_backend_test(ForgePilotMcpTests tests/tst_mcp_backend.cpp)
     forgepilot_backend_test(ForgePilotMissionBackendTests tests/tst_mission_backend.cpp)
+    forgepilot_backend_test(ForgePilotWorkbenchQmlTests tests/tst_workbench_qml.cpp)
+    target_compile_definitions(ForgePilotWorkbenchQmlTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    # The GUI test must also run directly from Visual Studio, before the main
+    # application's separate deployment step. Include QtTest and the offscreen
+    # platform plugin used by CTest in its own deployment.
+    get_filename_component(qt_bin_dir "${qmake_path}" DIRECTORY)
+    add_custom_command(TARGET ForgePilotWorkbenchQmlTests POST_BUILD
+        COMMAND "${qt_bin_dir}/windeployqt.exe" --$<IF:$<CONFIG:Debug>,debug,release>
+            --no-translations --qmldir "${CMAKE_CURRENT_SOURCE_DIR}"
+            --include-plugins qoffscreen "$<TARGET_FILE:ForgePilotWorkbenchQmlTests>"
+        COMMENT "Deploying Qt runtime for ForgePilotWorkbenchQmlTests"
+        VERBATIM)
+    add_test(NAME client_workbench_qml COMMAND ForgePilotWorkbenchQmlTests -o "${CMAKE_CURRENT_BINARY_DIR}/workbench_qml-results.txt,txt")
+    set_tests_properties(client_workbench_qml PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 message(STATUS "ForgePilot Qt: ${Qt6_VERSION}")

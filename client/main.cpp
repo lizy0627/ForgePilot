@@ -39,8 +39,7 @@ int main(int argc, char* argv[])
     QObject::connect(&rag, &RagController::useForTasksChanged, &conversations,
                      [&] { conversations.setUseRag(rag.useForTasks()); });
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty("missionController", &missions);
-    engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)}});
+    engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("ForgePilot", "Main");
     return app.exec();

@@ -1,0 +1,62 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import "../panels" as Controls
+import "../panels/Theme.js" as Theme
+import "WorkbenchUi.js" as W
+
+Controls.Panel {
+    id: root
+    required property var mission
+    readonly property var artifact: W.artifact(mission.artifacts, "DeliveryBundle")
+    readonly property var bundle: artifact.content || ({})
+    readonly property var preview: mission.delivery.preview || ({})
+    readonly property var result: mission.delivery.result || ({})
+    property string reviewedMode: ""
+    property string reviewedTarget: ""
+    title: "Delivery · 交付"
+    subtitle: mission.status === "succeeded" ? "可预览交付" : ""
+    objectName: "deliveryPanel"
+    StateNotice { mission: root.mission; hasData: !!root.artifact.artifactId; emptyText: "尚无交付包。"; Layout.fillWidth: true }
+    Label { visible: !!root.bundle.build_test_summary; text: "验证：" + (root.bundle.build_test_summary || ""); Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+    Label { visible: !!root.bundle.reviewer_conclusion; text: "审查：" + (root.bundle.reviewer_conclusion || ""); Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+    Label { visible: !!root.bundle.changed_files; text: "修改文件：" + W.lines(root.bundle.changed_files); Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+    Label { visible: !!root.bundle.risks; text: "残余风险：" + W.lines(root.bundle.risks); color: Theme.warning; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+    Label { visible: !!root.bundle.rollback; text: "回退：" + (root.bundle.rollback || ""); Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+    ComboBox { id: mode; objectName: "missionDeliveryMode"; Layout.fillWidth: true; enabled: !root.mission.delivery.busy && !root.mission.delivery.canConfirm
+        model: ["生成补丁", "生成归档", "保留分支", "压缩合并到目标分支", "放弃隔离工作区"]
+        Accessible.name: "交付方式"
+    }
+    TextField { id: target; objectName: "missionDeliveryTarget"; Layout.fillWidth: true; enabled: !root.mission.delivery.busy && !root.mission.delivery.canConfirm; placeholderText: "目标分支（留空使用默认；仅合并时必填）" }
+    Controls.ActionButton {
+        objectName: "missionDeliveryPreviewButton"; text: "预览交付操作"; Layout.fillWidth: true
+        enabled: root.mission.delivery.canPreview && (root.mission.status === "succeeded" || mode.currentIndex === 4)
+        onClicked: {
+            root.reviewedMode = ["patch", "bundle", "keep_branch", "squash", "abandon"][mode.currentIndex]
+            root.reviewedTarget = target.text.trim()
+            root.mission.delivery.prepare(root.reviewedMode, root.reviewedTarget)
+        }
+    }
+    Label { visible: !!root.preview.token; text: "目标：" + (root.preview.target_branch || root.reviewedTarget || "默认交付目标")
+        + "\n任务提交：" + (root.preview.head_commit || "—") + "\n目标提交：" + (root.preview.target_commit || "—")
+        + "\n目标干净：" + (root.preview.target_clean ? "是" : "否") + " · 验证匹配：" + (root.preview.validated ? "是" : "否")
+        + "\n当前修订：" + root.mission.revision; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
+    Label { visible: !!root.preview.token; text: root.reviewedMode === "abandon" ? "危险：将丢弃任务的隔离工作区；其中未交付的改动将无法从该工作区恢复。"
+        : root.reviewedMode === "squash" ? "危险：将在目标分支 " + (root.preview.target_branch || root.reviewedTarget) + " 创建合并提交，并改变该分支引用。"
+        : root.reviewedMode === "keep_branch" ? "将保留任务分支与提交；请核对预览中的目标分支。"
+        : "将生成交付文件；请核对目标和当前提交。"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: root.reviewedMode === "abandon" || root.reviewedMode === "squash" ? Theme.danger : Theme.warning; textFormat: Text.PlainText }
+    Controls.ActionButton { objectName: "missionDeliveryConfirmButton"; visible: !!root.preview.token; text: "确认执行交付"; danger: root.reviewedMode === "abandon" || root.reviewedMode === "squash"; enabled: root.mission.delivery.canConfirm; onClicked: confirmDialog.open() }
+    Label { visible: !!root.result.mode; text: "交付完成：" + (root.result.mode || "") + "\n目标分支：" + (root.result.target_branch || "—") + "\n提交：" + (root.result.commit || root.result.task_commit || "—") + "\n文件：" + (root.result.patch_path || root.result.bundle_path || "—"); Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: "#268349"; textFormat: Text.PlainText }
+    Label { visible: !!root.mission.delivery.error; text: root.mission.delivery.error; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Theme.danger; textFormat: Text.PlainText }
+    Dialog {
+        id: confirmDialog; title: "确认交付操作"; modal: true; anchors.centerIn: Overlay.overlay; width: 440
+        contentItem: Label { wrapMode: Text.Wrap; textFormat: Text.PlainText
+            text: "任务 " + root.mission.taskId + "，修订 " + root.mission.revision + "。\n方式：" + root.reviewedMode
+                + "\n目标：" + (root.preview.target_branch || root.reviewedTarget || "默认")
+                + "\n" + (root.reviewedMode === "abandon" ? "隔离工作区将被丢弃，未交付改动无法从该工作区恢复。" : root.reviewedMode === "squash" ? "目标分支引用会改变，并创建合并提交。" : "将执行已预览的交付操作。") }
+        footer: DialogButtonBox {
+            Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            Controls.ActionButton { text: "确认交付"; danger: root.reviewedMode === "abandon" || root.reviewedMode === "squash"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.delivery.confirm() }
+        }
+    }
+}

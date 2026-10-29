@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import "panels"
 import "panels/Ui.js" as Ui
 import "panels/Theme.js" as Theme
+import "workbench" as Workbench
 
 ApplicationWindow {
     id: window
@@ -11,9 +12,13 @@ ApplicationWindow {
     required property var conversations
     property var mcp: null
     property var rag: null
+    property var missions: null
     property bool developmentTest: false
     property bool detailsExpanded: false
     property bool sidebarExpanded: true
+    property bool agentMode: false
+    property string conversionRequest: ""
+    property string conversionSource: ""
     property string previousConversationMode: "chat"
     property bool previousHistoryReadOnly: false
     readonly property bool workMode: conversations.mode === "task"
@@ -45,8 +50,25 @@ ApplicationWindow {
             }
         }
     }
+    Rectangle {
+        id: modeBar; objectName: "mainModeBar"
+        visible: !!window.missions
+        anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+        height: 55; color: Theme.panel; border.color: Theme.border; z: 2
+        RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 18; spacing: 8
+            Label { text: "ForgePilot"; font.pixelSize: 17; font.weight: Font.DemiBold; Layout.rightMargin: 22 }
+            ActionButton { objectName: "freeChatModeButton"; text: "自由聊天"; checked: !window.agentMode; Accessible.name: "自由聊天模式"; Accessible.checkable: true; Accessible.checked: checked
+                onClicked: { window.agentMode = false; window.conversations.mode = "chat" } }
+            ActionButton { objectName: "agentWorkbenchModeButton"; text: "Agent 工作台"; checked: window.agentMode; Accessible.name: "Agent 工作台模式"; Accessible.checkable: true; Accessible.checked: checked
+                onClicked: { window.agentMode = true; window.conversations.mode = "chat" } }
+            Item { Layout.fillWidth: true }
+            Label { text: window.agentMode ? "Mission Control" : "只读问答 · 不执行代码修改"; color: Theme.muted; font.pixelSize: 11 }
+        }
+    }
     RowLayout {
-        anchors.fill: parent; spacing: 0
+        visible: !window.agentMode
+        anchors.top: modeBar.visible ? modeBar.bottom : parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; spacing: 0
         Rectangle {
             id: sidebar; objectName: "conversationSidebar"
             visible: window.sidebarShown; Layout.preferredWidth: 224; Layout.fillHeight: true; color: Theme.sidebar
@@ -88,6 +110,7 @@ ApplicationWindow {
                 }
             }
             Rectangle {
+                visible: !window.missions
                 Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 184; Layout.preferredHeight: 44; Layout.bottomMargin: 10
                 color: Theme.raised; radius: 22
                 Row {
@@ -136,6 +159,12 @@ ApplicationWindow {
                     conversations: window.conversations; controller: window.controller
                     Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
                     onOpenWorkDetails: { window.conversations.showActiveTask(); window.detailsExpanded = true }
+                    onConvertToAgentTask: function(selectedText, sourceLabel) {
+                        window.conversionRequest = selectedText
+                        window.conversionSource = sourceLabel + "；仅发送所选文本，需另行指定仓库。"
+                        window.agentMode = true
+                        window.conversations.mode = "chat"
+                    }
                 }
                 Rectangle {
                     objectName: "workDetailsPanel"; visible: window.detailsExpanded
@@ -184,6 +213,18 @@ ApplicationWindow {
                         }
                     }
                 }
+            }
+        }
+    }
+    Loader {
+        active: !!window.missions
+        visible: window.agentMode
+        anchors.top: modeBar.bottom; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
+        sourceComponent: Component {
+            Workbench.WorkbenchPage {
+                mission: window.missions
+                conversionRequest: window.conversionRequest
+                conversionSource: window.conversionSource
             }
         }
     }

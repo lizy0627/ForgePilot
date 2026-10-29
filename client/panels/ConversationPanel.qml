@@ -16,6 +16,7 @@ Item {
     readonly property bool workMode: conversations.mode === "task"
     readonly property real columnWidth: Math.max(240, Math.min(780, width - 48))
     signal openWorkDetails()
+    signal convertToAgentTask(string selectedText, string sourceLabel)
     function chooseProject(url) {
         if (!conversations.conversationId) projectDraft = prompt.text
         conversations.chooseRepository(url)
@@ -104,6 +105,12 @@ Item {
                             selectionColor: Theme.selection; selectedTextColor: Theme.text; font.family: "Microsoft YaHei UI"; font.pixelSize: 15
                         }
                         ActionButton {
+                            visible: row.fromUser && !!row.record.content
+                            text: "转换为 Agent 任务"; flat: true
+                            Accessible.name: "仅将这条消息转换为 Agent 任务"
+                            onClicked: root.convertToAgentTask(row.record.content, "已选择一条用户消息")
+                        }
+                        ActionButton {
                             objectName: "messageMcpToolsButton"; visible: !row.fromUser
                             text: "工具调用与来源"; flat: true
                             onClicked: root.showTools(row.record.request_id)
@@ -171,6 +178,8 @@ Item {
                 }
                 RowLayout {
                     Layout.fillWidth: true; spacing: 8
+                    ActionButton { objectName: "convertDraftToAgentTaskButton"; text: "转为 Agent 任务"; flat: true; visible: !root.workMode && !!prompt.text.trim(); enabled: !root.conversations.busy
+                        onClicked: root.convertToAgentTask(prompt.text.trim(), "已选择当前输入") }
                     ActionButton { text: "＋ 项目"; flat: true; horizontalPadding: 8; visible: !root.workMode && !root.conversations.repositoryPath; enabled: !root.conversations.active && !root.conversations.busy && !root.conversations.retryPending; onClicked: folder.open(); ToolTip.visible: hovered; ToolTip.text: "关联项目后可询问代码" }
                     ComboBox {
                         objectName: "chatToolMode"; visible: !root.workMode; Layout.preferredWidth: 94

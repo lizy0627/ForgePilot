@@ -64,6 +64,7 @@ public:
     Q_INVOKABLE void prepareRecovery();
     Q_INVOKABLE void confirmRecovery();
     Q_INVOKABLE void loadArtifact(const QString &artifactId);
+    Q_INVOKABLE QString localPath(const QUrl &folder) const { return folder.toLocalFile(); }
 signals:
     void baseUrlChanged();
     void missionChanged();
