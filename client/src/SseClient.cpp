@@ -142,6 +142,7 @@ void SseClient::open()
     auto url = Protocol::endpoint(m_base, '/' + m_taskId + "/events");
     if (m_mission) url.setPath("/api/v2/missions/" + m_taskId + "/events");
     QNetworkRequest request(url);
+    JsonHttp::authenticate(request);
     request.setRawHeader("Accept", "text/event-stream");
     if (!m_lastId.isEmpty()) request.setRawHeader("Last-Event-ID", m_lastId.toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);

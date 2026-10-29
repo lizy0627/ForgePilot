@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import socket
 import subprocess
@@ -188,7 +189,7 @@ async def check_model(config, *, transport=None):
 class RedactedLog:
     """Buffer complete lines, including fragmented traceback writes, before redaction."""
     def __init__(self, stream, key):
-        self.stream, self.redactor, self.pending = stream, Redactor((key,)), ''
+        self.stream, self.redactor, self.pending = stream, Redactor((key, os.environ.get('FORGEPILOT_LOCAL_API_TOKEN', ''))), ''
 
     def write(self, value):
         self.pending += value
@@ -239,11 +240,13 @@ def backend(config, job, ready, log):
             kernel.api.CloseHandle(event)
 
 
-def owned_client(job, log, port):
+def owned_client(job, log, port, local_token):
     worker = ROOT / 'agent/forgepilot/_build_worker.py'
     with log.open('wb') as output:
+        client_env = build_environment()
+        client_env['FORGEPILOT_LOCAL_API_TOKEN'] = local_token
         proc = subprocess.Popen([str(PYTHON), '-I', str(worker), job.name], stdin=subprocess.PIPE,
-                                stdout=output, stderr=output, env=build_environment(),
+                                stdout=output, stderr=output, env=client_env,
                                 creationflags=subprocess.CREATE_NO_WINDOW)
     payload = {'command': [str(ROOT / 'client/build/Release/ForgePilotClient.exe'),
                            '--server', f'http://127.0.0.1:{port}'], 'cwd': str(ROOT)}
@@ -320,6 +323,9 @@ def supervise(config, result):
         data = read_config(config)
         if not os.environ.get('FORGEPILOT_API_KEY'):
             raise ValueError('missing_api_key')
+        # A trusted process owner may supply a fresh token (for example an
+        # integration harness); ordinary desktop starts generate one here.
+        local_token = os.environ.get('FORGEPILOT_LOCAL_API_TOKEN') or secrets.token_urlsafe(32)
         if not (ROOT / 'client/build/Release/ForgePilotClient.exe').is_file():
             raise ValueError('client_not_built')
         with socket.socket() as probe:
@@ -334,7 +340,8 @@ def supervise(config, result):
         child = subprocess.Popen([str(PYTHON), '-I', str(SCRIPT), 'backend', '--config', str(config),
                                   '--job', job.name, '--ready', str(ready), '--log', str(run / 'backend.log')],
                                  cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+                                 stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
+                                 env={**os.environ, 'FORGEPILOT_LOCAL_API_TOKEN': local_token})
         state['backend_pid'] = child.pid
         write_json(state_file, state)
         os.environ.pop('FORGEPILOT_API_KEY', None)
@@ -352,7 +359,7 @@ def supervise(config, result):
         # Separate jobs also work when Python's venv redirectors already have distinct
         # parent job hierarchies. A nonempty job cannot cross those hierarchies.
         client_job = ProcessJob()
-        client = owned_client(client_job, run / 'client.log', data['port'])
+        client = owned_client(client_job, run / 'client.log', data['port'], local_token)
         state['client_worker_pid'] = client.pid
         write_json(state_file, state)
         deadline = time.monotonic() + CLIENT_START_TIMEOUT

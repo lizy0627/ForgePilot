@@ -1,6 +1,7 @@
 """Redaction shared by the CLI, in-memory trace and model observations."""
 
 from collections import OrderedDict
+import base64
 import json
 import re
 import sys
@@ -13,6 +14,27 @@ _MAX_CACHE_BYTES = 4 * 1024 * 1024
 _MAX_STREAM_CHARS = 32_768
 _REDACTED = "[REDACTED]"
 
+# These fields must never cross a persistence, event, or API boundary. Keeping
+# the rule here makes nested tool results and JSON-in-text share one policy.
+_SENSITIVE_FIELDS = {
+    "api_key", "apikey", "x_api_key", "authorization", "proxy_authorization",
+    "password", "access_token", "refresh_token", "client_secret", "cookie",
+    "set_cookie", "environment", "env", "env_vars", "environment_variables",
+    "dpapi", "dpapi_blob", "dpapi_plaintext", "decrypted_secret",
+    "reasoning", "reasoning_content", "hidden_reasoning", "chain_of_thought",
+    "hidden_thought", "hidden_thoughts", "thoughts", "hidden_test_source",
+    "hidden_test_sources", "oracle_source", "oracle_code", "full_repository",
+    "repository_contents", "repository_snapshot", "repository_source",
+}
+_SENSITIVE_FIELD_KEYS = {re.sub(r"[^a-z0-9]", "", key) for key in _SENSITIVE_FIELDS}
+
+
+def _sensitive_key(value: str) -> bool:
+    key = re.sub(r"[^a-z0-9]", "", value.lower())
+    return (key in _SENSITIVE_FIELD_KEYS or "dpapi" in key or key.endswith(("apikey", "secret", "password",
+            "credential", "token", "privatekey")) or key.startswith(("hiddenthought",
+            "hiddenreasoning", "chainofthought", "oraclesource", "repositorycontents")))
+
 
 class Redactor:
     def __init__(self, secrets: tuple[str, ...] = ()) -> None:
@@ -20,7 +42,20 @@ class Redactor:
         for secret in secrets:
             if not secret:
                 continue
-            variants.update((secret, quote(secret, safe="")))
+            escaped_url = quote(secret, safe="")
+            variants.update((secret, escaped_url, quote(escaped_url, safe="")))
+            # A known credential can reappear in logs as transport encodings.
+            # Avoid treating short ordinary words as encoded credentials.
+            if len(secret) >= 6:
+                raw = secret.encode("utf-8")
+                variants.update((raw.hex(), raw.hex().upper(),
+                                 base64.b64encode(raw).decode(),
+                                 base64.b64encode(raw).decode().rstrip("="),
+                                 base64.urlsafe_b64encode(raw).decode(),
+                                 base64.urlsafe_b64encode(raw).decode().rstrip("="),
+                                 base64.b64encode(secret.encode("utf-16le")).decode()))
+                if secret.isascii():
+                    variants.add("".join(f"\\u{ord(char):04x}" for char in secret))
             # Tool output can be JSON inside a JSON chat message/trace record.
             for _ in range(3):
                 secret = json.dumps(secret, ensure_ascii=True)[1:-1]
@@ -97,9 +132,8 @@ class Redactor:
             return self.text(value,preserve_cr=preserve_cr)
         if isinstance(value, dict):
             return {
-                self.text(str(k)): "[REDACTED]" if str(k).lower().replace("-", "_") in
-                {"api_key", "apikey", "x_api_key", "authorization", "proxy_authorization", "password",
-                 "access_token", "refresh_token", "client_secret", "cookie", "set_cookie"} else self.data(v,preserve_cr=preserve_cr)
+                self.text(str(k)): "[REDACTED]" if _sensitive_key(str(k))
+                else self.data(v,preserve_cr=preserve_cr)
                 for k, v in value.items()
             }
         if isinstance(value, (list, tuple)):

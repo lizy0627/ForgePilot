@@ -93,6 +93,18 @@ def _identity(path: Path, *, marker: bool = False) -> _RepositoryIdentity:
 
 def _canonical_root(path: str) -> Path:
     try:
+        if not isinstance(path, str) or not path or path.startswith(("\\\\", "//")):
+            raise ValueError()
+        windows = PureWindowsPath(path)
+        parts = path.replace("\\", "/").split("/")
+        if (any(part in {".", ".."} or part.endswith((" ", ".")) for part in parts if part)
+                or ":" in path[len(windows.drive):]
+                or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+            raise ValueError()
+        selected = Path(path).absolute()
+        for ancestor in (selected, *selected.parents):
+            if ancestor.is_symlink() or (ancestor.exists() and is_link(ancestor.lstat())):
+                raise ValueError()
         root = Path(path).resolve(strict=True)
         if not root.is_dir():
             raise OSError()

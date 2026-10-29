@@ -1,10 +1,18 @@
 """Bounded mission diagnostics around the shared model and tool services."""
 import json
+import re
 from uuid import uuid4
 
 from .artifacts.canonical import content_sha256
 from .errors import ForgePilotError
 from .mission_events import append_record_event, is_v2_mission
+from .tools.change_tools import WRITE_TOOLS
+
+
+_FILE_READ_TOOLS = frozenset({"read_file", "repository_read_range", "repository_read_cmake_target"})
+_SAFE_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_AUDIT_DENIAL_CODES = frozenset({"policy_denied", "path_escape", "file_denied",
+    "scope_approval_required", "test_approval_required", "unknown_tool", "invalid_arguments"})
 
 
 def _enabled(events, task_id):
@@ -42,7 +50,15 @@ def validate_tool(events, context, registry, name, arguments, **kwargs):
         return registry.validate_call(name, arguments, **kwargs)
     except ForgePilotError as exc:
         if _enabled(events, context.task_id):
-            _emit(events, context, "security.denied", {"tool": name, "error_code": exc.code})
+            code = exc.code if _SAFE_ERROR_CODE.fullmatch(exc.code) else "tool_denied"
+            safe_tool = name if registry.get(name) is not None else "unknown_tool"
+            events.missions.record_security_event(
+                event_id=str(uuid4()), task_id=context.task_id,
+                event_type="tool_denied", severity="warning",
+                attributes={"code": code if code in _AUDIT_DENIAL_CODES else "other_denial",
+                            "boundary": "tool_validation"},
+            )
+            _emit(events, context, "security.denied", {"tool": safe_tool, "error_code": code})
         raise
 
 
@@ -50,9 +66,13 @@ async def tool_call(events, context, registry, name, arguments):
     result = await registry.execute(name, arguments)
     if _enabled(events, context.task_id):
         # Never publish raw arguments, file contents, tool output or environments.
+        error_code = result.error.split(":", 1)[0] if result.error else None
+        if error_code is not None and not _SAFE_ERROR_CODE.fullmatch(error_code):
+            error_code = "tool_error"
         data = {"tool": name, "arguments_hash": content_sha256(arguments),
                 "success": result.success, "duration_ms": result.duration_ms,
-                "error_code": result.error.split(":", 1)[0] if result.error else None}
+                "error_code": error_code,
+                "operation": "write" if name in WRITE_TOOLS else "read" if name in _FILE_READ_TOOLS else "other"}
         observed_arguments = arguments
         if isinstance(arguments, str) and len(arguments) <= 65_536:
             try:
@@ -64,5 +84,10 @@ async def tool_call(events, context, registry, name, arguments):
         _emit(events, context, "tool.completed", data)
         if not result.success and data["error_code"] in {
                 "policy_denied", "path_escape", "file_denied", "scope_approval_required", "test_approval_required"}:
+            events.missions.record_security_event(
+                event_id=str(uuid4()), task_id=context.task_id,
+                event_type="tool_denied", severity="warning",
+                attributes={"code": data["error_code"], "boundary": "tool_execution"},
+            )
             _emit(events, context, "security.denied", {"tool": name, "error_code": data["error_code"]})
     return result

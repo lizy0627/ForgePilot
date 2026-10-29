@@ -2,11 +2,13 @@
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <functional>
 
 namespace JsonHttp {
 // Strict wire JSON: object root, unique keys, valid UTF-8 and Unicode scalars.
 bool parseStrictObject(const QByteArray &bytes, QJsonObject &object);
+void authenticate(QNetworkRequest &request);
 struct Response {
     QJsonObject body;
     int status;

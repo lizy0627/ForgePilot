@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from inspect import signature
 import json
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
 from .agents.analysis import AnalysisRequest
@@ -52,13 +53,60 @@ class MissionHost:
                 WHERE status NOT IN ('succeeded','failed','cancelled','completed','skipped')
                 AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchone()[0] + len(self._admissions)
 
-    def _workflow(self, task_id):
+    def _selected_mcp_snapshots(self, server_ids, expected_revisions=None):
+        """Resolve exact user-selected task servers before allocating a Worktree."""
+        if not isinstance(server_ids, (list, tuple)) or len(server_ids) > 4:
+            raise ForgePilotError("mcp_selection", "Select at most four MCP servers")
+        try:
+            selected = tuple(str(UUID(value)) for value in server_ids)
+        except (ValueError, TypeError, AttributeError):
+            raise ForgePilotError("mcp_selection", "MCP selection requires server UUIDs") from None
+        if len(selected) != len(set(selected)):
+            raise ForgePilotError("mcp_selection", "Select distinct MCP servers")
+        if selected and self.host.mcp_disabled:
+            raise ForgePilotError("policy_denied", "Work-mode MCP is disabled by application policy")
+        available = {item.server_id: item for item in self.host.mcp_service.snapshots("task")} if selected else {}
+        if any(server_id not in available for server_id in selected):
+            raise ForgePilotError("mcp_selection", "Selected MCP server is not enabled for tasks")
+        snapshots = tuple(available[server_id] for server_id in selected)
+        if any(item.secret_error or not item.config.selected_tools or
+               any(name not in {entry.get("name") for entry in item.catalog
+                                if entry.get("compatible") is True and
+                                entry.get("annotations", {}).get("readOnlyHint") is True}
+                   for name in item.config.selected_tools)
+               for item in snapshots):
+            raise ForgePilotError("mcp_selection", "Selected MCP server is unavailable or not read-only")
+        revisions = tuple(item.revision for item in snapshots)
+        if expected_revisions is not None and tuple(expected_revisions) != revisions:
+            raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection changed; start a new mission")
+        return snapshots
+
+    def _workflow(self, task_id, *, mcp_server_ids=None):
         if task_id not in self._services:
+            if mcp_server_ids is None:
+                metadata = self._metadata(task_id)
+                mcp_server_ids = metadata.get("mcp_server_ids", ())
+                expected_revisions = metadata.get("mcp_server_revisions")
+                if mcp_server_ids and expected_revisions is None:
+                    raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection cannot be restored")
+            else:
+                expected_revisions = None
             if self.factory is None:
                 from .mission_factory import build_mission_workflow
-                workflow = build_mission_workflow(self.host)
+                snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
+                workflow = build_mission_workflow(self.host, mcp_snapshots=snapshots)
+                workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
             else:
-                workflow = self.factory(self.store)
+                if mcp_server_ids:
+                    try:
+                        signature(self.factory).bind(self.store, mcp_snapshots=())
+                    except (TypeError, ValueError):
+                        raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
+                    snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
+                    workflow = self.factory(self.store, mcp_snapshots=snapshots)
+                    workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
+                else:
+                    workflow = self.factory(self.store)
             self._services[task_id] = workflow
         return self._services[task_id]
 
@@ -101,6 +149,10 @@ class MissionHost:
             result.update(review=review, last_event_id=f"{task_id}:{sequence}" if sequence else None,
                           recovery_required=bool(run["recovery_required"]))
             return safe_event_data(self.store.redactor, result)
+
+    def observability(self, task_id):
+        self._metadata(task_id)
+        return self.store.missions.observability(task_id)
 
     def _reconcile_delivery(self, task_id):
         """Complete an outbox intent from WorkspaceManager's durable outcome.
@@ -220,7 +272,7 @@ class MissionHost:
         if fields["orchestration_mode"] != "multi_agent":
             raise ForgePilotError("invalid_mode", "Mission mode must be multi_agent")
         task_id = str(uuid4())
-        workflow = self._workflow(task_id)
+        workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()))
         try:
             await self._create_workspace(workflow.workspace, fields, task_id)
             # Trusted profile selection never accepts executable paths or shell text.
@@ -232,7 +284,8 @@ class MissionHost:
                 request_text = self.store.redactor.text(fields["request"])
             request = AnalysisRequest(request=request_text, repository=RepositorySpec(
                 base_ref=fields["base_ref"], toolchain_profile=profile),
-                data_policy=getattr(workflow, "mission_data_policy", DataPolicy()))
+                data_policy=getattr(workflow, "mission_data_policy", DataPolicy()),
+                language=fields.get("language", "zh-CN"))
             definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request)
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
@@ -245,7 +298,9 @@ class MissionHost:
                     "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
                 self.store._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
                                        (record["workspace_id"], task_id))
-                append_mission_event(self.store, task_id, "task.created", fields, actor="user")
+                append_mission_event(self.store, task_id, "task.created",
+                    {**fields, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))},
+                    actor="user")
                 append_mission_event(self.store, task_id, "workspace.created", {
                     "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
                     "head_commit": record["head_commit"]}, actor="workspace-manager")
@@ -288,6 +343,15 @@ class MissionHost:
                         self.store._db.execute("UPDATE task_graph_runs SET status='failed',finished_at=? WHERE task_id=?", (stamp, task_id))
                         append_mission_event(self.store, task_id, "task.failed", {"error_code": code})
             finally:
+                workflow = self._services.get(task_id)
+                manager = getattr(workflow, "mission_mcp_manager", None)
+                if manager is not None:
+                    try:
+                        await manager.close()
+                    except (Exception, asyncio.CancelledError):
+                        # Closing a selected server cannot mask the durable
+                        # mission result or retain its workflow reference.
+                        pass
                 try:
                     if self.graphs.snapshot(task_id).status in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
                         self._services.pop(task_id, None)
@@ -310,11 +374,19 @@ class MissionHost:
             with self.store._lock:
                 review = workflow.review(task_id)
                 if any(fields[name] != getattr(review, name) for name in ("task_spec_hash", "plan_hash", "scope_hash")):
+                    self.store.missions.record_security_event(event_id=str(uuid4()), task_id=task_id,
+                        event_type="approval_denied", severity="warning",
+                        attributes={"code": "mission_approval_conflict", "boundary": "execution_approval",
+                                    "node_id": "execution_approval"}, publish_event=False)
                     raise _approval_conflict()
                 workflow._check_review(review)
                 requested = self._metadata(task_id)["task_type"]
                 spec = self.store.artifacts.get(review.task_spec_artifact_id)
                 if requested != "auto" and spec.content.task_type != requested:
+                    self.store.missions.record_security_event(event_id=str(uuid4()), task_id=task_id,
+                        event_type="approval_denied", severity="warning",
+                        attributes={"code": "mission_approval_conflict", "boundary": "execution_approval",
+                                    "node_id": "execution_approval"}, publish_event=False)
                     raise ForgePilotError("mission_approval_conflict", "TaskSpec does not match the requested task type")
             if fields["decision"] == "rejected":
                 self.graphs.cancel(task_id, expected_revision=review.revision,
@@ -428,7 +500,13 @@ class MissionHost:
                 with self.store._transaction():
                     append_mission_event(self.store, task_id, "workspace.delivered", {"mode": mode,
                         "result": result}, actor="user")
-            return {"mission": self.get(task_id), "delivery": safe_event_data(self.store.redactor, result)}
+            delivery = safe_event_data(self.store.redactor, result)
+            if isinstance(result, dict) and "token" in result:
+                # This freshly generated one-time approval capability must reach
+                # the user for the next request. It is never persisted or emitted
+                # in mission events; all other response fields remain sanitized.
+                delivery["token"] = result["token"]
+            return {"mission": self.get(task_id), "delivery": delivery}
 
     async def close(self):
         if self.host._loop is not None and not self.host._loop.is_closed():

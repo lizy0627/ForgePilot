@@ -188,6 +188,7 @@ void RagController::openEvents()
     QUrl url(m_base); url.setPath("/api/v1/rag/index/events");
     QUrlQuery query; query.addQueryItem("repository_path", m_repository); url.setQuery(query);
     QNetworkRequest request(url); request.setRawHeader("Accept", "text/event-stream");
+    JsonHttp::authenticate(request);
     if (!m_operationId.isEmpty() && m_revision > 0)
         request.setRawHeader("Last-Event-ID", (m_operationId + ':' + QString::number(m_revision)).toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);

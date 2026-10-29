@@ -1,5 +1,6 @@
 #include "ConversationStreamClient.h"
 #include "Protocol.h"
+#include "JsonHttp.h"
 #include <QJsonDocument>
 #include <QNetworkReply>
 #include <QNetworkProxy>
@@ -87,6 +88,7 @@ void ConversationStreamClient::open()
     QUrl url=m_base;
     url.setPath("/api/v1/conversations/"+m_conversationId+"/requests/"+m_requestId+"/events");
     QNetworkRequest request(url);
+    JsonHttp::authenticate(request);
     request.setRawHeader("Accept","text/event-stream");
     if(!m_lastId.isEmpty()) request.setRawHeader("Last-Event-ID",m_lastId.toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);

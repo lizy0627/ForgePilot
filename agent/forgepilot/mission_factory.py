@@ -4,7 +4,8 @@ from pathlib import Path
 from .errors import ForgePilotError
 
 
-def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed=False):
+def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed=False,
+                           mcp_snapshots=()):
     """Lazy composition: OpenAPI and v1 startup need no graph/model/build tools.
 
     The compatibility TaskService supplies configuration and a non-owning gateway
@@ -14,6 +15,7 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
     from .agents.delivery import DeliveryWorkflow
     from .agents.registry import AgentRegistry
     from .artifacts.models import DataPolicy
+    from .mcp_manager import MCPManager
     from .process import executable
     from .toolchain import ToolchainProfile
     from .trace import MemoryTrace
@@ -59,7 +61,16 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
         make_program=config.make_program if config else None,
         timeout=max(config.configure_timeout, config.build_timeout, config.test_timeout) if config else 300,
         redactor=legacy.redactor)
+    # The host admits exact saved server snapshots. Adapters are handed only to
+    # fresh Analyst registries; all other roles have no MCP tool instance.
+    mcp_manager = MCPManager(tuple(mcp_snapshots), redactor=legacy.redactor,
+        connection_factory=task_host.mcp_service.connection_factory)
+    analysis_kwargs = {"approved_mcp": mcp_manager.adapters(),
+                       "approved_server_ids": tuple(s.server_id for s in mcp_manager.snapshots)}
     workflow = DeliveryWorkflow(events, workspace, gateway, validator=validator,
-                                rg_executable=legacy.rg_executable)
-    workflow.mission_data_policy = DataPolicy(cloud_model_allowed=cloud_model_allowed)
+                                rg_executable=legacy.rg_executable,
+                                analysis_kwargs=analysis_kwargs)
+    workflow.mission_mcp_manager = mcp_manager
+    workflow.mission_data_policy = DataPolicy(cloud_model_allowed=cloud_model_allowed,
+                                             external_mcp_allowed=bool(mcp_snapshots))
     return workflow

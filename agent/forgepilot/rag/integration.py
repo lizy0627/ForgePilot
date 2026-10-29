@@ -12,6 +12,7 @@ from .indexer import RepositoryIndexer
 from .retrieval import RetrievalService
 from .store import RagFileStore
 from .vector_store import QdrantVectorStore
+from ..security import Redactor
 
 
 def repository_id_for(root: Path) -> str:
@@ -31,12 +32,16 @@ class RagManager:
 
     def __init__(self, runtime: RagRuntimeAvailability | RagRuntimeSettings | None,
                  file_store: RagFileStore, *, embedding_provider=None, vector_store=None,
-                 vector_path: str | Path | None = None) -> None:
+                 vector_path: str | Path | None = None,
+                 redactor: Redactor | None = None) -> None:
         settings = runtime.settings if isinstance(runtime, RagRuntimeAvailability) else runtime
         self.config = (settings.config if settings is not None else
                        runtime.config if isinstance(runtime, RagRuntimeAvailability)
                        and runtime.config is not None else RagConfig())
         self.file_store = file_store
+        parent_redactor = redactor or Redactor()
+        self.redactor = (parent_redactor.with_secrets((settings.embedding_api_key,))
+                         if settings is not None else parent_redactor)
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self._active_indexes: set[str] = set()
@@ -72,11 +77,12 @@ class RagManager:
         repository_id = repository_id_for(repository.root)
         indexer = RepositoryIndexer(
             repository_id, repository, self.config, self.embedding_provider,
-            self.vector_store, self.file_store)
+            self.vector_store, self.file_store, redactor=self.redactor)
         retrieval = RetrievalService(
             repository_id, repository, self.config, self.embedding_provider,
             self.vector_store, code_intelligence=code_intelligence,
-            file_store=self.file_store, stale_handler=indexer.schedule_refresh)
+            file_store=self.file_store, stale_handler=indexer.schedule_refresh,
+            redactor=self.redactor)
         return RagRepositoryServices(indexer=indexer, retrieval=retrieval)
 
     def begin_index(self, repository_id: str) -> bool:

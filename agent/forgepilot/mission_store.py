@@ -702,23 +702,143 @@ class MissionRepository:
 
     def record_security_event(self, *, event_id: str, event_type: str, severity: str,
                               attributes: Mapping[str, Any] | None = None,
-                              task_id: str | None = None, occurred_at: str | None = None) -> dict[str, Any]:
-        # Security records retain bounded, redacted attributes, never the triggering payload.
-        from .mission_events import safe_event_data
-        attributes_json = json.dumps(
-            safe_event_data(self.events.redactor, dict(attributes or {})), ensure_ascii=False,
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
-        )
-        if len(attributes_json.encode("utf-8")) > 16_384:
-            raise ForgePilotError("security_event_record", "Security event attributes are too large")
+                              task_id: str | None = None, occurred_at: str | None = None,
+                              publish_event: bool = True) -> dict[str, Any]:
+        # Never copy request payloads, even if the caller passes arbitrary keys.
+        if (event_type not in {"tool_denied", "approval_denied", "permission_denied",
+                "path_denied", "mcp_denied", "api_denied", "artifact_denied", "memory_denied"}
+                or severity not in {"info", "warning", "error", "critical"}):
+            raise ForgePilotError("security_event_record", "Invalid security event classification")
+        if task_id is not None:
+            _identifier(task_id, "task ID")
+        allowed = {"code", "boundary", "path_hash", "decision"}
+        controlled_values = {
+            "code": {"policy_denied", "path_escape", "file_denied", "scope_approval_required",
+                     "test_approval_required", "unknown_tool", "invalid_arguments", "tool_denied",
+                     "tool_error", "mission_approval_conflict", "approval_stale",
+                     "artifact_scope", "unknown_artifact", "mcp_denied", "other_denial"},
+            "boundary": {"tool_validation", "tool_execution", "execution_approval",
+                         "workspace", "mcp", "api", "artifact", "memory"},
+            "decision": {"approved", "rejected", "denied"},
+        }
+        safe_attributes = {}
+        for key, value in (attributes or {}).items():
+            if key not in allowed or not isinstance(value, str):
+                continue
+            if key == "path_hash":
+                if not SHA256_RE.fullmatch(value):
+                    continue
+            elif value not in controlled_values[key]:
+                continue
+            if self.events.redactor.text(value) == value:
+                safe_attributes[key] = value
+        attributes_json = json.dumps(safe_attributes, ensure_ascii=False,
+                                     sort_keys=True, separators=(",", ":"), allow_nan=False)
         return self._insert_record("security_events", "event_id", event_id, {
             "event_id": event_id, "task_id": task_id, "event_type": event_type,
             "severity": severity, "occurred_at": occurred_at or _now(),
             "attributes_json": attributes_json,
-        }, json_field="attributes_json")
+        }, json_field="attributes_json", publish_event=publish_event)
+
+    def observability(self, task_id: str) -> dict[str, Any]:
+        """Return task-bound provenance without model or Artifact payloads."""
+        from .mission_events import safe_event_data
+        from .tools.change_tools import WRITE_TOOLS
+
+        task_id = _identifier(task_id, "task ID")
+        with self.events._lock:
+            db = self.events._db
+            run = db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if run is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            attempts = [dict(row) for row in db.execute("""SELECT node_id,attempt,node_type,agent_id,
+                status,started_at,finished_at,duration_ms,error_code,checkpoint_id,input_artifacts_json
+                FROM task_node_attempts WHERE task_id=? ORDER BY started_at,node_id,attempt""", (task_id,))]
+            models = [dict(row) for row in db.execute("""SELECT call_id,node_id,role,model,
+                prompt_version,input_hash,response_hash,duration_ms,input_tokens,output_tokens,
+                total_tokens,retry_count,fallback_model,error_code,created_at FROM model_calls
+                WHERE task_id=? ORDER BY created_at,call_id""", (task_id,))]
+            event_rows = [dict(row) for row in db.execute("""SELECT event_type,node_id,attempt,
+                payload_json,created_at FROM graph_events WHERE task_id=? AND event_type IN
+                ('tool.completed','node_finished','node_started','node.finished','node.started')
+                ORDER BY sequence""", (task_id,))]
+            artifacts = [dict(row) for row in db.execute("""SELECT artifact_id,artifact_type,
+                producer,producer_node,content_sha256,created_at,size_bytes FROM artifacts
+                WHERE task_id=? ORDER BY created_at,artifact_id""", (task_id,))]
+            approvals = [dict(row) for row in db.execute("""SELECT approval_id,approval_type,
+                status,task_spec_artifact_id,task_spec_hash,plan_artifact_id,plan_hash,
+                scope_hash,approved_by,created_at,invalidated_at,invalidation_reason FROM approvals
+                WHERE task_id=? ORDER BY created_at,approval_id""", (task_id,))]
+            validations = [dict(row) for row in db.execute("""SELECT validation_id,attempt,status,
+                report_artifact_id,started_at,finished_at,duration_ms,error_code FROM validation_runs
+                WHERE task_id=? ORDER BY attempt""", (task_id,))]
+            checkpoints = [dict(row) for row in db.execute("""SELECT checkpoint_id,node_id,attempt,
+                checkpoint_type,commit_hash,created_at FROM checkpoints WHERE task_id=?
+                ORDER BY created_at,checkpoint_id""", (task_id,))]
+            security = [dict(row) for row in db.execute("""SELECT event_id,event_type,severity,
+                occurred_at,attributes_json FROM security_events WHERE task_id=?
+                ORDER BY occurred_at,event_id""", (task_id,))]
+        nodes = []
+        for row in attempts:
+            frozen = json.loads(row.pop("input_artifacts_json") or "[]")
+            row["input_artifact_ids"] = [item[0] for item in frozen]
+            row["executor"] = row["agent_id"] or "orchestrator"
+            nodes.append(row)
+        tools, read_files, modified_files, pauses, repairs = [], set(), set(), [], []
+        pending_repair_reason = None
+        for row in event_rows:
+            payload = safe_event_data(self.events.redactor, json.loads(row["payload_json"]))
+            if row["event_type"] == "tool.completed":
+                item = {key: payload.get(key) for key in ("tool", "operation", "path",
+                    "arguments_hash", "success", "duration_ms", "error_code")}
+                item.update(node_id=row["node_id"], occurred_at=row["created_at"])
+                tools.append(item)
+                path = item["path"]
+                if item["success"] and isinstance(path, str):
+                    if item["tool"] in {"read_file", "repository_read_range", "repository_read_cmake_target"}:
+                        read_files.add(path)
+                    elif item["tool"] in WRITE_TOOLS:
+                        modified_files.add(path)
+            elif row["event_type"] in {"node_finished", "node.finished"}:
+                if payload.get("next_route") == "repair":
+                    pending_repair_reason = ("validation_code_failure" if str(row["node_id"]).startswith("validation")
+                        else "review_blockers" if str(row["node_id"]).startswith("review")
+                        else "node_requested_repair")
+                if payload.get("to") in {"retryable", "awaiting_human"}:
+                    pauses.append({"node_id": row["node_id"], "attempt": row["attempt"],
+                                   "reason": "human_approval_required" if payload["to"] == "awaiting_human"
+                                             else payload.get("failure_kind"),
+                                   "policy_action": payload.get("policy_action"),
+                                   "occurred_at": row["created_at"]})
+            elif row["event_type"] in {"node_started", "node.started"} and str(row["node_id"]).startswith("repair_"):
+                repairs.append({"node_id": row["node_id"], "attempt": row["attempt"],
+                                "reason": pending_repair_reason or "repair_route",
+                                "occurred_at": row["created_at"]})
+                pending_repair_reason = None
+        for artifact in artifacts:
+            if artifact["artifact_type"] == "ChangeSet":
+                change = self.events.artifacts.get(artifact["artifact_id"])
+                modified_files.update(item.path for item in change.content.files)
+            elif artifact["artifact_type"] == "EvidenceBundle":
+                evidence = self.events.artifacts.get(artifact["artifact_id"])
+                read_files.update(item.path for item in evidence.content.items
+                                  if item.path and item.source in {"local_repository", "rag", "tool_output"})
+        validation_commit = next((item["commit_hash"] for item in reversed(checkpoints)
+                                  if item["checkpoint_type"] == "validated" and item["commit_hash"]), None)
+        for item in security:
+            item["attributes"] = json.loads(item.pop("attributes_json"))
+        return safe_event_data(self.events.redactor, {
+            "task_id": task_id, "status": run["status"], "nodes": nodes,
+            "model_calls": models, "tools": tools, "artifacts": artifacts,
+            "files_read": sorted(read_files), "files_modified": sorted(modified_files),
+            "pauses": pauses, "repairs": repairs, "approvals": approvals,
+            "validations": validations, "validation_commit": validation_commit,
+            "security_events": security,
+        })
 
     def _insert_record(self, table: str, key_name: str, key_value: str,
-                       values: dict[str, Any], *, json_field: str | None = None) -> dict[str, Any]:
+                       values: dict[str, Any], *, json_field: str | None = None,
+                       publish_event: bool = True) -> dict[str, Any]:
         allowed = {"checkpoints", "workspace_records", "validation_runs", "security_events"}
         if table not in allowed:
             raise AssertionError("unsupported repository table")
@@ -734,7 +854,7 @@ class MissionRepository:
                 event_types = {"workspace_records": "workspace.created",
                                "validation_runs": "validation.completed",
                                "security_events": "security.recorded"}
-                if table in event_types:
+                if publish_event and table in event_types:
                     attributes = dict(values)
                     if json_field:
                         attributes[json_field.removesuffix("_json")] = json.loads(attributes.pop(json_field))

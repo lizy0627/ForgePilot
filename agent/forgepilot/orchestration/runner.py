@@ -385,7 +385,9 @@ class GraphRunner:
                 task_id, state.node_id,
                 expected_revision=current.revision if expected_revision is None else expected_revision,
                 source=NodeStatus.READY, target=NodeStatus.RUNNING,
-                event_type="node_started", payload={"idempotency_key": key},
+                event_type="node_started", payload={"idempotency_key": key,
+                    "input_artifact_ids": list(artifact_ids),
+                    "agent_definition_hash": definition.effective_agent_definition_hash},
                 attempt=attempt, idempotency_key=key, input_hash=input_hash,
                 agent_id=definition.agent_id,
                 input_artifacts=tuple(zip(artifact_ids, hashes)),
@@ -468,7 +470,9 @@ class GraphRunner:
             "idempotency_key": key,
             "policy_action": policy_action.value if policy_action else None,
             "failure_kind": result.failure_kind.value if result.failure_kind else None,
+            "next_route": result.next_route,
             "metrics": result.to_dict()["metrics"],
+            "output_artifact_ids": list(result.output_artifact_ids),
         }
         with self.store.events_store._lock:
             current = self.store.snapshot(task_id)

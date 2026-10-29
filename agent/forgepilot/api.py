@@ -2,10 +2,12 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import hmac
 import json
 import sqlite3
 from time import monotonic
 from urllib.parse import urlsplit
+from starlette.datastructures import Headers
 
 from fastapi import Body, FastAPI, Header, Request, Query
 from fastapi.exceptions import RequestValidationError
@@ -26,6 +28,80 @@ from .mcp_api import MCPRequestGuard, register_mcp_routes
 from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes
 from .mission_host import MissionHost
 from .mission_events import MissionEventStream
+
+MAX_API_BODY = 1_048_576
+MAX_API_TARGET = 8_192
+
+
+class APIRequestGuard:
+    """Bound legacy request bodies before FastAPI or an endpoint can parse them."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope["type"] != "http" or not scope["path"].startswith("/api/v1/")
+                or scope["path"].startswith("/api/v1/mcp/")
+                or scope["method"] not in {"POST", "PUT", "PATCH", "DELETE"}):
+            return await self.app(scope, receive, send)
+        headers = Headers(scope=scope)
+        lengths = headers.getlist("content-length")
+        if lengths and (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal()):
+            return await error_response("invalid_request", "Invalid request length", 400)(scope, receive, send)
+        if lengths and int(lengths[0]) > MAX_API_BODY:
+            return await error_response("request_too_large", "Request exceeds 1 MiB", 413)(scope, receive, send)
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > MAX_API_BODY:
+                return await error_response("request_too_large", "Request exceeds 1 MiB", 413)(scope, receive, send)
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body, delivered = b"".join(chunks), False
+
+        async def replay():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
+class SafeExceptionGuard:
+    """Contain unexpected ASGI failures before Uvicorn can log raw tracebacks."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        started = False
+        completed = False
+
+        async def tracked_send(message):
+            nonlocal started, completed
+            if message["type"] == "http.response.start":
+                started = True
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                completed = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracked_send)
+        except Exception:
+            # After a streaming response starts, finish its current body. A
+            # second HTTP status is illegal; the SSE client can reconnect.
+            if not started:
+                await error_response("api_internal", "Request failed unexpectedly; inspect task status", 500)(
+                    scope, receive, send)
+            elif not completed:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 ERROR_STATUS = {
     "step_limit": 409,
@@ -68,7 +144,9 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
                model_client_closer=None, rag_coordinator=None, mission_factory=None,
-               mission_stream_max_subscribers=8):
+               mission_stream_max_subscribers=8, api_token=None):
+    if api_token is not None and (not isinstance(api_token, str) or not api_token or not api_token.isascii()):
+        raise ValueError("Local API token must be nonempty ASCII")
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
                     legacy_mcp_config=legacy_mcp_config, rag_coordinator=rag_coordinator)
     conversations = ConversationHost(host,chat_factory,summary_factory=summary_factory,
@@ -96,11 +174,15 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     app.state.conversation_host = conversations
     app.state.mission_host = missions
     app.state.mission_events = mission_streams
+    app.add_middleware(APIRequestGuard)
     app.add_middleware(MCPRequestGuard, error=error_response)
     app.add_middleware(MissionRequestGuard, error=error_response)
 
     @app.middleware("http")
     async def local_origin(request, call_next):
+        if (len(request.scope.get("raw_path", b"")) +
+                len(request.scope.get("query_string", b"")) > MAX_API_TARGET):
+            return error_response("request_too_large", "Request target exceeds 8 KiB", 414)
         authority = request.headers.get("host", "")
         try:
             parsed = urlsplit("http://" + authority)
@@ -114,15 +196,23 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         origin = request.headers.get("origin")
         if origin and origin != f"{request.url.scheme}://{authority}":
             return error_response("origin_not_allowed", "Cross-origin access is not enabled", 403)
+        if api_token is not None and request.url.path.startswith("/api/"):
+            supplied = request.headers.getlist("x-forgepilot-token")
+            if (len(supplied) != 1 or not supplied[0].isascii()
+                    or not hmac.compare_digest(supplied[0], api_token)):
+                return error_response("unauthorized", "Local API token is required", 401)
         return await call_next(request)
+
+    # add_middleware prepends. Keep this outermost among user middleware so
+    # Starlette's ServerErrorMiddleware never receives the original exception.
+    app.add_middleware(SafeExceptionGuard)
 
     @app.exception_handler(ForgePilotError)
     async def service_error(request, exc):
         status = ERROR_STATUS.get(exc.code, 422)
-        message = exc.message
+        message = host.store.redactor.text(exc.message)
         if request.url.path.startswith("/api/v2/"):
             status = V2_ERROR_STATUS.get(exc.code, status)
-            message = host.store.redactor.text(message)
         return error_response(exc.code, message, status,
                               task_id=getattr(exc, "task_id", None))
 
@@ -138,8 +228,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         if request.url.path.startswith("/api/v1/mcp/"):
             # Even field names/loc entries may be an attacker-supplied secret.
             return error_response("invalid_request", "Request does not match the MCP management schema", 422)
-        return error_response("invalid_request", "Request does not match the v1 schema", 422,
-            details=[{"field": ".".join(map(str, e["loc"])), "type": e["type"]} for e in exc.errors()])
+        return error_response("invalid_request", "Request does not match the v1 schema", 422)
 
     @app.exception_handler(HTTPException)
     async def http_error(request, exc):

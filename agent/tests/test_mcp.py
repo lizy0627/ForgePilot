@@ -422,7 +422,9 @@ async def test_discovery_request_timeout_closes_and_does_not_cancel_initialize(t
     clients = []
     def factory(value):
         client = MCPClient(value); clients.append(client); return client
-    adapter = MCPToolAdapter(config(tmp_path, mode, 0.3), client_factory=factory)
+    # The timeout must exceed Windows process launch and initialization under
+    # the full suite's load; the peer still hangs at the selected request.
+    adapter = MCPToolAdapter(config(tmp_path, mode, 5.0), client_factory=factory)
     with pytest.raises(ForgePilotError, match="mcp_timeout"):
         await adapter.register(ToolRegistry())
     closed(clients[0])

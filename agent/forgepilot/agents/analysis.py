@@ -201,8 +201,10 @@ class AnalysisService:
         return self._budgets[key]
 
     def _inputs(self, context, content_type):
-        return [self.events.artifacts.get(item) for item in context.input_artifact_ids
-                if isinstance(self.events.artifacts.get(item).content, content_type)]
+        artifacts = [self.events.artifacts.get(item) for item in context.input_artifact_ids]
+        if any(item.task_id != context.task_id for item in artifacts):
+            raise ForgePilotError("artifact_scope", "Analysis inputs belong to another task")
+        return [item for item in artifacts if isinstance(item.content, content_type)]
 
     async def _agent(self, context):
         stage = context.node.node_id

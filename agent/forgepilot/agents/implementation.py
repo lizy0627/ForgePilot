@@ -57,7 +57,7 @@ class ImplementationService:
     """
 
     def __init__(self, events, workspace_manager, gateway, *, limits=None,
-                 rg_executable="rg", retrieval_factory=None):
+                 rg_executable="rg", retrieval_factory=None, analysis_kwargs=None):
         if not isinstance(workspace_manager, WorkspaceManager):
             raise ForgePilotError("workspace_unavailable", "Implementation requires WorkspaceManager")
         self.events, self.workspace, self.gateway = events, workspace_manager, gateway
@@ -67,6 +67,9 @@ class ImplementationService:
             self.definition.agent_id, limits)
         gateway.router.validate_agent(self.definition)
         self.rg_executable, self.retrieval_factory = rg_executable, retrieval_factory
+        # Immutable, host-selected analysis grants. Neither a model nor an
+        # Artifact may supply these arguments.
+        self.analysis_kwargs = dict(analysis_kwargs or {})
         self.reviews = AnalysisReviewStore(events)
         self.runner = GraphRunner(events, HandlerRegistry({
             "execution_approval": self._gate, "implementer.v1": self._handler,
@@ -99,7 +102,8 @@ class ImplementationService:
             if task_id not in self._analysis_services:
                 from .analysis import AnalysisService
                 self._analysis_services[task_id] = AnalysisService(
-                    self.events, self._repository(task_id), self.gateway)
+                    self.events, self._repository(task_id), self.gateway,
+                    **self.analysis_kwargs)
             analysis = self._analysis_services[task_id]
         analysis._loop = self._loop
         return analysis

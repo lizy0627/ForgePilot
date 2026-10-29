@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from forgepilot.errors import ForgePilotError
-from forgepilot.rag import RagConfig, RagFileStore, RepositoryIndexer
+from forgepilot.rag import RagConfig, RagFileStore, RagManager, RagRuntimeSettings, RepositoryIndexer
 from forgepilot.repository import Repository
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.security import Redactor
 
 
 class RecordingEmbeddings:
@@ -83,6 +84,77 @@ def indexer(root, repository_id, events, embeddings, vectors):
         vectors,
         RagFileStore(events),
     )
+
+
+@pytest.mark.asyncio
+async def test_index_redacts_credentials_before_embedding_and_vector_storage(tmp_path):
+    secret = "fixture-index-credential"
+    (tmp_path / "a.py").write_text(f"API_KEY = '{secret}'\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    try:
+        subject = RepositoryIndexer("repository-a", repository(tmp_path), config(),
+            embeddings, vectors, RagFileStore(events), redactor=Redactor((secret,)))
+        result = await subject.index_repository()
+        assert result.status == "ready"
+        assert secret not in str(embeddings.calls)
+        assert secret not in "\n".join(chunk.content for chunks in vectors.files.values() for chunk in chunks)
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_inherits_model_credential_redactor_for_index_and_query(tmp_path):
+    model_key = "model-provider-opaque-credential-47"
+    embedding_key = "embedding-provider-opaque-credential-91"
+    (tmp_path / "a.py").write_text(
+        f"MODEL_KEY = '{model_key}'\nEMBEDDING_KEY = '{embedding_key}'\n", encoding="utf-8")
+    shared = Redactor((model_key,))
+    events = SqliteEventStore(redactor=shared)
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    queries = []
+
+    async def embed_query(text):
+        queries.append(text)
+        return [1.0, 0.0]
+
+    async def search(*args, **kwargs):
+        return []
+
+    embeddings.embed_query = embed_query
+    vectors.search = search
+    try:
+        manager = RagManager(RagRuntimeSettings(config=config(), embedding_api_key=embedding_key),
+            RagFileStore(events), embedding_provider=embeddings, vector_store=vectors,
+            redactor=shared)
+        services = manager.for_repository(repository(tmp_path))
+        assert (await services.indexer.index_repository()).status == "ready"
+        await services.retrieval.retrieve(f"Find {model_key} and {embedding_key}")
+        for secret in (model_key, embedding_key):
+            assert secret not in str(embeddings.calls)
+            assert secret not in str(queries)
+            assert secret not in "\n".join(chunk.content for chunks in vectors.files.values() for chunk in chunks)
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_index_excludes_secret_filename_and_scrubs_symbol_metadata(tmp_path):
+    secret = "opaqueProviderValue8473625"
+    (tmp_path / (secret + ".py")).write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "safe.py").write_text(f"def {secret}():\n    return 1\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    try:
+        subject = RepositoryIndexer("repository-a", repository(tmp_path), config(),
+            embeddings, vectors, RagFileStore(events), redactor=Redactor((secret,)))
+        result = await subject.index_repository()
+        assert result.status == "ready" and result.total_files == 1
+        assert secret not in str(embeddings.calls)
+        assert secret not in str(vectors.files)
+        assert all(path == "safe.py" for _, path in vectors.files)
+    finally:
+        events.close()
 
 
 @pytest.mark.asyncio

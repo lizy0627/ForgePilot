@@ -97,9 +97,10 @@ class ValidationService:
 
     def _store_log(self, task_id, phase, data):
         """Host-only bounded log artifact; hidden Oracle output never enters here."""
+        from .mission_events import safe_event_data
         self.guard.mkdir(task_id + "/logs")
         identifier = str(uuid4())
-        content = {"phase": phase, **data}
+        content = safe_event_data(self.redactor, {"phase": phase, **data})
         record = {"artifact_id": identifier, "artifact_type": "ValidationLog", "task_id": task_id,
                   "created_at": _now(), "content_sha256": content_sha256(content), "content": content}
         self.guard.write(task_id + "/logs/" + identifier + ".json", json.dumps(record, ensure_ascii=False).encode())
@@ -115,6 +116,9 @@ class ValidationService:
             if (record["artifact_id"] != artifact_id or record["task_id"] != task_id
                     or record["artifact_type"] != "ValidationLog"
                     or record["content_sha256"] != content_sha256(record["content"])):
+                raise ValueError()
+            from .mission_events import safe_event_data
+            if safe_event_data(self.redactor, record) != record:
                 raise ValueError()
             return record
         except (ValueError, KeyError, TypeError, OSError):
@@ -359,7 +363,7 @@ class ValidationService:
                 result = exc.result
             kind = "protected_test" if hidden else {"cmake_configure": "configure", "cmake_build": "build",
                 "run_tests": "test", "ctest_inventory": "integrity"}[phase]
-            output = ("Protected Oracle " + ("passed" if result.status == "succeeded" else "failed; hidden diagnostics withheld")) if hidden else self.redactor.text(result.stdout + "\n" + result.stderr)[:8192]
+            output = ("Protected Oracle " + ("passed" if result.status == "succeeded" else "failed; hidden diagnostics withheld")) if hidden else self.redactor.data(result.stdout + "\n" + result.stderr)[:8192]
             command_summary = "Protected Oracle " + phase if hidden else json.dumps(
                 {"shell": False, **command.review()}, ensure_ascii=False)[:512]
             code = result.returncode if result.returncode is not None else 1

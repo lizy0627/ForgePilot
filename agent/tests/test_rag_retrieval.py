@@ -9,6 +9,7 @@ import pytest
 from forgepilot.rag import (CodeChunk, QueryBuilder, RagConfig, RetrievalQuery,
                             RetrievalService, RetrievedChunk)
 from forgepilot.repository import Repository
+from forgepilot.security import Redactor
 
 
 class QueryEmbeddings:
@@ -97,6 +98,39 @@ def chunk(root, repository_id, path, *, start=1, end=None, symbol=None,
 
 def result(value, score, rank):
     return RetrievedChunk(chunk=value, score=score, rank=rank)
+
+
+@pytest.mark.asyncio
+async def test_retrieval_redacts_source_and_remote_query(tmp_path):
+    secret = "fixture-query-credential"
+    (tmp_path / "source.py").write_text(f"API_KEY = '{secret}'\n", encoding="utf-8")
+    embeddings = QueryEmbeddings()
+    subject = RetrievalService("repository-a", repository(tmp_path), config(),
+        embeddings, MemorySearchVectors(), redactor=Redactor((secret,)))
+    results = await subject.retrieve(f"Find API_KEY={secret}")
+    assert secret not in str(embeddings.queries)
+    assert secret not in "\n".join(item.content for item in results)
+    assert results
+
+
+@pytest.mark.asyncio
+async def test_retrieval_suppresses_legacy_secret_path_and_symbol(tmp_path):
+    secret = "opaqueProviderValue8473625"
+    secret_path = secret + ".py"
+    (tmp_path / secret_path).write_text("def target_symbol():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "safe.py").write_text("def target_symbol():\n    return 2\n", encoding="utf-8")
+    old_path_chunk = chunk(tmp_path, "repository-a", secret_path)
+    old_symbol_chunk = CodeChunk.model_validate({
+        **chunk(tmp_path, "repository-a", "safe.py").model_dump(exclude={"chunk_id"}),
+        "symbol": secret,
+    })
+    vectors = MemorySearchVectors({"repository-a": [
+        result(old_path_chunk, 0.99, 1), result(old_symbol_chunk, 0.98, 2)]})
+    subject = RetrievalService("repository-a", repository(tmp_path), config(),
+        QueryEmbeddings(), vectors, redactor=Redactor((secret,)))
+    found = await subject.retrieve("target_symbol")
+    assert found and all(item.path == "safe.py" for item in found)
+    assert secret not in str([(item.path, item.symbol, item.content) for item in found])
 
 
 def test_query_builder_extracts_paths_extensions_symbols_and_errors():

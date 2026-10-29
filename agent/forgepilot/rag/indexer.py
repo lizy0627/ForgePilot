@@ -10,6 +10,7 @@ import re
 
 from ..errors import ForgePilotError
 from ..repository import Repository
+from ..security import Redactor
 from .config import RagConfig, rag_path_matches
 from .embedding import EmbeddingProvider
 from .models import (CodeChunk, IndexFileState, IndexProgress, checked_relative_path,
@@ -109,13 +110,14 @@ class RepositoryIndexer:
 
     def __init__(self, repository_id: str, repository: Repository, config: RagConfig,
                  embedding_provider: EmbeddingProvider | None, vector_store: VectorStore | None,
-                 file_store: RagFileStore) -> None:
+                 file_store: RagFileStore, *, redactor: Redactor | None = None) -> None:
         self.repository_id = checked_repository_id(repository_id)
         self.repository = repository
         self.config = RagConfig.model_validate(config)
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self.file_store = file_store
+        self.redactor = redactor or Redactor()
         self._run_lock = asyncio.Lock()
         self._refresh_tasks: dict[str, asyncio.Task] = {}
         states = self.file_store.list(self.repository_id)
@@ -136,7 +138,9 @@ class RepositoryIndexer:
         return self._status
 
     def _matches(self, path: str) -> bool:
-        return rag_path_matches(self.config, path)
+        # File identity cannot be rewritten without corrupting incremental
+        # indexing. Omit a path that itself contains a known credential.
+        return rag_path_matches(self.config, path) and self.redactor.text(path) == path
 
     @staticmethod
     def _cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -263,6 +267,8 @@ class RepositoryIndexer:
             return await replacement, True
 
     async def _index_one(self, path: str, cancel_event: asyncio.Event | None) -> tuple[str, int]:
+        if not self._matches(path):
+            raise ForgePilotError("rag_file_excluded", "File is outside the configured RAG scope")
         previous = self.file_store.get(self.repository_id, path)
         try:
             self._cancelled(cancel_event)
@@ -273,9 +279,22 @@ class RepositoryIndexer:
                     and previous.content_hash == content_hash):
                 return "skipped", 0
             self.file_store.upsert(self._state(path, "pending", previous))
-            chunks = _chunks(self.repository_id, path, text, content_hash)
+            chunks = []
+            for chunk in _chunks(self.repository_id, path, text, content_hash):
+                # Embedding input and Qdrant payloads share the same sanitized
+                # content. Keep the source hash for stale-file checks, while
+                # recomputing the chunk identity from the stored content.
+                safe = self.redactor.text(chunk.content)
+                safe_symbol = self.redactor.text(chunk.symbol) if chunk.symbol else None
+                if safe != chunk.content or safe_symbol != chunk.symbol:
+                    chunk = CodeChunk.model_validate({
+                        **chunk.model_dump(exclude={"chunk_id"}),
+                        "content": safe or "[REDACTED]",
+                        "symbol": safe_symbol,
+                    })
+                chunks.append(chunk)
             vectors = await self._embed(
-                [_embedding_text(chunk) for chunk in chunks], cancel_event) if chunks else []
+                [self.redactor.text(_embedding_text(chunk)) for chunk in chunks], cancel_event) if chunks else []
             written, task_cancelled = await self._replace_vectors(path, chunks, vectors)
             self.file_store.upsert(self._state(
                 path, "indexed", content_hash=content_hash, chunk_count=written))

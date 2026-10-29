@@ -204,6 +204,60 @@ def test_artifact_and_observation_records_publish_in_the_same_transaction(store)
     assert GraphStore(store).snapshot(TASK_ID).revision == 7
 
 
+def test_security_event_rejects_payload_fields_before_database_and_sse(store):
+    store.missions.record_security_event(event_id="safe-denial", task_id=TASK_ID,
+        event_type="tool_denied", severity="warning", attributes={
+            "code": "policy_denied", "boundary": "tool_validation",
+            "payload": "private-request-body", "api_key": "private-key",
+            "tool": "read_file", "source": "Bearer private-token",
+            "environment": {"SECRET": "private-env"},
+        })
+    row = store._db.execute("SELECT attributes_json FROM security_events WHERE event_id='safe-denial'").fetchone()[0]
+    assert json.loads(row) == {"boundary": "tool_validation", "code": "policy_denied"}
+    event = store._db.execute("SELECT payload_json FROM graph_events WHERE event_type='security.recorded'").fetchone()[0]
+    for value in ("private-request-body", "private-key", "private-token", "private-env"):
+        assert value not in row and value not in event
+
+
+def test_repair_reason_follows_the_triggering_route(store):
+    publish_mission_event(store, TASK_ID, "node.finished", {"to": "succeeded", "next_route": "repair"},
+                          node_id="review_0")
+    publish_mission_event(store, TASK_ID, "node.started", {}, node_id="repair_1")
+    assert store.missions.observability(TASK_ID)["repairs"][0]["reason"] == "review_blockers"
+
+
+@pytest.mark.asyncio
+async def test_observability_is_task_bound_and_contains_only_provenance(store):
+    from types import SimpleNamespace
+    from forgepilot.mission_observability import tool_call
+    context = SimpleNamespace(task_id=TASK_ID, node=SimpleNamespace(node_id="work", agent_id="analyst.v1"))
+    class Registry:
+        async def execute(self, name, arguments):
+            return SimpleNamespace(success=True, duration_ms=3, error=None, output="private-tool-output")
+    await tool_call(store, context, Registry(), "read_file", {"path": "src/read.cpp", "content": "private-input"})
+    await tool_call(store, context, Registry(), "write_file", {"path": "src/written.cpp", "content": "private-input"})
+    store.missions.record_model_call(call_id="audit-model", task_id=TASK_ID, node_id="work",
+        role="analyst", model="fixture-model", prompt_version="analyst.v2", input_hash="a" * 64,
+        tool_schema={"names": ["read_file"]}, duration_ms=7, input_tokens=2, output_tokens=3,
+        total_tokens=5)
+    GraphRunner(store, HandlerRegistry({"work": lambda _: NodeResult(NodeStatus.SUCCEEDED)})).run(
+        TASK_ID, GraphDefinition("event-fixture.v1", 1, (
+            NodeDefinition("work", NodeType.DETERMINISTIC, "work"),)))
+    other = "00000000-0000-4000-a000-000000000002"
+    make_mission(store, other)
+    publish_mission_event(store, other, "tool.completed", {"tool": "read_file", "path": "other/secret.cpp"})
+    audit = store.missions.observability(TASK_ID)
+    assert audit["nodes"][0]["executor"] == "orchestrator"
+    assert audit["model_calls"][0]["prompt_version"] == "analyst.v2"
+    assert audit["model_calls"][0]["total_tokens"] == 5
+    assert audit["files_read"] == ["src/read.cpp"]
+    assert audit["files_modified"] == ["src/written.cpp"]
+    assert len(audit["tools"]) == 2 and len(audit["nodes"]) == 1
+    serialized = json.dumps(audit)
+    assert "private-tool-output" not in serialized and "private-input" not in serialized
+    assert "other/secret.cpp" not in serialized
+
+
 @pytest.mark.asyncio
 async def test_tool_events_record_paths_without_raw_arguments_or_output(store):
     from types import SimpleNamespace
@@ -243,6 +297,10 @@ def test_restart_at_idle_approval_publishes_recovery_gate_once(tmp_path):
     runner = GraphRunner(first, HandlerRegistry({"work": lambda _: NodeResult(NodeStatus.AWAITING_HUMAN)}))
     waiting = runner.run(TASK_ID, graph)
     assert waiting.status is NodeStatus.AWAITING_HUMAN
+    pauses = first.missions.observability(TASK_ID)["pauses"]
+    assert len(pauses) == 1
+    assert pauses[0]["node_id"] == "work" and pauses[0]["attempt"] == 1
+    assert pauses[0]["reason"] == "human_approval_required"
     cursor = f"{TASK_ID}:{len(runner.events(TASK_ID))}"
     first.close()
     reopened = SqliteEventStore(path)

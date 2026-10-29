@@ -164,16 +164,27 @@ class MCPManager:
         """The explicitly registered CLI compatibility tool shares the same budget."""
         self.budget_tools.add(name)
 
-    def register(self, registry):
+    def adapters(self):
+        """Build only the saved, selected read-only adapters for a trusted caller.
+
+        A mission passes these to its Analyst registry; discovery text and model
+        arguments cannot extend the selection.
+        """
+        adapters = []
         for snapshot in self.snapshots:
             catalog = {t["name"]: t for t in snapshot.catalog}
             for name in snapshot.config.selected_tools:
                 t = catalog[name]
-                registry.register_approved_mcp(MCPToolAdapter(server_id=snapshot.server_id, remote_tool_name=name,
+                adapters.append(MCPToolAdapter(server_id=snapshot.server_id, remote_tool_name=name,
                     input_schema=t["input_schema"], output_schema=t["output_schema"], description=t["description"],
                     annotations=t["annotations"], execution=t["execution"], connection=self.sessions[snapshot.server_id],
                     approved=True,
                     extract_sources=getattr(snapshot.config.connection, "preset_id", None) == "tavily"))
+        return tuple(adapters)
+
+    def register(self, registry):
+        for adapter in self.adapters():
+            registry.register_approved_mcp(adapter)
 
     def metadata(self, name):
         if name not in self.selected:

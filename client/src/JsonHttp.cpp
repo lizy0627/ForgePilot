@@ -4,6 +4,7 @@
 #include <QSet>
 #include <QStringDecoder>
 #include <QTimer>
+#include <QtGlobal>
 #include <memory>
 #include <cstring>
 
@@ -89,6 +90,12 @@ private:
 };
 }
 
+void JsonHttp::authenticate(QNetworkRequest &request)
+{
+    const QByteArray token = qgetenv("FORGEPILOT_LOCAL_API_TOKEN");
+    if (!token.isEmpty()) request.setRawHeader("X-ForgePilot-Token", token);
+}
+
 bool JsonHttp::parseStrictObject(const QByteArray &bytes, QJsonObject &object)
 {
     QStringDecoder decoder(QStringDecoder::Utf8);
@@ -108,6 +115,7 @@ QNetworkReply *JsonHttp::send(QNetworkAccessManager &network, QObject *owner, co
                              bool allowReplay, bool strictJson)
 {
     QNetworkRequest request(url);
+    authenticate(request);
     request.setRawHeader("Accept", "application/json");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);

@@ -15,6 +15,7 @@ from .api_models import EventPayload, TaskSummary
 from .errors import ForgePilotError
 from .security import Redactor
 from .trace import TraceEvent
+from .mission_events import safe_event_data
 from .conversation_store import ConversationStore
 from .memory_store import MemoryStore
 from .mcp_store import create_mcp_schema
@@ -233,7 +234,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
                             policy_hash=run["policy_hash"]).prepare(run["task_id"], definition)
 
     def _json(self, value):
-        return json.dumps(self.redactor.data(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return json.dumps(safe_event_data(self.redactor, value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
     def _row(self, task_id):
         self._ensure_task_available(task_id)
@@ -261,7 +262,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
         return TaskSummary.model_validate(snapshot).model_dump(mode="json")
 
     def create(self, task_id, snapshot, *, request_id=None):
-        snapshot = self.redactor.data(snapshot)
+        snapshot = safe_event_data(self.redactor, snapshot)
         if snapshot["task_id"] != task_id:
             raise ForgePilotError("storage_identity", "Snapshot identity differs from task")
         with self._transaction():
@@ -280,7 +281,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self._live.add(task_id)
 
     def _tool(self, task_id, trace, event_sequence):
-        data = self.redactor.data(trace.data)
+        data = safe_event_data(self.redactor, trace.data)
         if trace.kind == "tool_started":
             self._db.execute("""INSERT INTO tool_calls(task_id,sequence,name,call_id,source,repair_round,
                 started_at,status,arguments_json,start_event_sequence) VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -320,7 +321,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             sequence += 1; sse += 1
             self._db.execute("INSERT INTO task_events VALUES(?,?,?,?,?,?,?)",
                 (task_id,sequence,event.event,event.timestamp,self._json(event.data),sse,None))
-        snapshot = self.redactor.data(snapshot)
+        snapshot = safe_event_data(self.redactor, snapshot)
         snapshot["last_event_id"] = f"{task_id}:{sse}" if sse else None
         snapshot["tool_calls"] = self._db.execute("SELECT COUNT(*) FROM tool_calls WHERE task_id=?",(task_id,)).fetchone()[0]
         files = (snapshot.get("task_diff") or {}).get("files",[])
@@ -365,7 +366,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
 
     def get(self, task_id):
         with self._lock:
-            result = json.loads(self._row(task_id)["snapshot_json"])
+            # Historical rows may predate the write-time redaction boundary.
+            # Sanitize the API projection without changing recovery data on disk.
+            result = safe_event_data(self.redactor, json.loads(self._row(task_id)["snapshot_json"]))
             result["read_only"] = task_id not in self._live
             return result
 
@@ -390,7 +393,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             items=[]
             for row in rows[:limit]:
                 self._ensure_task_available(row["task_id"])
-                value=json.loads(row["summary_json"]); value["read_only"]=row["task_id"] not in self._live; items.append(value)
+                value=safe_event_data(self.redactor,json.loads(row["summary_json"])); value["read_only"]=row["task_id"] not in self._live; items.append(value)
             total=self._db.execute("SELECT COUNT(*) FROM conversation_requests WHERE conversation_id=? AND task_id IS NOT NULL",(conversation_id,)).fetchone()[0] if conversation_id else self._db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
             return {"items":items,"total":total,
                 "next_cursor":encode_cursor(items[-1]['created_at'],items[-1]['task_id']) if len(rows)>limit else None}
@@ -405,7 +408,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             row=self._row(task_id)
             events=self._db.execute("SELECT * FROM task_events WHERE task_id=? AND sse_sequence>? ORDER BY sse_sequence LIMIT 64",(task_id,after)).fetchall()
             return [StoredEvent(f"{task_id}:{e['sse_sequence']}",e["sse_sequence"],EventPayload(event=e["kind"],task_id=task_id,
-                timestamp=e["timestamp"],data=json.loads(e["data_json"]))) for e in events],bool(row["closed"])
+                timestamp=e["timestamp"],data=safe_event_data(self.redactor,json.loads(e["data_json"])))) for e in events],bool(row["closed"])
 
     def cursor(self, task_id, event_id):
         with self._lock:
@@ -421,10 +424,16 @@ class SqliteEventStore(ConversationStore, MemoryStore):
     def trace_page(self, task_id, after=0, limit=50):
         with self._lock:
             self._row(task_id)
-            rows=self._db.execute("""SELECT sequence,trace_sequence,kind,timestamp,substr(data_json,1,240) AS preview,
-                length(data_json) AS size FROM task_events WHERE task_id=? AND trace_sequence IS NOT NULL AND sequence>?
+            rows=self._db.execute("""SELECT sequence,trace_sequence,kind,timestamp,data_json
+                FROM task_events WHERE task_id=? AND trace_sequence IS NOT NULL AND sequence>?
                 ORDER BY sequence LIMIT ?""",(task_id,after,limit+1)).fetchall()
-            items=[dict(r) for r in rows[:limit]]
+            items=[]
+            for row in rows[:limit]:
+                item={key:row[key] for key in ("sequence","trace_sequence","kind","timestamp")}
+                safe=json.dumps(safe_event_data(self.redactor,json.loads(row["data_json"])),
+                    ensure_ascii=False,separators=(",",":"),allow_nan=False)
+                item["preview"],item["size"]=safe[:240],len(safe)
+                items.append(item)
             return {"items":items,"next_cursor":items[-1]["sequence"] if len(rows)>limit else None}
 
     def trace_detail(self, task_id, sequence):
@@ -432,7 +441,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self._row(task_id)
             row=self._db.execute("SELECT sequence,trace_sequence,kind,timestamp,data_json FROM task_events WHERE task_id=? AND sequence=? AND trace_sequence IS NOT NULL",(task_id,sequence)).fetchone()
             if row is None: raise ForgePilotError("unknown_trace", "Trace event does not exist for this task")
-            result=dict(row); result["data"]=json.loads(result.pop("data_json")); result["task_id"]=task_id
+            result=dict(row); result["data"]=safe_event_data(self.redactor,json.loads(result.pop("data_json"))); result["task_id"]=task_id
             return result
 
     def _notify(self, task_id):

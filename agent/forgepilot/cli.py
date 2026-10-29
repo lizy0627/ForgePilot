@@ -14,6 +14,7 @@ from .errors import ForgePilotError
 from .models.accounting import close_accounting_logging, configure_accounting_logging
 from .process import executable
 from .security import Redactor
+from .mission_events import safe_event_data
 from .task_service import TaskService
 from .trace import TraceEvent
 from .settings import add_build_arguments, add_connection_arguments, build_config_from_args, add_storage_arguments
@@ -51,6 +52,10 @@ def parser() -> argparse.ArgumentParser:
 def display_event(event: TraceEvent) -> None:
     if event.kind in {"task_state_changed", "tool_started", "tool_finished", "task_error", "file_changed", "file_restore", "git_baseline", "build_command_finished", "reflection", "validation_started", "validation_finished", "mcp_status"}:
         print(f"[{event.sequence} {event.kind}] {json.dumps(event.data, ensure_ascii=False)}", flush=True)
+
+
+def _public_json(redactor: Redactor, value, *, indent=None) -> str:
+    return json.dumps(safe_event_data(redactor, value), ensure_ascii=False, indent=indent)
 
 
 class ConsoleInput:
@@ -91,12 +96,12 @@ class ConsoleInput:
 async def review_plan(service: TaskService, result, redactor: Redactor, read_line):
     print(redactor.text(result.analysis_result or ""), flush=True)
     print(f"Plan task_id={result.task_id} version={result.plan_version}", flush=True)
-    print(json.dumps(result.plan.model_dump(mode="json"), ensure_ascii=False, indent=2), flush=True)
+    print(_public_json(redactor, result.plan.model_dump(mode="json"), indent=2), flush=True)
     if result.build_result:
         print("批准包含修改后的 Configure → Build → CTest；将执行目标仓库的 CMake 和测试程序。", flush=True)
-        print("BuildSelection=" + json.dumps(result.build_result["selection"], ensure_ascii=False, indent=2), flush=True)
+        print("BuildSelection=" + _public_json(redactor, result.build_result["selection"], indent=2), flush=True)
     if result.task_diff and result.task_diff["files"]:
-        print("已有任务修改保留；本次新增范围尚未授权。TaskDiff=" + json.dumps(result.task_diff, ensure_ascii=False), flush=True)
+        print("已有任务修改保留；本次新增范围尚未授权。TaskDiff=" + _public_json(redactor, result.task_diff), flush=True)
     else:
         print("尚未修改任何源码。", flush=True)
     print("批准格式：approve <版本> / 批准 <版本>；拒绝：reject <版本> / 拒绝 <版本>；取消：cancel / 取消。", flush=True)
@@ -148,7 +153,8 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
             vector_path = (Path(store.path).resolve().parent / "qdrant"
                            if store.path != ":memory:" else None)
             rag_manager = RagManager(
-                rag_runtime, RagFileStore(store), vector_path=vector_path)
+                rag_runtime, RagFileStore(store), vector_path=vector_path,
+                redactor=redactor)
             trace = TaskJournal(store, lambda: service.snapshot(persist_diff=True), redactor, on_event=display_event)
             service = TaskService(llm, rg_executable=rg, git_executable=git,
                                   trace=trace, redactor=redactor, build_config=build_config,
@@ -165,11 +171,11 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
                 trace.flush()
             print(redactor.text(result.final_result or result.error or "No analysis result"))
             if result.build_result is not None:
-                print("BuildResult=" + json.dumps(result.build_result, ensure_ascii=False), flush=True)
-                print("ValidationHistory=" + json.dumps(result.validation_history, ensure_ascii=False), flush=True)
-                print("RepairRecords=" + json.dumps(result.repair_records, ensure_ascii=False), flush=True)
+                print("BuildResult=" + _public_json(redactor, result.build_result), flush=True)
+                print("ValidationHistory=" + _public_json(redactor, result.validation_history), flush=True)
+                print("RepairRecords=" + _public_json(redactor, result.repair_records), flush=True)
             if result.task_diff is not None:
-                print("TaskDiff=" + json.dumps(service.task_diff(result.task_id), ensure_ascii=False), flush=True)
+                print("TaskDiff=" + _public_json(redactor, service.task_diff(result.task_id)), flush=True)
                 if result.task_diff["files"]:
                     print("修改已保留。输入 restore / 恢复 显式恢复，keep / 保留 或 EOF 退出；快照仅在本进程内有效。", flush=True)
                     while True:
@@ -178,8 +184,8 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
                             if decision in {"restore", "恢复"}:
                                 restored = await service.restore(result.task_id)
                                 trace.flush()
-                                print("Restore=" + json.dumps(restored, ensure_ascii=False), flush=True)
-                                print("TaskDiff=" + json.dumps(service.task_diff(result.task_id), ensure_ascii=False), flush=True)
+                                print("Restore=" + _public_json(redactor, restored), flush=True)
+                                print("TaskDiff=" + _public_json(redactor, service.task_diff(result.task_id)), flush=True)
                                 break
                             if decision in {"", "keep", "保留"}:
                                 break
@@ -189,13 +195,13 @@ async def analyze(args: argparse.Namespace, *, transport=None, read_line=None) -
                             break
                         except ForgePilotError as exc:
                             print(redactor.text(str(exc)), flush=True)
-            print(json.dumps({"state": result.state.value, "steps": result.steps,
+            print(_public_json(redactor, {"state": result.state.value, "steps": result.steps,
                               "tool_calls": result.tool_calls, "usage": result.token_usage,
                               "duration_ms": result.duration_ms, "outcome": result.outcome,
                               "plan_version": result.plan_version,
                               "repair_round": result.repair_round, "failure_kind": result.failure_kind,
                               "approved_plan_version": result.approved_plan_version,
-                              "approved_files": sorted(result.approved_files)}, ensure_ascii=False))
+                              "approved_files": sorted(result.approved_files)}))
             return 0 if result.state == TaskState.COMPLETED else 130 if result.state == TaskState.CANCELLED else 1
     except ForgePilotError as exc:
         print(redactor.text(str(exc)), file=sys.stderr)

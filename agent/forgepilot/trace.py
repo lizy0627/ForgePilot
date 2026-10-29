@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from .security import Redactor
+from .mission_events import safe_event_data
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class MemoryTrace:
     def emit(self, task_id: str, kind: str, data: dict) -> None:
         event = TraceEvent(len(self._events) + 1, task_id, kind,
                            datetime.now(timezone.utc).isoformat(),
-                           deepcopy(self._redactor.data(data)))
+                           deepcopy(safe_event_data(self._redactor, data)))
         self._events.append(event)
         if self._on_event is not None:
             self._on_event(deepcopy(event))

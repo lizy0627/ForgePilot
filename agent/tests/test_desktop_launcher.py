@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import secrets
 from pathlib import Path
 import socket
 import subprocess
@@ -45,7 +46,8 @@ def configured(tmp_path):
     data = {'base_url': 'http://127.0.0.1:1/v1', 'model': 'offline-startup-only', 'port': port,
             'server_args': ['--database', str(tmp_path / 'history.sqlite3')]}
     config.write_text(json.dumps(data), encoding='utf-8-sig')
-    env = {**os.environ, 'FORGEPILOT_API_KEY': KEY}
+    env = {**os.environ, 'FORGEPILOT_API_KEY': KEY,
+           'FORGEPILOT_LOCAL_API_TOKEN': secrets.token_urlsafe(32)}
     try:
         yield config, data, env
     finally:
@@ -72,10 +74,16 @@ def test_real_start_repeat_stop_restart_preserves_unrelated_process(configured):
         first = invoke('start', config, env)
         assert first.returncode == 0, first.stdout + first.stderr
         before = runtime(config)
+        assert env['FORGEPILOT_LOCAL_API_TOKEN'] not in json.dumps(before)
+        for name in ('backend.log', 'client.log'):
+            assert env['FORGEPILOT_LOCAL_API_TOKEN'] not in (
+                Path(before['log_directory']) / name).read_text(encoding='utf-8')
         from test_build_process import alive
         assert before['client_status'] == 'running' and alive(before['client_pid'])
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"http://127.0.0.1:{data['port']}/api/v1/tasks?limit=1", timeout=5) as response:
+        request = urllib.request.Request(f"http://127.0.0.1:{data['port']}/api/v1/tasks?limit=1",
+            headers={'X-ForgePilot-Token': env['FORGEPILOT_LOCAL_API_TOKEN']})
+        with opener.open(request, timeout=5) as response:
             assert json.load(response)['total'] == 0
         assert invoke('start', config, env).returncode == 0
         assert runtime(config)['backend_pid'] == before['backend_pid']
@@ -140,7 +148,9 @@ def test_missing_development_tools_do_not_block_chat_startup(configured):
     result=invoke('start',config,env)
     assert result.returncode==0,result.stdout+result.stderr
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(f"http://127.0.0.1:{data['port']}/api/v1/conversations",timeout=5) as response:
+    request = urllib.request.Request(f"http://127.0.0.1:{data['port']}/api/v1/conversations",
+        headers={'X-ForgePilot-Token': env['FORGEPILOT_LOCAL_API_TOKEN']})
+    with opener.open(request,timeout=5) as response:
         assert json.load(response)['total']==0
     assert invoke('stop',config,env).returncode==0
 
@@ -161,14 +171,17 @@ def test_client_worker_never_receives_api_key(monkeypatch, tmp_path):
         stdin = io.BytesIO()
 
     def popen(command, **kwargs):
+        captured['command'] = command
         captured.update(kwargs)
         return DummyProcess()
 
     monkeypatch.setattr(launcher.subprocess, 'Popen', popen)
     job = type('Job', (), {'name': 'test-owned-job'})()
-    launcher.owned_client(job, tmp_path / 'client.log', 8765)
+    launcher.owned_client(job, tmp_path / 'client.log', 8765, 'test-local-token')
     assert 'FORGEPILOT_API_KEY' not in captured['env']
     assert KEY not in json.dumps(captured['env'])
+    assert captured['env']['FORGEPILOT_LOCAL_API_TOKEN'] == 'test-local-token'
+    assert 'test-local-token' not in repr(captured['command'])
 
 
 def test_fragmented_secret_is_redacted_before_logging():
@@ -465,7 +478,7 @@ def fault_launcher(tmp_path, mode):
         import desktop_launcher as launcher
         launcher.SCRIPT = Path(__file__)
         if MODE in ('delayed_exit', 'no_window', 'cancel'):
-            def owned_client(job, log, port):
+            def owned_client(job, log, port, local_token):
                 with log.open('wb') as output:
                     process = subprocess.Popen(
                         [str(launcher.PYTHON), '-I', str(launcher.ROOT / 'agent/forgepilot/_build_worker.py'), job.name],
@@ -622,7 +635,9 @@ def test_normal_window_close_keeps_backend_until_stop(configured):
         time.sleep(0.1)
     assert runtime(config)['status'] == 'running' and runtime(config)['client_exit'] == 0
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(f"http://127.0.0.1:{data['port']}/api/v1/tasks?limit=1", timeout=5) as response:
+    request = urllib.request.Request(f"http://127.0.0.1:{data['port']}/api/v1/tasks?limit=1",
+        headers={'X-ForgePilot-Token': env['FORGEPILOT_LOCAL_API_TOKEN']})
+    with opener.open(request, timeout=5) as response:
         assert json.load(response)['total'] == 0
     assert invoke('stop', config, env).returncode == 0
     assert runtime(config)['shutdown'] == 'graceful'

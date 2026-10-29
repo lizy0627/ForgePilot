@@ -217,6 +217,11 @@ class SqliteArtifactStore:
             raise ArtifactIntegrityError("Artifact payload is invalid") from None
         if not self._matches_row(artifact, row):
             raise ArtifactIntegrityError("Artifact payload does not match SQLite metadata")
+        candidate = artifact.model_dump(mode="json")
+        if canonical_json_bytes(self.events.redactor.data(candidate)) != canonical_json_bytes(candidate):
+            # Old, integrity-valid Artifacts may predate the write boundary.
+            # Refuse to expose them rather than changing immutable content/hash.
+            raise ArtifactIntegrityError("Artifact contains prohibited sensitive content")
         return artifact
 
     def put(self, artifact: ArtifactEnvelopeBase) -> None:
@@ -224,6 +229,14 @@ class SqliteArtifactStore:
 
     def _put(self, artifact: ArtifactEnvelopeBase, *, relation: str = "derived_from") -> None:
         artifact = validate_artifact(artifact)
+        # Artifacts are immutable and content-addressed. Silently replacing a
+        # secret here would invalidate their hash and any parent references, so
+        # reject the entire candidate before either SQLite or the external
+        # payload directory can observe it. The caller may then produce a safe
+        # revision through the normal protocol.
+        candidate = artifact.model_dump(mode="json")
+        if canonical_json_bytes(self.events.redactor.data(candidate)) != canonical_json_bytes(candidate):
+            raise ArtifactStorageError("Artifact contains prohibited sensitive content")
         payload = canonical_json_bytes(artifact)
         payload_hash = sha256(payload).hexdigest()
         external = len(payload) >= INLINE_LIMIT_BYTES or isinstance(artifact.content, DeliveryBundle)

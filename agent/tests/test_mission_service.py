@@ -143,6 +143,10 @@ async def test_mission_hash_mismatch_has_no_grant_or_revision_change(tmp_path, g
             await missions.approve(tid, **decision(mission, **{field: "0" * 64}))
         assert missions.get(tid)["current_revision"] == mission["current_revision"]
         assert tasks.store._db.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        denial = tasks.store._db.execute("SELECT event_type,attributes_json FROM security_events WHERE task_id=?",
+                                        (tid,)).fetchone()
+        assert denial["event_type"] == "approval_denied"
+        assert "mission_approval_conflict" in denial["attributes_json"]
     finally:
         await missions.close()
         await tasks.close()

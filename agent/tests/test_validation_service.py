@@ -11,7 +11,9 @@ import pytest
 from forgepilot.errors import ForgePilotError
 
 from forgepilot.artifacts.models import ChangeSet, ChangedFile, TaskSpec, TestPolicy as ArtifactTestPolicy
+from forgepilot.artifacts import create_artifact
 from forgepilot.build_process import CommandResult
+from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.validation import PIPELINE_STAGES, ProtectedOracle, ValidationService, classify_command
 from forgepilot.toolchain import ToolchainProfile
 from forgepilot.workspace_manager import WorkspaceManager
@@ -133,6 +135,19 @@ async def test_full_pipeline_and_baseline_survive_validator_restart(validator_ca
     assert not (root / "build").exists()
     assert len(report.log_artifact_ids) == 4
     assert all(restarted.read_log(task, identifier)["content_sha256"] for identifier in report.log_artifact_ids)
+    # The CTest inventory is JSON text. Its canonicalization must already be
+    # complete before content hashing, including when saved as an Artifact.
+    assert all(restarted.redactor.data(item.output_summary) == item.output_summary
+               for item in report.commands)
+    artifact_store = SqliteEventStore(":memory:", redactor=restarted.redactor,
+                                      artifact_root=build.parent / ("artifact-check-" + task))
+    try:
+        candidate = create_artifact(task_id=str(uuid4()), producer="validator.v1",
+            producer_node="validate", content=report)
+        artifact_store.artifacts.put(candidate)
+        assert artifact_store.artifacts.get(candidate.artifact_id) == candidate
+    finally:
+        artifact_store.close()
     assert all('"shell": false' in command.command_summary for command in report.commands
                if command.kind in {"configure", "build", "test"})
 

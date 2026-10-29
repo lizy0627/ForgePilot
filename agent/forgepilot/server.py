@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 from pathlib import Path
 import sys
 
@@ -67,10 +68,11 @@ async def _serve_managed(app, options, stop_requested, on_ready):
 def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
     args = parser().parse_args(argv)
     key = os.environ.get("FORGEPILOT_API_KEY", "")
-    redactor = Redactor((key,))
+    local_token = os.environ.get("FORGEPILOT_LOCAL_API_TOKEN") or secrets.token_urlsafe(32)
+    redactor = Redactor((key, local_token))
     try:
         model_clients = model_gateway_from_args(args)
-        redactor = model_clients.redactor.with_secrets((key,))
+        redactor = model_clients.redactor.with_secrets((key, local_token))
         rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
         if not 1 <= args.port <= 65535:
             raise ForgePilotError("server_config", "Port must be between 1 and 65535")
@@ -109,7 +111,8 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                 vector_path = (Path(store.path).resolve().parent / "qdrant"
                                if store.path != ":memory:" else None)
                 rag_manager = RagManager(
-                    rag_runtime, RagFileStore(store), vector_path=vector_path)
+                    rag_runtime, RagFileStore(store), vector_path=vector_path,
+                    redactor=redactor)
                 async def open_rag_repository(repository_path):
                     return await Repository.open(
                         repository_path,
@@ -127,11 +130,12 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  summary_factory=summary_factory, mcp_disabled=args.disable_mcp,
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
-                                 rag_coordinator=rag_coordinator)
+                                 rag_coordinator=rag_coordinator, api_token=local_token)
                 from .mission_factory import build_mission_workflow
-                app.state.mission_host.factory = lambda events: build_mission_workflow(
+                app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
                     app.state.task_host, oracle_source=args.mission_oracle,
-                    cloud_model_allowed=args.mission_allow_cloud_model)
+                    cloud_model_allowed=args.mission_allow_cloud_model,
+                    mcp_snapshots=mcp_snapshots)
                 options = dict(host=args.host, port=args.port, workers=1,
                                access_log=False, log_level="warning", timeout_graceful_shutdown=10)
                 if stop_requested is None:

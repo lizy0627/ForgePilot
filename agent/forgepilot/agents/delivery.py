@@ -115,8 +115,11 @@ class DeliveryWorkflow(ImplementationService):
     def _package(self, task_id, artifact_ids):
         # The Graph carries reports between deterministic nodes; only explicit
         # role payload builders below may expose them to a model.
-        inputs = tuple(item for item in artifact_ids if isinstance(
-            self.events.artifacts.get(item).content, (TaskSpec, ExecutionPlan, EvidenceBundle)))
+        artifacts = tuple(self.events.artifacts.get(item) for item in artifact_ids)
+        if any(item.task_id != task_id for item in artifacts):
+            raise ForgePilotError("artifact_scope", "Delivery inputs belong to another task")
+        inputs = tuple(item.artifact_id for item in artifacts if isinstance(
+            item.content, (TaskSpec, ExecutionPlan, EvidenceBundle)))
         return super()._package(task_id, inputs)
 
     def _await(self, coroutine):

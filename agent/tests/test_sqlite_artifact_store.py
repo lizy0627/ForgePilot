@@ -13,6 +13,7 @@ import forgepilot.artifacts.sqlite_store as artifact_sqlite
 from forgepilot.errors import ForgePilotError
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
+from forgepilot.security import Redactor
 import forgepilot.sqlite_store as sqlite_store_module
 from test_artifact_protocol import HASH_A, HASH_B, plan, task_spec
 
@@ -41,6 +42,42 @@ def _spec(task_id: str, artifact_id: str | None = None):
         task_id=task_id, artifact_id=artifact_id, producer="orchestrator.v1",
         producer_node="draft-task", content=task_spec(),
     )
+
+
+def test_artifact_rejects_sensitive_payload_before_database_or_file_write(tmp_path):
+    secret = "private-artifact-credential"
+    store = SqliteEventStore(":memory:", redactor=Redactor((secret,)), artifact_root=tmp_path)
+    try:
+        content = task_spec().model_copy(update={"objective": f"API Key: {secret}"})
+        artifact = create_artifact(task_id=str(uuid4()), producer="analyst.v1",
+            producer_node="draft-task", content=content)
+        with pytest.raises(ArtifactStorageError, match="prohibited sensitive content"):
+            store.artifacts.put(artifact)
+        assert store._db.execute("SELECT count(*) FROM artifacts").fetchone()[0] == 0
+        assert not list(tmp_path.rglob("*.json"))
+    finally:
+        store.close()
+
+
+def test_legacy_artifact_with_newly_known_secret_fails_closed_on_read(tmp_path):
+    secret = "legacy-provider-opaque-key-829"
+    database = tmp_path / "legacy.sqlite3"
+    root = tmp_path / "artifacts"
+    artifact = create_artifact(task_id=str(uuid4()), producer="analyst.v1",
+        producer_node="draft-task", content=task_spec().model_copy(
+            update={"objective": f"Fix the {secret} parser"}))
+    old = SqliteEventStore(database, artifact_root=root)
+    try:
+        old.artifacts.put(artifact)
+    finally:
+        old.close()
+    current = SqliteEventStore(database, artifact_root=root,
+                               redactor=Redactor((secret,)))
+    try:
+        with pytest.raises(ArtifactIntegrityError, match="prohibited sensitive content"):
+            current.artifacts.get(artifact.artifact_id)
+    finally:
+        current.close()
 
 
 def _plan(task_id: str, spec_id: str, artifact_id: str | None = None):

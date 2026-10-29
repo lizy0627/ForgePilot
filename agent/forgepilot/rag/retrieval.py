@@ -18,6 +18,7 @@ from typing import Literal
 
 from ..compile_database import CPP_SUFFIXES
 from ..repository import Repository
+from ..security import Redactor
 from .config import RagConfig, rag_path_matches
 from .embedding import EmbeddingProvider
 from .models import (RetrievalQuery, RetrievalResult, RetrievalScoreTrace,
@@ -184,7 +185,8 @@ class RetrievalService:
                  embedding_provider: EmbeddingProvider | None,
                  vector_store: VectorStore | None, *, code_intelligence=None,
                  file_store=None, rrf_k: int = 60,
-                 stale_handler: Callable[[str], bool | None | Awaitable[bool | None]] | None = None) -> None:
+                 stale_handler: Callable[[str], bool | None | Awaitable[bool | None]] | None = None,
+                 redactor: Redactor | None = None) -> None:
         if type(rrf_k) is not int or not 1 <= rrf_k <= 10_000:
             raise ValueError("rrf_k must be an integer between 1 and 10000")
         self.repository_id = checked_repository_id(repository_id)
@@ -196,6 +198,7 @@ class RetrievalService:
         self.file_store = file_store
         self.rrf_k = rrf_k
         self.stale_handler = stale_handler
+        self.redactor = redactor or Redactor()
         self._trace: ContextVar[RetrievalTrace | None] = ContextVar(
             f"rag_retrieval_trace_{id(self)}", default=None)
 
@@ -336,10 +339,10 @@ class RetrievalService:
         if self.vector_store is None:
             return _SourceOutcome("vector", "unavailable", reason="qdrant_unavailable")
         try:
-            # The complete task text is intentionally embedded as-is. Query
-            # Builder terms are only for deterministic literal/boost logic.
+            # Query Builder keeps the original text for local ranking; the
+            # external embedding boundary receives only sanitized text.
             try:
-                vector = await self.embedding_provider.embed_query(task_text)
+                vector = await self.embedding_provider.embed_query(self.redactor.text(task_text))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -688,11 +691,15 @@ class RetrievalService:
         for candidate in candidates:
             if len(results) >= limit or used >= max_chars:
                 break
+            # Old vector payloads may predate index-time sanitization. Never
+            # return a source identity that embeds a known credential.
+            if self.redactor.text(candidate.path) != candidate.path:
+                continue
             file_key = candidate.path.casefold()
             if per_file.get(file_key, 0) >= self.config.retrieval_max_chunks_per_file:
                 continue
             remaining = max_chars - used
-            content = candidate.content
+            content = self.redactor.text(candidate.content)
             end_line = candidate.end_line
             reasons = set(candidate.reasons)
             if len(content) > remaining:
@@ -706,7 +713,7 @@ class RetrievalService:
                 path=candidate.path,
                 line=candidate.line,
                 end_line=end_line,
-                symbol=candidate.symbol,
+                symbol=self.redactor.text(candidate.symbol) if candidate.symbol else None,
                 score=candidate.score,
                 reasons=RetrievalService._bounded_reasons(reasons),
                 file_hash=candidate.file_hash,

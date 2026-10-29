@@ -477,6 +477,33 @@ def test_redaction_before_all_tables_and_database_bytes(tmp_path):
     for hidden in (secret,"Zml4dHVyZS1jcmVkZW50aWFs","opaque-auth","private-refresh","token-secret","pass-secret"): assert hidden.encode() not in raw
 
 
+def test_legacy_sqlite_rows_are_sanitized_at_every_task_read_boundary(tmp_path):
+    store=SqliteEventStore(tmp_path/"legacy-redaction.sqlite3")
+    value=task(); tid=value["task_id"]
+    store.create(tid,value)
+    trace=TraceEvent(1,tid,"tool_started",now(),{"name":"read_file","arguments":{"path":"main.cpp"}})
+    store.publish(tid,value,project_events([trace],value),traces=[trace])
+    secret="legacy-environment-secret"
+    with store._transaction():
+        snapshot=json.loads(store._db.execute("SELECT snapshot_json FROM tasks WHERE task_id=?",(tid,)).fetchone()[0])
+        summary=json.loads(store._db.execute("SELECT summary_json FROM tasks WHERE task_id=?",(tid,)).fetchone()[0])
+        snapshot["environment"]={"PRIVATE":secret}
+        summary["api_key"]=secret
+        store._db.execute("UPDATE tasks SET snapshot_json=?,summary_json=? WHERE task_id=?",
+            (json.dumps(snapshot),json.dumps(summary),tid))
+        store._db.execute("UPDATE task_events SET data_json=? WHERE task_id=? AND trace_sequence=1",
+            (json.dumps({"environment":{"PRIVATE":secret}}),tid))
+        store._db.execute("UPDATE task_events SET data_json=? WHERE task_id=? AND sse_sequence=1",
+            (json.dumps({"api_key":secret}),tid))
+    assert secret in store._db.execute("SELECT snapshot_json FROM tasks WHERE task_id=?",(tid,)).fetchone()[0]
+    assert secret not in json.dumps(store.get(tid))
+    assert secret not in json.dumps(store.list_page())
+    assert secret not in "".join(item.frame() for item in store.read(tid,0)[0])
+    assert secret not in json.dumps(store.trace_page(tid))
+    assert secret not in json.dumps(store.trace_detail(tid,1))
+    store.close()
+
+
 def test_keyset_history_and_small_trace_pages(tmp_path):
     store=SqliteEventStore(tmp_path/"pages.sqlite3")
     for i in range(1,8):

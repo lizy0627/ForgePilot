@@ -29,6 +29,15 @@ class CreateMission(MissionRequest):
     orchestration_mode: Literal["multi_agent"] = "multi_agent"
     base_ref: str = Field(default="HEAD", min_length=1, max_length=256)
     toolchain_profile: str = Field(default="auto", pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", max_length=128)
+    language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
+    mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
+
+    @field_validator("mcp_server_ids")
+    @classmethod
+    def unique_mcp_servers(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("MCP server selection contains duplicates")
+        return value
 
     @field_validator("repository_path")
     @classmethod

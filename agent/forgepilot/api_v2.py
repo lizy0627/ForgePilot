@@ -92,6 +92,10 @@ def register_mission_routes(app, host, streams):
     def mission_graph(task_id: MissionID):
         return host.graph(task_id)
 
+    @app.get(prefix + "/{task_id}/observability", response_model=dict, responses=errors)
+    def mission_observability(task_id: MissionID):
+        return host.observability(task_id)
+
     @app.get(prefix + "/{task_id}/artifacts", response_model=MissionArtifacts, responses=errors)
     def mission_artifacts(task_id: MissionID):
         return host.artifacts(task_id)
