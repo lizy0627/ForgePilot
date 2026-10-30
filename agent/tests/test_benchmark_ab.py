@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "eval"))
 
 from forgepilot_eval.ab import _sha256, compare_saved
+from forgepilot_eval.campaign_budget import BudgetPlan
 from forgepilot_eval.manifest import DATA_ROOT, verify_real_lock
 from forgepilot_eval.metrics import write_reports
 from forgepilot.security import Redactor
@@ -19,15 +20,26 @@ def make_pair(tmp_path, *, token_ratio=2.4, safety=0, campaign_cap=100_000, per_
     tasks = verify_real_lock()
     lock = json.loads((DATA_ROOT / "real_tasks" / "lock.json").read_text(encoding="utf-8"))
     endpoint = "https://fixture.invalid/v1"
+    profile = {"provider": "openai-compatible", "model": "fixture-model",
+               "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest(),
+               "credential_ref": "env:FORGEPILOT_API_KEY", "timeout_seconds": 60,
+               "temperature": "provider_default", "max_output_tokens": 4096}
     config = {"dataset": "real", "task_lock_sha256": lock["sha256"],
               "model": "fixture-model", "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest(),
+              "model_profile": profile, "model_profile_sha256": _sha256(profile),
               "max_total_tokens": campaign_cap,
+              "shared_budget_plan_sha256": BudgetPlan.formal().sha256,
               "max_tokens_per_run": per_run_cap, "tools": {"git": "git-fixture", "cmake": "cmake-fixture"},
               "tool_versions": {"git": "fixture", "cmake": "fixture"},
               "task_timeout": 900, "llm_timeout": 60,
               "generator": "Ninja", "approval": "manual", "rag": rag,
               "runtime_revision": hashlib.sha256(b"fixture runtime source").hexdigest(),
               "evaluator_revision": hashlib.sha256(b"fixture evaluator source").hexdigest(),
+              "code_commit": "a" * 40, "code_dirty": False,
+              "prompt_sha256": hashlib.sha256(b"fixture prompts").hexdigest(),
+              "agent_definition_sha256": hashlib.sha256(b"fixture agents").hexdigest(),
+              "task_spec_sha256": hashlib.sha256(b"fixture tasks").hexdigest(),
+              "toolchain_sha256": hashlib.sha256(b"fixture toolchain").hexdigest(),
               "validation": "locked_public_ctest_and_protected_oracle", "repetitions": 3}
     digest = _sha256(config)
     ids = [task.id for task in tasks]
@@ -58,7 +70,13 @@ def make_pair(tmp_path, *, token_ratio=2.4, safety=0, campaign_cap=100_000, per_
                     "evaluation_type": "real_agent", "real_llm_results_produced": True,
                     "agent_topology": topology, "repetitions": 3,
                     "selected_tasks": ids, "task_categories": kinds,
-                    "model": "fixture-model", "endpoint": endpoint,
+                    "model": "fixture-model", "endpoint_sha256": config["endpoint_sha256"],
+                    "model_profile_sha256": config["model_profile_sha256"],
+                    "code_commit": config["code_commit"], "code_dirty": config["code_dirty"],
+                    "prompt_sha256": config["prompt_sha256"],
+                    "agent_definition_sha256": config["agent_definition_sha256"],
+                    "task_spec_sha256": config["task_spec_sha256"],
+                    "toolchain_sha256": config["toolchain_sha256"],
                     "rag": rag, "approval_mode": "manual",
                     "started_at": "fixture", "finished_at": "fixture",
                     "config_hash": digest, "real_task_lock_sha256": lock["sha256"],
@@ -149,7 +167,7 @@ def test_saved_pair_rejects_unverifiable_evidence(tmp_path, mutation, pattern):
     elif mutation == "version_missing":
         document["metadata"]["comparison_configuration"]["tool_versions"].pop("git")
     elif mutation == "endpoint":
-        document["metadata"]["endpoint"] = "https://different.invalid/v1"
+        document["metadata"]["endpoint_sha256"] = hashlib.sha256(b"different endpoint").hexdigest()
     multi.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match=pattern):
         compare_saved(single, multi)

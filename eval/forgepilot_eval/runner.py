@@ -26,7 +26,8 @@ from forgepilot.task_service import TaskService
 from forgepilot.trace import MemoryTrace
 
 from .grader import Grader, check_scope, grade_analysis, initial_matches
-from .manifest import DATA_ROOT, asset, inventory, load_tasks
+from .campaign_budget import BudgetPlan, SharedTokenBudget
+from .manifest import DATA_ROOT, asset, inventory, load_tasks, verify_real_lock
 from .metrics import write_reports
 from .offline import OfflineModel
 
@@ -51,11 +52,20 @@ class TokenBudget:
 
 
 class BudgetedModel:
-    def __init__(self, client, campaign, per_run_limit):
+    def __init__(self, client, campaign, per_run_limit, *, shared_budget_path=None,
+                 shared_budget_plan=None, budget_run_id=None):
         self.client = client
         self.campaign = campaign
         self.run = TokenBudget(per_run_limit)
         self.redactor = client.redactor
+        self.shared_budget_path = shared_budget_path
+        self.shared_budget_plan = shared_budget_plan
+        self.budget_run_id = budget_run_id
+
+    def _shared(self, method, *args):
+        if self.shared_budget_path is not None:
+            with SharedTokenBudget(self.shared_budget_path, self.shared_budget_plan) as ledger:
+                return getattr(ledger, method)(*args)
 
     async def chat(self, messages, tools=None):
         remaining = min(self.campaign.remaining, self.run.remaining)
@@ -70,13 +80,29 @@ class BudgetedModel:
             # A timed-out or interrupted provider request may still be billable.
             # Its usage is unknowable, so no later paid request is allowed.
             self.campaign.spent = self.campaign.limit
+            if self.shared_budget_path is not None:
+                try:
+                    self._shared("mark_uncertain", "provider_request_failed", self.budget_run_id)
+                except Exception:
+                    # An active reservation also blocks the next paid run.
+                    pass
             raise
         try:
+            if self.shared_budget_path is not None:
+                amount = reply.usage.get("total_tokens") if isinstance(reply.usage, dict) else None
+                self._shared("record_usage", self.budget_run_id, amount)
             self.campaign.charge(reply.usage)
             self.run.charge(reply.usage)
         except ValueError:
             # Missing accounting makes every subsequent paid request unsafe.
             self.campaign.spent = self.campaign.limit
+            if self.shared_budget_path is not None:
+                try:
+                    with SharedTokenBudget(self.shared_budget_path, self.shared_budget_plan) as ledger:
+                        if ledger.snapshot()["state"] == "ready":
+                            ledger.mark_uncertain("provider_overrun", self.budget_run_id)
+                except Exception:
+                    pass
             raise
         return reply
 
@@ -89,15 +115,48 @@ def configuration_digest(payload):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+def source_revision(directory):
+    """Hash actual source bytes, including uncommitted edits, for an A/B lock."""
+    return configuration_digest(inventory(directory))
+
+
 def comparison_lock(tasks, sources, args, environment, model):
     """Topology is intentionally excluded so unequal A/B conditions are detectable."""
     endpoint = os.environ.get("FORGEPILOT_BASE_URL") if args.mode == "real" else None
+    project_root = DATA_ROOT.parent
+    task_lock = None
+    if args.dataset == "real":
+        verify_real_lock(DATA_ROOT)
+        task_lock = json.loads(asset(DATA_ROOT, "real_tasks/lock.json").read_text(encoding="utf-8"))["sha256"]
+    agent_definitions = project_root / "agent" / "forgepilot" / "agents"
+    # Effective wire settings of the legacy benchmark client; no credential or
+    # raw endpoint enters the saved profile. A future multi adapter must prove it
+    # uses this same primary profile before producing comparable real evidence.
+    primary_profile = {"provider": "openai-compatible", "model": model,
+                       "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
+                       "credential_ref": "env:FORGEPILOT_API_KEY" if args.mode == "real" else None,
+                       "timeout_seconds": args.llm_timeout, "temperature": "provider_default",
+                       "max_output_tokens": min(4096, args.max_tokens_per_run)}
+    toolchain = {"tools": environment["tools"], "versions": environment["versions"],
+                 "generator": args.generator, "qt_kit": args.qt_kit}
     payload = {"schema": 1, "dataset": args.dataset, "tasks": [t.model_dump(mode="json") for t in tasks],
-               "source_hashes": sources, "model": model,
+               "source_hashes": sources, "task_lock_sha256": task_lock, "model": model,
                "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
+               "model_profile": primary_profile,
+               "model_profile_sha256": configuration_digest(primary_profile),
+               "code_commit": environment.get("code_commit"), "code_dirty": environment.get("code_dirty"),
                "max_total_tokens": args.max_total_tokens,
+               "shared_budget_plan_sha256": BudgetPlan.formal().sha256,
                "max_tokens_per_run": args.max_tokens_per_run, "repetitions": args.repeats,
                "tools": environment["tools"], "tool_versions": environment["versions"],
+               "runtime_revision": source_revision(project_root / "agent" / "forgepilot"),
+               "evaluator_revision": source_revision(DATA_ROOT / "forgepilot_eval"),
+               "prompt_sha256": hashlib.sha256((agent_definitions / "prompts.py").read_bytes()).hexdigest(),
+               "agent_definition_sha256": hashlib.sha256(
+                   (agent_definitions / "registry.py").read_bytes() +
+                   (agent_definitions / "definitions.py").read_bytes()).hexdigest(),
+               "task_spec_sha256": configuration_digest([t.model_dump(mode="json") for t in tasks]),
+               "toolchain_sha256": configuration_digest(toolchain),
                "task_timeout": args.task_timeout, "llm_timeout": args.llm_timeout,
                "approval_timeout": args.approval_timeout,
                "generator": args.generator, "qt_kit": args.qt_kit, "rag": args.rag,
@@ -149,6 +208,7 @@ def empty_row(task, run_index=1):
             "oracle_status": "not_applicable" if task.analysis else "not_run",
             "integrity_status": "not_run", "scope_valid": None, "config_hash": None,
             "approval_not_granted": False, "gates": {},
+            "safety_violations": None,
             "tool_calls": None, "total_tokens": None, "latency_ms": None,
             "agent_latency_ms": None, "repair_rounds": None,
             "repository": None, "artifact_directory": None}
@@ -198,6 +258,13 @@ class Benchmark:
             # filesystem and network identity. A path outside the worktree alone
             # cannot keep protected tests secret from that code.
             raise ValueError("Real benchmark isolation unavailable: candidate processes require a verified restricted identity or VM before paid evaluation")
+        if args.mode == "real":
+            campaign = f"{args.dataset}:{args.agent_topology}"
+            plan = BudgetPlan.formal()
+            if not args.shared_budget_ledger or args.max_total_tokens != plan.cap(campaign):
+                raise ValueError("Formal real benchmark requires a shared budget ledger and the locked campaign cap")
+            if not plan.capacity_report(max_tokens_per_run=args.max_tokens_per_run)[campaign]["guaranteed_full_run_capacity"]:
+                raise ValueError("Per-run token limit exceeds the locked campaign's full-run capacity")
         if args.mode == "offline" and args.rag == "on":
             raise ValueError("RAG-on Agent evaluation requires --mode real; offline scripts are not Agent quality evidence")
         self.dataset = DATA_ROOT
@@ -217,6 +284,9 @@ class Benchmark:
         self.grader = Grader(self.dataset, self.cmake, self.ctest, generator=args.generator, ninja=self.ninja, qt_kit=args.qt_kit)
         self.model_factory = model_factory
         self.token_budget = TokenBudget(args.max_total_tokens) if args.mode == "real" else None
+        self.shared_budget_path = args.shared_budget_ledger if args.mode == "real" else None
+        self.shared_budget_plan = BudgetPlan.formal() if args.mode == "real" else None
+        self.budget_campaign = f"{args.dataset}:{args.agent_topology}"
         self.read_line = read_line or ConsoleInput().read
         self.solutions = None
         self.rag_manager = None
@@ -226,13 +296,16 @@ class Benchmark:
         elif not all(config_presence().values()):
             raise ValueError("Real LLM configuration is incomplete; no real benchmark results were produced. Use explicit --mode offline for evaluator validation.")
 
-    def model(self, task):
+    def model(self, task, budget_run_id=None):
         if self.model_factory: return self.model_factory(task)
         if self.args.mode == "offline": return OfflineModel(task, self.solutions[task.id])
         client = OpenAICompatibleClient(os.environ["FORGEPILOT_BASE_URL"], os.environ["FORGEPILOT_API_KEY"],
                                       os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"],
                                       timeout=self.args.llm_timeout)
-        return BudgetedModel(client, self.token_budget, self.args.max_tokens_per_run)
+        return BudgetedModel(client, self.token_budget, self.args.max_tokens_per_run,
+                             shared_budget_path=self.shared_budget_path,
+                             shared_budget_plan=self.shared_budget_plan,
+                             budget_run_id=budget_run_id)
 
     async def environment(self):
         values = {"python": sys.version, "executable": sys.executable, "prefix": sys.prefix,
@@ -258,6 +331,13 @@ class Benchmark:
         except Exception:
             versions["msvc"] = {"status": "not_in_current_process_path"}
         values["versions"] = versions
+        root = DATA_ROOT.parent
+        revision = await run_process([self.git, "rev-parse", "HEAD"], root)
+        status = await run_process([self.git, "status", "--porcelain=v1", "--untracked-files=all"], root)
+        if revision.returncode or status.returncode:
+            raise ValueError("Cannot record benchmark code commit and dirty state")
+        values["code_commit"] = revision.stdout.decode("ascii", errors="strict").strip()
+        values["code_dirty"] = bool(status.stdout.strip())
         return values
 
     async def run_task(self, task, run_directory, source_hashes, run_index=1):
@@ -277,6 +357,7 @@ class Benchmark:
         row.update(repository=str(repo), artifact_directory=str(directory), temp_root=str(temp_root), started_at=now())
         save(directory / "task.json", task.model_dump(mode="json"), self.redactor)
         trace, service, llm = MemoryTrace(self.redactor), None, None
+        budget_run_id = None
         result = None
         decisions = []
         latency = 0.0
@@ -294,7 +375,13 @@ class Benchmark:
                     return row
             if inventory(self.dataset) != source_hashes: raise ValueError("Protected dataset changed")
             if inventory(repo, ignore_generated=True) != before: raise ValueError("Baseline modified source")
-            llm = self.model(task)
+            if self.shared_budget_path is not None:
+                proposed_id = f"{self.config_hash}:{task.id}:{run_index}:{uuid4().hex}"
+                with SharedTokenBudget(self.shared_budget_path, self.shared_budget_plan) as ledger:
+                    ledger.begin_run(self.budget_campaign, proposed_id, self.args.max_tokens_per_run)
+                budget_run_id = proposed_id
+                row["budget_run_id"] = budget_run_id
+            llm = self.model(task, budget_run_id)
             config = None if task.analysis else BuildConfig(self.cmake, self.ctest, configure_preset="eval",
                 build_preset="eval-build", test_preset="eval-test", configure_timeout=120, build_timeout=180, test_timeout=60)
             service = TaskService(llm, rg_executable=self.rg, git_executable=self.git, trace=trace,
@@ -384,6 +471,10 @@ class Benchmark:
             if llm is not None:
                 close = getattr(llm, "aclose", None)
                 if close is not None: await close()
+            if budget_run_id is not None:
+                with SharedTokenBudget(self.shared_budget_path, self.shared_budget_plan) as ledger:
+                    if ledger.snapshot()["state"] == "ready":
+                        ledger.finish_run(budget_run_id, state="completed" if row["success"] else "failed")
             if result is not None:
                 row.update(state=result.state.value, tool_calls=result.tool_calls, total_tokens=result.token_usage["total_tokens"],
                            agent_latency_ms=round(latency, 3), repair_rounds=None if task.analysis else result.repair_round,
@@ -433,6 +524,13 @@ class Benchmark:
         self.config_hash = lock["hash"]
         metadata = {"run_id": run_id, "mode": self.args.mode, "model": model_name,
             "endpoint_sha256": lock["configuration"]["endpoint_sha256"],
+            "real_task_lock_sha256": lock["configuration"]["task_lock_sha256"],
+            "model_profile_sha256": lock["configuration"]["model_profile_sha256"],
+            "code_commit": environment.get("code_commit"), "code_dirty": environment.get("code_dirty"),
+            "prompt_sha256": lock["configuration"]["prompt_sha256"],
+            "agent_definition_sha256": lock["configuration"]["agent_definition_sha256"],
+            "task_spec_sha256": lock["configuration"]["task_spec_sha256"],
+            "toolchain_sha256": lock["configuration"]["toolchain_sha256"],
             "started_at": now(), "finished_at": None, "selected_tasks": [t.id for t in self.tasks], "dataset_version": 1,
             "dataset_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
             "source_hashes": sources, "environment": environment, "approval_mode": self.args.approval,
@@ -501,6 +599,7 @@ def parser():
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--allow-paid-real", action="store_true")
     p.add_argument("--max-total-tokens", type=int)
+    p.add_argument("--shared-budget-ledger", help="Persistent token ledger shared by all four formal campaigns")
     p.add_argument("--max-tokens-per-run", type=int, default=20000)
     p.add_argument("--rag", choices=("off", "on"), default="off",
                    help="Run the real Agent benchmark with code RAG disabled or enabled")

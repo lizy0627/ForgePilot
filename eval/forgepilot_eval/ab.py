@@ -13,9 +13,13 @@ from .metrics import summarize, task_results
 
 REQUIRED_GATES = ("flow", "scope", "build", "ctest", "oracle", "integrity", "test_integrity")
 REQUIRED_LOCK_FIELDS = ("dataset", "task_lock_sha256", "model", "endpoint_sha256",
-                        "max_total_tokens", "max_tokens_per_run", "tools", "tool_versions",
+                        "model_profile", "model_profile_sha256",
+                        "max_total_tokens", "max_tokens_per_run", "shared_budget_plan_sha256",
+                        "tools", "tool_versions",
                         "task_timeout", "llm_timeout", "generator", "approval", "rag",
-                        "runtime_revision", "evaluator_revision", "validation", "repetitions")
+                        "runtime_revision", "evaluator_revision", "validation", "repetitions",
+                        "code_commit", "code_dirty", "prompt_sha256", "agent_definition_sha256",
+                        "task_spec_sha256", "toolchain_sha256")
 
 
 def _sha256(value):
@@ -57,6 +61,14 @@ def _load(path, topology, tasks, lock_digest):
         raise ValueError("A/B configuration does not bind the locked real dataset")
     if any(not config["tool_versions"].get(name) for name, executable in config["tools"].items() if executable):
         raise ValueError("A/B tool version is missing")
+    profile = config["model_profile"]
+    if (not isinstance(profile, dict) or _sha256(profile) != config["model_profile_sha256"]
+            or profile.get("model") != config["model"]
+            or profile.get("endpoint_sha256") != config["endpoint_sha256"]
+            or not isinstance(profile.get("credential_ref"), str)
+            or re.fullmatch(r"(?:env:[A-Z][A-Z0-9_]{0,127}|dpapi:[a-z][a-z0-9._-]{0,127})",
+                            profile["credential_ref"]) is None):
+        raise ValueError("A/B model profile does not bind the selected provider")
     if config["rag"] == "on":
         rag = config.get("rag_configuration")
         if (not isinstance(rag, dict)
@@ -64,9 +76,15 @@ def _load(path, topology, tasks, lock_digest):
                 or any(not isinstance(rag.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", rag[key]) is None
                        for key in ("embedding_endpoint_sha256", "index_configuration_sha256"))):
             raise ValueError("A/B RAG configuration is not pinned")
-    for key in ("endpoint_sha256", "runtime_revision", "evaluator_revision"):
+    for key in ("endpoint_sha256", "model_profile_sha256", "shared_budget_plan_sha256",
+                "runtime_revision", "evaluator_revision", "prompt_sha256",
+                "agent_definition_sha256", "task_spec_sha256", "toolchain_sha256"):
         if not isinstance(config[key], str) or re.fullmatch(r"[0-9a-f]{64}", config[key]) is None:
             raise ValueError("A/B provider or implementation revision is missing")
+    if (not isinstance(config["code_commit"], str)
+            or re.fullmatch(r"[0-9a-f]{40}", config["code_commit"]) is None
+            or config["code_dirty"] is not False):
+        raise ValueError("A/B source commit must be clean and pinned")
     for key in ("max_total_tokens", "max_tokens_per_run"):
         value = config[key]
         if type(value) is not int or value <= 0:
@@ -78,10 +96,14 @@ def _load(path, topology, tasks, lock_digest):
     digest = _sha256(config)
     if metadata.get("config_hash") != digest or metadata.get("real_task_lock_sha256") != lock_digest:
         raise ValueError("A/B configuration or task-lock hash mismatch")
-    endpoint = metadata.get("endpoint")
     if (metadata.get("model") != config["model"] or metadata.get("rag") != config["rag"]
             or metadata.get("approval_mode") != config["approval"]
-            or not isinstance(endpoint, str) or hashlib.sha256(endpoint.encode("utf-8")).hexdigest() != config["endpoint_sha256"]):
+            or metadata.get("endpoint_sha256") != config["endpoint_sha256"]
+            or metadata.get("model_profile_sha256") != config["model_profile_sha256"]
+            or metadata.get("code_commit") != config["code_commit"]
+            or metadata.get("code_dirty") != config["code_dirty"]
+            or any(metadata.get(key) != config[key] for key in (
+                "prompt_sha256", "agent_definition_sha256", "task_spec_sha256", "toolchain_sha256"))):
         raise ValueError("A/B saved metadata contradicts the locked configuration")
     rows = document.get("tasks")
     if not isinstance(rows, list) or len(rows) != 15:

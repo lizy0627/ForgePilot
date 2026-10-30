@@ -10,7 +10,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "eval"))
 
-from forgepilot_eval.manifest import load_tasks
+from forgepilot_eval.manifest import load_tasks, verify_real_lock
+from forgepilot_eval.campaign_budget import BudgetPlan, SharedTokenBudget
 from forgepilot_eval.runner import (Benchmark, BudgetedModel, TokenBudget, main,
     approve, comparison_lock, empty_row, parser, verify_ab_pair)
 from forgepilot.security import Redactor
@@ -85,6 +86,29 @@ async def test_paid_budget_stops_after_missing_usage_or_overshoot():
 
 
 @pytest.mark.asyncio
+async def test_paid_model_charges_shared_ledger_and_unknown_usage_closes_it(tmp_path):
+    plan = BudgetPlan(100, 30, 20)
+    path = tmp_path / "formal-budget.sqlite3"
+    with SharedTokenBudget(path, plan) as ledger:
+        ledger.begin_run("micro:single", "known", 10)
+    model = BudgetedModel(_PaidStub([{"total_tokens": 3}]), TokenBudget(30), 10,
+                          shared_budget_path=path, shared_budget_plan=plan, budget_run_id="known")
+    await model.chat([])
+    with SharedTokenBudget(path, plan) as ledger:
+        ledger.finish_run("known")
+        assert ledger.snapshot()["spent_tokens"] == 3
+        ledger.begin_run("micro:single", "unknown", 10)
+    model = BudgetedModel(_PaidStub([None]), TokenBudget(30), 10,
+                          shared_budget_path=path, shared_budget_plan=plan, budget_run_id="unknown")
+    with pytest.raises(ValueError, match="closed"):
+        await model.chat([])
+    with SharedTokenBudget(path, plan) as ledger:
+        assert ledger.snapshot()["state"] == "uncertain"
+        with pytest.raises(ValueError, match="uncertain"):
+            ledger.begin_run("real:multi", "later", 10)
+
+
+@pytest.mark.asyncio
 async def test_manual_approval_timeout_cancels_review_without_later_grant():
     task = load_tasks()[0]
     plan = SimpleNamespace(files_to_modify=[SimpleNamespace(path=task.allowed_files[0])],
@@ -128,6 +152,25 @@ def test_ab_lock_requires_identical_task_budget_tools_timeout_and_tests():
     assert comparison_lock(tasks, sources, args, {**env, "tools": {"cmake": "different"}}, "model-a")["hash"] != one["hash"]
     args.max_tokens_per_run += 1
     assert comparison_lock(tasks, sources, args, env, "model-a")["hash"] != one["hash"]
+
+
+def test_real_comparison_lock_binds_locked_tasks_and_source_without_credentials(monkeypatch):
+    monkeypatch.setenv("FORGEPILOT_BASE_URL", "https://fixture.invalid/v1")
+    monkeypatch.setenv("FORGEPILOT_API_KEY", "sk-fixture-secret-never-serialized")
+    args = parser().parse_args(["--mode", "real", "--dataset", "real",
+                                "--max-total-tokens", "100000"])
+    environment = {"tools": {"git": "git-fixture"}, "versions": {"git": {"output": "fixture"}},
+                   "code_commit": "a" * 40, "code_dirty": False}
+    lock = comparison_lock(verify_real_lock(), {}, args, environment, "fixture-model")
+    config = lock["configuration"]
+    for key in ("task_lock_sha256", "model_profile_sha256", "runtime_revision",
+                "evaluator_revision", "prompt_sha256", "agent_definition_sha256",
+                "task_spec_sha256", "toolchain_sha256"):
+        assert isinstance(config[key], str) and len(config[key]) == 64
+    assert config["code_commit"] == "a" * 40 and config["code_dirty"] is False
+    serialized = json.dumps(lock)
+    assert "sk-fixture-secret" not in serialized
+    assert "https://fixture.invalid/v1" not in serialized
 
 
 @pytest.fixture
