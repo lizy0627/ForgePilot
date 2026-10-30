@@ -157,16 +157,94 @@ def _text(data):
 
 
 @dataclass(frozen=True, slots=True)
+class AssertionUpdate:
+    """One trusted, base-bound assertion correction in an existing public test."""
+    path: str
+    baseline_file_sha256: str
+    old_assertion_sha256: str
+    new_assertion_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ControlFlowAddition:
+    """One known new loop/control signature in a pinned public test file."""
+    path: str
+    baseline_file_sha256: str
+    kind: str
+    signature_sha256: str
+
+
+def _control_flow_preserved(old, new, *, path, baseline_bytes, additions, kind):
+    if kind == "cmake":
+        before = Counter((name, _canonical(body)) for name, body, _ in _cmake_commands(old)
+                         if name in _CMAKE_FLOW)
+        after = Counter((name, _canonical(body)) for name, body, _ in _cmake_commands(new)
+                        if name in _CMAKE_FLOW)
+        def digest(value):
+            return hashlib.sha256((value[0] + "\0" + value[1]).encode()).hexdigest()
+    else:
+        before, after = _control_flow(old), _control_flow(new)
+        def digest(value):
+            return hashlib.sha256(value.encode()).hexdigest()
+    if before - after:
+        return False
+    added = after - before
+    if not added:
+        return True
+    baseline_hash = hashlib.sha256(baseline_bytes).hexdigest()
+    for addition in additions:
+        if (path_key(addition.path) != path_key(path) or addition.kind != kind
+                or addition.baseline_file_sha256 != baseline_hash):
+            continue
+        matches = [signature for signature in added
+                   if digest(signature) == addition.signature_sha256]
+        if len(matches) == 1:
+            added[matches[0]] -= 1
+            if added[matches[0]] == 0:
+                del added[matches[0]]
+    return not added
+
+
+def _assertions_preserved(old, new, *, path, baseline_bytes, updates):
+    original = _assertions(old)
+    current = _assertions(new)
+    removed = original - current
+    if not removed:
+        return True
+    added = current - original
+    baseline_hash = hashlib.sha256(baseline_bytes).hexdigest()
+    for update in updates:
+        if (path_key(update.path) != path_key(path)
+                or update.baseline_file_sha256 != baseline_hash):
+            continue
+        old_matches = [assertion for assertion in removed
+                       if hashlib.sha256(assertion.encode()).hexdigest() == update.old_assertion_sha256]
+        new_matches = [assertion for assertion in added
+                       if hashlib.sha256(assertion.encode()).hexdigest() == update.new_assertion_sha256]
+        if len(old_matches) == 1 and len(new_matches) == 1:
+            removed[old_matches[0]] -= 1
+            if removed[old_matches[0]] == 0:
+                del removed[old_matches[0]]
+    return not removed
+
+
+@dataclass(frozen=True, slots=True)
 class IntegrityTaskSpec:
     """Trusted adapter-owned exact permission request, never parsed from model plans."""
     task_type: str = "bug_fix"
     test_files_to_modify: tuple[str, ...] = ()
+    assertion_updates: tuple[AssertionUpdate, ...] = ()
+    control_flow_additions: tuple[ControlFlowAddition, ...] = ()
 
     def __post_init__(self):
         if self.task_type not in {"bug_fix", "feature", "maintenance"}:
             raise ValueError("Unknown task type")
         if type(self.test_files_to_modify) is not tuple or len(self.test_files_to_modify) > 100:
             raise ValueError("Test modification scope must be an immutable exact file list")
+        if type(self.assertion_updates) is not tuple or len(self.assertion_updates) > 8:
+            raise ValueError("Assertion updates must be a bounded immutable tuple")
+        if type(self.control_flow_additions) is not tuple or len(self.control_flow_additions) > 8:
+            raise ValueError("Control-flow additions must be a bounded immutable tuple")
         seen = set()
         for path in self.test_files_to_modify:
             if (not isinstance(path, str) or not path or len(path) > 1024
@@ -178,6 +256,30 @@ class IntegrityTaskSpec:
             if key in seen:
                 raise ValueError("Duplicate test file permission")
             seen.add(key)
+        update_paths = set()
+        for update in self.assertion_updates:
+            if not isinstance(update, AssertionUpdate):
+                raise ValueError("Assertion update must be a trusted structured rule")
+            key = path_key(update.path)
+            if key not in seen or key in update_paths:
+                raise ValueError("Assertion update requires one exact approved test path")
+            update_paths.add(key)
+            if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in (
+                    update.baseline_file_sha256, update.old_assertion_sha256,
+                    update.new_assertion_sha256)):
+                raise ValueError("Assertion update requires SHA-256 digests")
+        flow_keys = set()
+        for addition in self.control_flow_additions:
+            if not isinstance(addition, ControlFlowAddition):
+                raise ValueError("Control-flow addition must be a trusted structured rule")
+            key = path_key(addition.path)
+            flow_key = (key, addition.kind, addition.signature_sha256)
+            if key not in seen or flow_key in flow_keys or addition.kind not in {"cpp", "cmake"}:
+                raise ValueError("Control-flow addition requires one exact approved test path")
+            flow_keys.add(flow_key)
+            if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in (
+                    addition.baseline_file_sha256, addition.signature_sha256)):
+                raise ValueError("Control-flow addition requires SHA-256 digests")
 
     @classmethod
     def from_task_spec(cls, task_spec):
@@ -350,9 +452,13 @@ class IntegrityMonitor:
         if current is not None and existed_at_approval and (protected or is_test_path(path) or _assertions(old)):
             if key not in self._approved:
                 _fail("Existing tests are read-only; exact TaskSpec and separate test approval are required")
-            if _assertions(old) - _assertions(new):
+            if not _assertions_preserved(old, new, path=path,
+                                         baseline_bytes=self._baseline.get(path, b""),
+                                         updates=self.task_spec.assertion_updates):
                 _fail("Removing or weakening an existing assertion is forbidden")
-            if _control_flow(new) != _control_flow(old):
+            if not _is_cmake(path) and not _control_flow_preserved(
+                    old, new, path=path, baseline_bytes=self._baseline.get(path, b""),
+                    additions=self.task_spec.control_flow_additions, kind="cpp"):
                 _fail("Changed control flow or early exits in existing tests cannot be verified safely")
         cmake = _is_cmake(path)
         if Counter(match.group().casefold() for match in _SUPPRESSION.finditer(_comments(new, cmake=cmake))) - Counter(
@@ -365,10 +471,9 @@ class IntegrityMonitor:
                                    if name in _CMAKE_PROTECTED)
             if old_commands - new_commands:
                 _fail("Existing CTest registrations, control flow and compilation options must be preserved")
-            if Counter((name, signature) for name, signature in new_commands.elements()
-                       if name in _CMAKE_FLOW) != Counter(
-                    (name, signature) for name, signature in old_commands.elements()
-                    if name in _CMAKE_FLOW):
+            if not _control_flow_preserved(
+                    old, new, path=path, baseline_bytes=self._baseline.get(path, b""),
+                    additions=self.task_spec.control_flow_additions, kind="cmake"):
                 _fail("New CMake control flow may bypass existing test registration")
 
     def verify(self, *, ctest_names=None):

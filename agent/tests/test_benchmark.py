@@ -135,6 +135,7 @@ def test_protected_tests_and_extra_source_changes_cannot_score():
 def benchmark_factory(tmp_path, build_config, rg_exe, git_exe):
     def create(task_id, scenario="success"):
         args = parser().parse_args(["--mode", "offline", "--approval", "manifest", "--task", task_id,
+            "--repeats", "1",
             "--cmake", build_config.cmake, "--ctest", build_config.ctest, "--generator", "Ninja", "--ninja", build_config.make_program,
             "--rg", rg_exe, "--git", git_exe, "--output-root", str(tmp_path / "reports")])
         benchmark = Benchmark(args)
@@ -149,15 +150,15 @@ async def test_actual_success_isolated_copy_report_and_unknown_usage(benchmark_f
     before = inventory(DATA_ROOT)
     output, rows, metrics = await benchmark.run()
     row = rows[0]
-    assert row["success"] and row["build_status"] == row["test_status"] == "passed" and row["test_count"] == 1
+    assert row["success"] and row["build_status"] == row["test_status"] == row["oracle_status"] == "passed" and row["test_count"] == 2
     assert row["total_tokens"] is None and metrics["Average Token Usage"]["known"] == 0
     assert row["tool_calls"] > 0 and row["latency_ms"] > 0
     repo = Path(row["repository"])
     assert not repo.is_relative_to(DATA_ROOT.parent) and repo.exists()
     assert inventory(DATA_ROOT) == before
-    approval = json.loads((output / row["id"] / "approvals.json").read_text(encoding="utf-8"))[0]
+    approval = json.loads((output / row["id"] / "run-01" / "approvals.json").read_text(encoding="utf-8"))[0]
     assert approval["approved"] and approval["plan_version"] == 1 and approval["task_id"] == row["agent_task_id"]
-    assert json.loads((output / row["id"] / "agent-result.json").read_text(encoding="utf-8"))["approved_files"] == ["src/subject.cpp"]
+    assert json.loads((output / row["id"] / "run-01" / "agent-result.json").read_text(encoding="utf-8"))["approved_files"] == ["src/subject.cpp"]
     assert all((output / name).is_file() for name in ("results.json", "results.csv", "report.md"))
     repository = await Repository.open(str(repo), rg_executable=benchmark.rg, git_executable=benchmark.git)
     with pytest.raises(Exception): await repository.read_file("../final/protected/oracle.cpp")
@@ -170,7 +171,7 @@ async def test_actual_failure_retains_artifacts_and_does_not_trust_model_summary
     row = rows[0]
     assert not row["success"] and row["build_status"] == "passed" and row["test_status"] == "failed"
     assert row["state"] == "failed" and Path(row["repository"]).exists()
-    assert (output / row["id"] / "trace.json").is_file()
+    assert (output / row["id"] / "run-01" / "trace.json").is_file()
     assert metrics["Task Success Rate"]["value"] == 0 and metrics["Test Pass Rate"]["value"] == 0
 
 
@@ -183,7 +184,7 @@ async def test_actual_scope_refusal_stops_before_write_and_preserves_original(be
     assert row["build_status"] == row["test_status"] == "not_run"
     repo = Path(row["repository"])
     assert (repo / "src/subject.cpp").read_bytes() == asset(DATA_ROOT, "fixtures/cpp-compile-02/src/subject.cpp").read_bytes()
-    trace = json.loads((output / row["id"] / "trace.json").read_text(encoding="utf-8"))
+    trace = json.loads((output / row["id"] / "run-01" / "trace.json").read_text(encoding="utf-8"))
     assert not any(e["kind"] == "plan_approved" or e["kind"] == "file_changed" for e in trace)
 
 
@@ -207,9 +208,13 @@ async def test_early_zero_exit_cannot_fake_protected_assertion_completion(benchm
     shutil.copytree(asset(DATA_ROOT, task.fixture), repo)
     (repo / "src/subject.cpp").write_text('#include "subject.h"\n#include <cstdlib>\nint clamp_level(int value){std::exit(0);}\n', encoding="utf-8")
     result = await benchmark.grader.run(task, repo, tmp_path / "protected-evaluation")
-    assert result["build_status"] == "passed" and result["test_count"] == 1
+    assert result["build_status"] == "passed" and result["test_count"] == 2
     assert result["commands"][-1]["returncode"] == 0  # CTest alone would falsely pass this.
     assert result["test_status"] == "failed" and result["test_reason"] == "protected_oracle_did_not_complete"
+    assert all(set(command) == {"phase", "status", "returncode", "duration_ms"}
+               for command in result["commands"])
+    assert not (repo / "oracle.cpp").exists()
+    assert (tmp_path / "protected-evaluation" / "protected" / "oracle.cpp").is_file()
 
 
 @pytest.mark.asyncio
@@ -227,7 +232,7 @@ async def test_revised_scope_stops_and_retains_prior_authorized_edits(benchmark_
     output, rows, _ = await benchmark.run()
     row = rows[0]
     assert row["reason"] == "authorization_scope" and row["state"] == "cancelled"
-    decisions = json.loads((output / row["id"] / "approvals.json").read_text(encoding="utf-8"))
+    decisions = json.loads((output / row["id"] / "run-01" / "approvals.json").read_text(encoding="utf-8"))
     assert [d["approved"] for d in decisions] == [True, False]
     assert [d["plan_version"] for d in decisions] == [1, 2]
     repo = Path(row["repository"])

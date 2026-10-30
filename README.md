@@ -221,13 +221,13 @@ RAG 默认关闭。桌面启动器实际读取上文所示本机 `config.json` �
 .\scripts\Test-ClientIntegration.cmd
 ```
 
-固定离线评测是额外的开发入口：
+固定离线评测是额外的开发入口。默认每题执行 3 次独立运行，报告保留全部运行及失败，并按 2/3 计算稳定成功：
 
 ```powershell
 .\scripts\Run-Benchmark.cmd --mode offline --approval manifest --generator Ninja
 ```
 
-离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。
+离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。原始 JSON、逐次 CSV、任务级 CSV、Markdown 报告与自动生成的 Benchmark Card 保存在 `logs/benchmark/` 的本次运行目录。任务锁定、Oracle 边界和指标定义见 [评测说明](docs/evaluation.md)；[Benchmark Card](docs/benchmark-card.md) 当前只记录协议和正式证据状态。
 
 Bug Fix / Feature 的完整后端入口 `DeliveryWorkflow` 已连接确定性 Validator、共用三轮额度的 Repair、
 独立 Reviewer 和 DeliveryBundle。接入方式、失败分类、Oracle 边界与真实 CMake 集成测试见
@@ -252,7 +252,7 @@ Remove-Item Env:FORGEPILOT_EMBEDDING_API_KEY
 
 若服务的 Embeddings 响应不提供统一 token usage，报告会将 `provider_token_usage` 记为 `null`，而不是猜测数值。自动化测试只使用 fake/deterministic Embedding；生产 API + Qt 的索引生命周期由 `Test-ClientIntegration.cmd` 覆盖。
 
-真实 15 项 Agent 对比可在具备完整模型与 Embedding 配置时分别运行 `--mode real --rag off` 和 `--mode real --rag on`。不要把固定离线脚本或确定性检索指标写成真实 Agent 成功率。
+真实 Agent 评测需要完整环境与模型配置、明确的 Token 预算，并显式提供 `--mode real --allow-paid-real --max-total-tokens <上限>`。当前真实模式仍因候选构建进程尚未与 Protected Oracle 做系统权限隔离而拒绝启动；本阶段没有运行付费真实评测。正式数据须在隔离环境、固定任务清单及 A/B 配置核对后产生。不要把固定离线脚本、fake transport 或确定性检索指标写成真实 Agent 成功率。
 
 ### 普通问答性能基准与指标
 

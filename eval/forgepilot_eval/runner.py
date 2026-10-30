@@ -31,6 +31,93 @@ from .metrics import write_reports
 from .offline import OfflineModel
 
 
+class TokenBudget:
+    """Fail closed when provider usage is absent; charge every completed request."""
+    def __init__(self, limit):
+        self.limit = limit
+        self.spent = 0
+
+    @property
+    def remaining(self):
+        return self.limit - self.spent
+
+    def charge(self, usage):
+        amount = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if type(amount) is not int or amount < 0:
+            raise ValueError("Real benchmark requires provider total_tokens usage on every response")
+        self.spent += amount
+        if self.spent > self.limit:
+            raise ValueError("Real benchmark token budget exceeded")
+
+
+class BudgetedModel:
+    def __init__(self, client, campaign, per_run_limit):
+        self.client = client
+        self.campaign = campaign
+        self.run = TokenBudget(per_run_limit)
+        self.redactor = client.redactor
+
+    async def chat(self, messages, tools=None):
+        remaining = min(self.campaign.remaining, self.run.remaining)
+        if remaining <= 0:
+            raise ValueError("Real benchmark token budget exhausted before request")
+        # Provider-reported input is only known after a reply. Output is bounded
+        # prospectively; a single request can still exceed the aggregate cap.
+        self.client.max_output_tokens = min(4096, remaining)
+        try:
+            reply = await self.client.chat(messages, tools)
+        except BaseException:
+            # A timed-out or interrupted provider request may still be billable.
+            # Its usage is unknowable, so no later paid request is allowed.
+            self.campaign.spent = self.campaign.limit
+            raise
+        try:
+            self.campaign.charge(reply.usage)
+            self.run.charge(reply.usage)
+        except ValueError:
+            # Missing accounting makes every subsequent paid request unsafe.
+            self.campaign.spent = self.campaign.limit
+            raise
+        return reply
+
+    async def aclose(self):
+        await self.client.aclose()
+
+
+def configuration_digest(payload):
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def comparison_lock(tasks, sources, args, environment, model):
+    """Topology is intentionally excluded so unequal A/B conditions are detectable."""
+    endpoint = os.environ.get("FORGEPILOT_BASE_URL") if args.mode == "real" else None
+    payload = {"schema": 1, "dataset": args.dataset, "tasks": [t.model_dump(mode="json") for t in tasks],
+               "source_hashes": sources, "model": model,
+               "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
+               "max_total_tokens": args.max_total_tokens,
+               "max_tokens_per_run": args.max_tokens_per_run, "repetitions": args.repeats,
+               "tools": environment["tools"], "tool_versions": environment["versions"],
+               "task_timeout": args.task_timeout, "llm_timeout": args.llm_timeout,
+               "approval_timeout": args.approval_timeout,
+               "generator": args.generator, "qt_kit": args.qt_kit, "rag": args.rag,
+               "approval": args.approval, "agent_steps": 30, "repair_rounds": 3,
+               "validation": "fresh_public_ctest_and_protected_oracle_v2"}
+    return {"hash": configuration_digest(payload), "configuration": payload}
+
+
+def verify_ab_pair(single, multi):
+    if single.get("agent_topology") != "single" or multi.get("agent_topology") != "multi":
+        raise ValueError("A/B pair requires single and multi topologies")
+    for result in (single, multi):
+        payload = result.get("comparison_configuration")
+        if not isinstance(payload, dict) or configuration_digest(payload) != result.get("config_hash"):
+            raise ValueError("A/B configuration hash does not match saved configuration")
+    if single.get("config_hash") != multi.get("config_hash") or not single.get("config_hash"):
+        raise ValueError("A/B configuration hash mismatch")
+    return True
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -52,15 +139,22 @@ def save(path, data, redactor):
     path.write_text(json.dumps(redactor.data(plain(data)), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
 
-def empty_row(task):
-    return {"id": task.id, "category": task.category, "success": False, "reason": "not_run", "state": "not_run",
+def empty_row(task, run_index=1):
+    return {"id": task.id, "category": task.category, "run_index": run_index,
+            "success": False, "first_pass_success": False, "repair_success": False,
+            "reason": "not_run", "state": "not_run",
             "build_status": "not_applicable" if task.analysis else "not_run",
             "test_status": "not_applicable" if task.analysis else "not_run", "test_count": 0,
-            "tool_calls": None, "total_tokens": None, "latency_ms": None, "repair_rounds": None,
+            "ctest_status": "not_applicable" if task.analysis else "not_run",
+            "oracle_status": "not_applicable" if task.analysis else "not_run",
+            "integrity_status": "not_run", "scope_valid": None, "config_hash": None,
+            "approval_not_granted": False, "gates": {},
+            "tool_calls": None, "total_tokens": None, "latency_ms": None,
+            "agent_latency_ms": None, "repair_rounds": None,
             "repository": None, "artifact_directory": None}
 
 
-async def approve(service, pending, task, mode, read_line):
+async def approve(service, pending, task, mode, read_line, *, timeout_seconds=None):
     proposed = [f.path for f in pending.plan.files_to_modify]
     allowed = {p.casefold() for p in task.allowed_files}
     decision = {"task_id": pending.task_id, "plan_version": pending.plan_version, "plan": pending.plan.model_dump(mode="json"),
@@ -75,7 +169,13 @@ async def approve(service, pending, task, mode, read_line):
     else:
         print(json.dumps(service.redactor.data(decision), ensure_ascii=False, indent=2), flush=True)
         print(f"Approve exactly this plan: approve {pending.plan_version}; any other answer/EOF stops.", flush=True)
-        decision.update(approved=(await read_line()).strip() == f"approve {pending.plan_version}", reason="human_review")
+        try:
+            response = (await asyncio.wait_for(read_line(), timeout_seconds)
+                        if timeout_seconds is not None else await read_line())
+            accepted = response.strip() == f"approve {pending.plan_version}"
+            decision.update(approved=accepted, reason="human_review" if accepted else "human_review_denied")
+        except TimeoutError:
+            decision.update(approved=False, reason="approval_timeout")
     if decision["approved"]:
         # Same task-bound, version-bound API used by CLI/HTTP; no mutable grant shortcuts.
         service.approve(pending.task_id, pending.plan_version)
@@ -87,6 +187,17 @@ async def approve(service, pending, task, mode, read_line):
 class Benchmark:
     def __init__(self, args, *, model_factory=None, read_line=None):
         self.args = args
+        if args.agent_topology != "single":
+            raise ValueError("Multi-Agent benchmark adapter is not yet connected; no A/B result was produced")
+        if args.dataset != "micro":
+            raise ValueError("Real-task runner is not yet connected; locked manifests are not executable results")
+        if args.mode == "real" and (not args.allow_paid_real or args.max_total_tokens is None):
+            raise ValueError("Paid real benchmark requires --allow-paid-real and --max-total-tokens")
+        if args.mode == "real":
+            # Candidate-controlled CMake/CTest code currently shares the evaluator's
+            # filesystem and network identity. A path outside the worktree alone
+            # cannot keep protected tests secret from that code.
+            raise ValueError("Real benchmark isolation unavailable: candidate processes require a verified restricted identity or VM before paid evaluation")
         if args.mode == "offline" and args.rag == "on":
             raise ValueError("RAG-on Agent evaluation requires --mode real; offline scripts are not Agent quality evidence")
         self.dataset = DATA_ROOT
@@ -105,6 +216,7 @@ class Benchmark:
                 raise ValueError("Qt tasks require the existing absolute --qt-kit / FORGEPILOT_QT_KIT")
         self.grader = Grader(self.dataset, self.cmake, self.ctest, generator=args.generator, ninja=self.ninja, qt_kit=args.qt_kit)
         self.model_factory = model_factory
+        self.token_budget = TokenBudget(args.max_total_tokens) if args.mode == "real" else None
         self.read_line = read_line or ConsoleInput().read
         self.solutions = None
         self.rag_manager = None
@@ -117,9 +229,10 @@ class Benchmark:
     def model(self, task):
         if self.model_factory: return self.model_factory(task)
         if self.args.mode == "offline": return OfflineModel(task, self.solutions[task.id])
-        return OpenAICompatibleClient(os.environ["FORGEPILOT_BASE_URL"], os.environ["FORGEPILOT_API_KEY"],
+        client = OpenAICompatibleClient(os.environ["FORGEPILOT_BASE_URL"], os.environ["FORGEPILOT_API_KEY"],
                                       os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"],
                                       timeout=self.args.llm_timeout)
+        return BudgetedModel(client, self.token_budget, self.args.max_tokens_per_run)
 
     async def environment(self):
         values = {"python": sys.version, "executable": sys.executable, "prefix": sys.prefix,
@@ -147,10 +260,12 @@ class Benchmark:
         values["versions"] = versions
         return values
 
-    async def run_task(self, task, run_directory, source_hashes):
-        row = empty_row(task)
-        directory = run_directory / task.id
-        directory.mkdir()
+    async def run_task(self, task, run_directory, source_hashes, run_index=1):
+        run_started = perf_counter()
+        row = empty_row(task, run_index)
+        row["config_hash"] = getattr(self, "config_hash", None)
+        directory = run_directory / task.id / f"run-{run_index:02d}"
+        directory.mkdir(parents=True)
         # Candidate copies live under an OS-created unique temp directory, never the user's checkout.
         temp_root = Path(tempfile.mkdtemp(prefix=f"ForgePilot-{task.id}-"))
         repo = temp_root / "repository"
@@ -198,10 +313,13 @@ class Benchmark:
                 result = await segment(operation(str(repo), task.request))
             remaining -= perf_counter() - start
             while result.state == "waiting_approval":
-                decision = await approve(service, result, task, self.args.approval, self.read_line)
+                decision = await approve(service, result, task, self.args.approval, self.read_line,
+                                         timeout_seconds=self.args.approval_timeout)
                 decisions.append(decision)
                 if not decision["approved"]:
                     row["reason"] = decision["reason"]
+                    row["approval_not_granted"] = self.args.approval == "manual" and decision["reason"] in {
+                        "human_review_denied", "approval_timeout"}
                     result = service.snapshot()
                     break
                 if remaining <= 0:
@@ -213,25 +331,44 @@ class Benchmark:
             if deadline.expired() or remaining <= 0: row["reason"] = "task_timeout"
             after = inventory(repo, ignore_generated=True)
             scope = check_scope(before, after, task)
+            row["scope_valid"] = scope["valid"]
             if inventory(self.dataset) != source_hashes: raise ValueError("Protected dataset changed")
             if not scope["valid"]:
                 row["reason"] = "source_scope_or_required_changes"
             elif row["reason"] == "not_run":
                 if task.analysis:
-                    row["success"] = result.state == "completed" and grade_analysis(result.final_result, task.success.expected)
+                    row["gates"] = {"flow": result.state == "completed", "scope": scope["valid"],
+                                    "analysis_oracle": grade_analysis(result.final_result, task.success.expected),
+                                    "integrity": inventory(self.dataset) == source_hashes}
+                    row["success"] = all(row["gates"].values())
                     row["reason"] = "verified_analysis" if row["success"] else "analysis_or_runtime_failed"
                 else:
                     verification = await self.grader.run(task, repo, temp_root / "final")
-                    row.update(build_status=verification["build_status"], test_status=verification["test_status"], test_count=verification["test_count"])
+                    row.update(build_status=verification["build_status"], test_status=verification["test_status"],
+                               ctest_status=verification["public_test_status"],
+                               test_count=verification["test_count"], oracle_status=verification["oracle_status"])
                     repair_ok = result.repair_round >= task.success.minimum_repair_rounds
                     if task.success.minimum_repair_rounds:
                         repair_ok = repair_ok and any(any(s == "failed" for s in h["stages"].values()) for h in result.validation_history[:-1])
-                    row["success"] = (result.state == "completed" and result.outcome == "modification_validated"
-                        and verification["build_status"] == "passed" and verification["test_status"] == "passed"
-                        and verification["test_count"] > 0 and verification["protected_unchanged"] and repair_ok)
+                    row["gates"] = {"flow": result.state == "completed" and result.outcome == "modification_validated",
+                                    "scope": scope["valid"], "build": verification["configure_status"] == "passed"
+                                        and verification["build_status"] == "passed",
+                                    "ctest": verification["public_test_status"] == "passed"
+                                        and verification["public_test_count"] > 0,
+                                    "oracle": verification["oracle_status"] == "passed"
+                                        and verification["oracle_test_count"] > 0,
+                                    "test_integrity": isinstance(result.test_integrity, dict)
+                                        and result.test_integrity.get("status") == "passed",
+                                    "integrity": verification["protected_unchanged"]
+                                        and inventory(self.dataset) == source_hashes,
+                                    "repair_contract": repair_ok}
+                    row["success"] = all(row["gates"].values())
                     row["reason"] = "verified_executable" if row["success"] else "oracle_runtime_or_repair_failed"
             if inventory(repo, ignore_generated=True) != after or inventory(self.dataset) != source_hashes:
                 row.update(success=False, reason="protected_or_candidate_sources_modified_during_grading", test_status="failed")
+                row["gates"]["integrity"] = False
+            row["integrity_status"] = ("passed" if row["gates"].get("integrity")
+                                       and row["gates"].get("test_integrity", True) else "failed")
         except asyncio.CancelledError:
             row["reason"] = "cancelled"
             raise
@@ -249,10 +386,13 @@ class Benchmark:
                 if close is not None: await close()
             if result is not None:
                 row.update(state=result.state.value, tool_calls=result.tool_calls, total_tokens=result.token_usage["total_tokens"],
-                           latency_ms=round(latency, 3), repair_rounds=None if task.analysis else result.repair_round,
+                           agent_latency_ms=round(latency, 3), repair_rounds=None if task.analysis else result.repair_round,
                            agent_task_id=result.task_id, usage=result.token_usage, steps=result.steps,
                            agent_error=result.error, agent_outcome=result.outcome)
                 save(directory / "agent-result.json", asdict(result), self.redactor)
+                row["first_pass_success"] = row["success"] and result.repair_round == 0
+                row["repair_success"] = row["success"] and result.repair_round > 0
+            row["latency_ms"] = round((perf_counter() - run_started) * 1000, 3)
             row["finished_at"] = now()
             save(directory / "approvals.json", decisions, self.redactor)
             save(directory / "trace.json", [asdict(e) for e in trace.events], self.redactor)
@@ -285,33 +425,65 @@ class Benchmark:
                 self.rag_store = None
                 raise ValueError("RAG-on evaluation could not initialize embeddings or Qdrant")
         sources = inventory(self.dataset)
-        metadata = {"run_id": run_id, "mode": self.args.mode, "model": "offline-fixed-script" if self.args.mode == "offline" else (os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"]),
-            "endpoint": None if self.args.mode == "offline" else os.environ["FORGEPILOT_BASE_URL"],
+        environment = await self.environment()
+        model_name = ("injected-fake-model" if self.model_factory is not None else
+                      "offline-fixed-script" if self.args.mode == "offline" else
+                      (os.environ.get("FORGEPILOT_TASK_MODEL") or os.environ["FORGEPILOT_MODEL"]))
+        lock = comparison_lock(self.tasks, sources, self.args, environment, model_name)
+        self.config_hash = lock["hash"]
+        metadata = {"run_id": run_id, "mode": self.args.mode, "model": model_name,
+            "endpoint_sha256": lock["configuration"]["endpoint_sha256"],
             "started_at": now(), "finished_at": None, "selected_tasks": [t.id for t in self.tasks], "dataset_version": 1,
             "dataset_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
-            "source_hashes": sources, "environment": await self.environment(), "approval_mode": self.args.approval,
-            "configuration_presence": config_presence(), "real_llm_results_produced": self.args.mode == "real",
-            "rag": self.args.rag, "evaluation_type": "real_agent" if self.args.mode == "real" else "offline_agent_harness",
+            "source_hashes": sources, "environment": environment, "approval_mode": self.args.approval,
+            "configuration_presence": config_presence(), "real_llm_results_produced": False,
+            "agent_topology": self.args.agent_topology, "config_hash": lock["hash"],
+            "comparison_configuration": lock["configuration"], "repetitions": self.args.repeats,
+            "task_categories": {t.id: t.category for t in self.tasks},
+            "evidence_label": "fake" if self.model_factory is not None else "real" if self.args.mode == "real" else "offline",
+            "rag": self.args.rag, "evaluation_type": "fake_agent_harness" if self.model_factory is not None else
+                "real_agent" if self.args.mode == "real" else "offline_agent_harness",
             "limits": {"agent_steps": 30, "repair_rounds": 3, "task_seconds": self.args.task_timeout,
-                       "llm_seconds": self.args.llm_timeout, "temperature": "provider_default", "mcp": "disabled"}}
-        rows = [empty_row(t) for t in self.tasks]
+                       "llm_seconds": self.args.llm_timeout, "approval_seconds": self.args.approval_timeout,
+                       "temperature": "provider_default", "mcp": "disabled",
+                       "max_total_tokens": self.args.max_total_tokens, "max_tokens_per_run": self.args.max_tokens_per_run}}
+        plan = [(t, i) for t in self.tasks for i in range(1, self.args.repeats + 1)]
+        rows = [empty_row(t, i) for t, i in plan]
+        for row in rows: row["config_hash"] = self.config_hash
         try:
-            for index, task in enumerate(self.tasks):
-                print(f"[{index+1}/{len(self.tasks)}] {task.id} ({self.args.mode})", flush=True)
-                rows[index] = await self.run_task(task, output, sources)
+            for index, (task, run_index) in enumerate(plan):
+                print(f"[{index+1}/{len(plan)}] {task.id} run {run_index} ({self.args.mode})", flush=True)
+                try:
+                    rows[index] = await self.run_task(task, output, sources, run_index)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    rows[index].update(reason="evaluation_error:" + type(exc).__name__, finished_at=now())
+                    failure = output / task.id / f"run-{run_index:02d}"
+                    save(failure / "result.json", rows[index], self.redactor)
                 print(f"  success={rows[index]['success']} reason={rows[index]['reason']}", flush=True)
                 write_reports(output, metadata, rows, self.redactor)
                 if inventory(self.dataset) != sources:
                     metadata["stopped_reason"] = "protected_dataset_changed"
                     break
+                if rows[index].get("approval_not_granted"):
+                    # The stdin reader may still hold a late answer. Never pair it
+                    # with another task's review, even if the plan version matches.
+                    metadata["stopped_reason"] = "manual_approval_not_granted"
+                    break
+                if self.token_budget is not None and self.token_budget.remaining <= 0 and index + 1 < len(plan):
+                    metadata["stopped_reason"] = "token_budget_exhausted_or_unknown"
+                    break
         except asyncio.CancelledError:
             metadata["stopped_reason"] = "cancelled"
-            partial = output / task.id / "result.json"
+            partial = output / task.id / f"run-{run_index:02d}" / "result.json"
             if partial.is_file(): rows[index] = json.loads(partial.read_text(encoding="utf-8"))
             raise
         finally:
             metadata["finished_at"] = now()
-            metadata["real_llm_results_produced"] = self.args.mode == "real" and any(r.get("steps", 0) > 0 for r in rows)
+            metadata["real_llm_results_produced"] = (self.args.mode == "real" and self.model_factory is None
+                                                      and any(r.get("total_tokens") is not None for r in rows))
+            if self.token_budget is not None: metadata["tokens_charged"] = self.token_budget.spent
             summary = write_reports(output, metadata, rows, self.redactor)
             print("Report: " + str(output / "report.md"), flush=True)
             if self.rag_manager is not None:
@@ -323,10 +495,17 @@ class Benchmark:
 
 def parser():
     p = SafeArgumentParser(description="ForgePilot isolated 15-task benchmark; no automatic source permission bypass")
-    p.add_argument("--mode", choices=("real", "offline"), default="real")
+    p.add_argument("--mode", choices=("real", "offline"), default="offline")
+    p.add_argument("--dataset", choices=("micro", "real"), default="micro")
+    p.add_argument("--agent-topology", choices=("single", "multi"), default="single")
+    p.add_argument("--repeats", type=int, default=3)
+    p.add_argument("--allow-paid-real", action="store_true")
+    p.add_argument("--max-total-tokens", type=int)
+    p.add_argument("--max-tokens-per-run", type=int, default=20000)
     p.add_argument("--rag", choices=("off", "on"), default="off",
                    help="Run the real Agent benchmark with code RAG disabled or enabled")
     p.add_argument("--approval", choices=("manual", "manifest"), default="manual")
+    p.add_argument("--approval-timeout", type=float, default=300)
     p.add_argument("--task", action="append", help="Select a task; repeat for a subset. Report denominators use selected tasks.")
     p.add_argument("--output-root", default=str(DATA_ROOT.parent / "logs/benchmark"))
     for name in ("cmake", "ctest", "git", "rg", "ninja", "qt-kit"):
@@ -342,10 +521,22 @@ def main(argv=None):
     try:
         if not 0 < args.task_timeout <= 7200 or not 0 < args.llm_timeout <= 600:
             raise ValueError("Timeouts must be finite and within supported limits")
+        if not 0 < args.approval_timeout <= 7200:
+            raise ValueError("Approval timeout must be finite and within supported limits")
+        if not 1 <= args.repeats <= 3 or not 1 <= args.max_tokens_per_run <= 1_000_000:
+            raise ValueError("Invalid repetition or per-run token limit")
+        if args.max_total_tokens is not None and not 1 <= args.max_total_tokens <= 20_000_000:
+            raise ValueError("Invalid total token limit")
+        if args.mode == "real" and args.repeats != 3:
+            raise ValueError("Formal real benchmark requires exactly three runs per task")
         benchmark = Benchmark(args)
-        _, rows, _ = asyncio.run(benchmark.run())
-        return 0 if all(r["success"] for r in rows) else 1
+        _, rows, summary = asyncio.run(benchmark.run())
+        stable = summary["Task Success Rate"]["passed"]
+        required = 14 if len(benchmark.tasks) == 15 and args.repeats == 3 else len(benchmark.tasks)
+        return 0 if stable >= required and all("finished_at" in row for row in rows) else 1
     except KeyboardInterrupt:
+        return 130
+    except asyncio.CancelledError:
         return 130
     except Exception as exc:
         text = str(exc) if isinstance(exc, ValueError) else type(exc).__name__

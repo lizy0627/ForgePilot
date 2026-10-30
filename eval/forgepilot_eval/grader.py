@@ -1,5 +1,4 @@
 """Executable oracle outside the Agent's repository, using fresh build directories."""
-from dataclasses import asdict
 import json
 from pathlib import Path
 import shutil
@@ -107,27 +106,52 @@ class Grader:
         (source / "CMakeLists.txt").write_text(text, encoding="utf-8")
         protected_before = inventory(source)
         result = {"configure_status": "not_run", "build_status": "not_run", "test_status": "not_run",
-                  "test_count": 0, "commands": [], "protected_unchanged": True}
-        report = build / "oracle.xml"
+                  "public_test_status": "not_run", "oracle_status": "not_applicable" if baseline else "not_run",
+                  "oracle_test_status": "not_applicable" if baseline else "not_run",
+                  "test_count": 0, "public_test_count": 0, "oracle_test_count": 0,
+                  "commands": [], "protected_unchanged": True}
         commands = [
             ("configure", [self.cmake, "-S", str(source), "-B", str(build), "-DCANDIDATE=" + str(repo), *self.configure_options()]),
-            ("build", [self.cmake, "--build", str(build), "--config", "Debug", "--target", target]),
-            ("test", [self.ctest, "--test-dir", str(build), "-C", "Debug", "-R", "^" + name + "$",
-                      "--verbose", "--output-on-failure", "--no-tests=error", "--timeout", "15", "--output-junit", str(report)])]
+            ("public_build", [self.cmake, "--build", str(build), "--config", "Debug", "--target", "smoke"]),
+            ("public_test", [self.ctest, "--test-dir", str(build), "-C", "Debug", "-R", "^public_test$",
+                             "--no-tests=error", "--timeout", "15", "--output-junit", str(build / "public.xml")])]
+        if not baseline:
+            commands += [
+                ("oracle_build", [self.cmake, "--build", str(build), "--config", "Debug", "--target", target]),
+                ("oracle_test", [self.ctest, "--test-dir", str(build), "-C", "Debug", "-R", "^forgepilot_oracle$",
+                                 "--verbose", "--no-tests=error", "--timeout", "15", "--output-junit", str(build / "oracle.xml")])]
         for phase, argv in commands:
             command = await run_build_process(argv, directory, timeout=self.timeout, env=build_environment())
-            result["commands"].append({"phase": phase, **asdict(command)})
-            result[phase + "_status"] = "passed" if command.status == "succeeded" else "failed"
-            if phase == "configure" and command.status != "succeeded": result["build_status"] = "failed"
-            if phase == "test":
-                tests = read_junit(report, name, command.status == "succeeded")
-                result.update(test_status=tests["status"], test_count=tests["count"], test_reason=tests["reason"])
-                if not baseline and completion_token not in command.stdout:
-                    result.update(test_status="failed", test_reason="protected_oracle_did_not_complete")
+            # Oracle stdout/stderr, command lines and absolute paths never enter Agent-facing artifacts.
+            result["commands"].append({"phase": phase, "status": command.status,
+                                       "returncode": command.returncode, "duration_ms": command.duration_ms})
+            if phase == "configure": result["configure_status"] = "passed" if command.status == "succeeded" else "failed"
+            if phase.endswith("build"):
+                result["build_status"] = "passed" if command.status == "succeeded" else "failed"
+            if phase.endswith("test"):
+                expected = "public_test" if phase == "public_test" else "forgepilot_oracle"
+                report = build / ("public.xml" if phase == "public_test" else "oracle.xml")
+                tests = read_junit(report, expected, command.status == "succeeded")
+                if phase == "oracle_test" and completion_token not in command.stdout:
+                    tests = {**tests, "status": "failed", "reason": "protected_oracle_did_not_complete"}
+                result[phase + "_status"] = tests["status"]
+                result[phase + "_count"] = tests["count"]
+                result["test_count"] += tests["count"]
+                result["test_reason"] = tests["reason"]
+                result["test_status"] = tests["status"]
             if inventory(source) != protected_before:
                 result.update(protected_unchanged=False, test_status="failed", test_reason="protected_grader_modified")
                 break
-            if command.status != "succeeded": break
+            if (command.status != "succeeded" and phase != "public_test") or (
+                    phase == "oracle_test" and result[phase + "_status"] != "passed"):
+                break
+        if not baseline:
+            result["test_status"] = ("passed" if result["public_test_status"] == "passed"
+                                     and result["oracle_test_status"] == "passed" else "failed")
+            result["oracle_status"] = result["oracle_test_status"]
+            if result["public_test_status"] != "passed": result["test_reason"] = "public_ctest_failed"
+            elif result["oracle_test_status"] == "not_run": result["test_reason"] = "oracle_not_run"
+        if result["configure_status"] != "passed": result["build_status"] = "failed"
         return result
 
 

@@ -196,7 +196,7 @@ def _score(task: RetrievalTask, results, latency_ms: float) -> dict:
 def _markdown(document: dict) -> str:
     lines = [
         "# ForgePilot offline retrieval evaluation", "",
-        "This report measures repository retrieval only. It does not run an LLM, "
+        "Evidence label: retrieval. This report measures repository retrieval only. It does not run an LLM, "
         "does not measure Agent task success, and does not establish production "
         "embedding quality.", "",
         f"Corpus: `{document['metadata']['repository_revision']}`; tasks: "
@@ -290,6 +290,7 @@ async def evaluate(repository_path: Path, tasks: list[RetrievalTask], modes: tup
                       if state.status == "indexed"}
             return {
                 "metadata": {
+                    "evidence_label": "retrieval",
                     "evaluation_type": "offline_retrieval",
                     "real_model_results_produced": False,
                     "agent_success_measured": False,
