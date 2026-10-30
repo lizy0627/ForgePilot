@@ -64,6 +64,7 @@ class AnalysisService:
             gateway.router.validate_agent(self.agents.get(agent_id))
         self.reviews = AnalysisReviewStore(event_store)
         handlers = {stage: self._agent_handler for stage in STAGES}
+        handlers["locked_task_spec"] = self._locked_task_spec
         handlers.update(join_evidence=self._join, execution_approval=self._gate)
         self.runner = GraphRunner(event_store, HandlerRegistry(handlers), policy=policy)
         self._loop = None
@@ -73,15 +74,25 @@ class AnalysisService:
         self._pending = {}
         self._cancel_requests = set()
 
-    def graph(self, request):
+    def graph(self, request, *, locked_task_spec=None):
         request = AnalysisRequest.model_validate(request)
+        if locked_task_spec is not None:
+            locked_task_spec = validate_task_spec(locked_task_spec)
+            if (locked_task_spec.repository != request.repository
+                    or locked_task_spec.data_policy != request.data_policy):
+                raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted repository or data policy")
+            self._validate_test_policy(locked_task_spec)
         def agent(stage, dependencies):
             definition = self.agents.get(STAGES[stage][0])
             settings = {"request": request.model_dump(mode="json")} if stage == "draft_task_spec" else {}
             return NodeDefinition(stage, NodeType.AGENT, stage, dependencies=dependencies,
                 agent_id=definition.agent_id, agent_definition_hash=definition.definition_hash, settings=settings)
-        return GraphDefinition("task-analysis.v1", 1, (
-            agent("draft_task_spec", ()),
+        draft = (agent("draft_task_spec", ()) if locked_task_spec is None else
+                 NodeDefinition("draft_task_spec", NodeType.DETERMINISTIC, "locked_task_spec",
+                     settings={"request": request.model_dump(mode="json"),
+                               "task_spec": locked_task_spec.model_dump(mode="json")}))
+        return GraphDefinition("task-analysis-locked.v1" if locked_task_spec is not None else "task-analysis.v1", 1, (
+            draft,
             NodeDefinition("analyst_fanout", NodeType.PARALLEL_FANOUT, "parallel_fanout", dependencies=("draft_task_spec",)),
             agent("root_cause_analysis", ("analyst_fanout",)),
             agent("impact_test_analysis", ("analyst_fanout",)),
@@ -91,11 +102,34 @@ class AnalysisService:
                 dependencies=("draft_task_spec", "join_evidence", "generate_plan")),
         ))
 
-    async def run(self, task_id, request):
-        return await self._run_worker(task_id, self.runner.run, task_id, self.graph(request))
+    async def run(self, task_id, request, *, locked_task_spec=None):
+        return await self._run_worker(task_id, self.runner.run, task_id,
+                                      self.graph(request, locked_task_spec=locked_task_spec))
 
-    async def retry(self, task_id, request, node_id, *, expected_revision):
-        return await self._run_worker(task_id, self.runner.retry, task_id, self.graph(request),
+    def _locked_task_spec(self, context):
+        """Publish a caller-supplied frozen TaskSpec without a model draft call.
+
+        This handler is reachable only from an internally constructed graph. The
+        persisted settings and Graph definition hash bind the exact input across
+        restart, while normal missions still use the model-drafted path.
+        """
+        request = AnalysisRequest.model_validate(_plain_json(context.node.settings["request"]))
+        spec = validate_task_spec(_plain_json(context.node.settings["task_spec"]))
+        if spec.repository != request.repository or spec.data_policy != request.data_policy:
+            raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted repository or data policy")
+        self._validate_test_policy(spec)
+        artifact = create_artifact(task_id=context.task_id, producer="orchestrator.v1",
+            producer_node="draft_task_spec", content=spec)
+        with self.events._lock:
+            if context.is_cancelled():
+                return NodeResult(NodeStatus.CANCELLED)
+            self.events.artifacts.put(artifact)
+        return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=(artifact.artifact_id,),
+                          decision_summary="Frozen TaskSpec validated")
+
+    async def retry(self, task_id, request, node_id, *, expected_revision, locked_task_spec=None):
+        return await self._run_worker(task_id, self.runner.retry, task_id,
+                                      self.graph(request, locked_task_spec=locked_task_spec),
                                       node_id, expected_revision=expected_revision)
 
     async def _run_worker(self, task_id, operation, *args, **kwargs):

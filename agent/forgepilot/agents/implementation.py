@@ -79,6 +79,7 @@ class ImplementationService:
         from .analysis import STAGES
         for stage in STAGES:
             self.runner.handlers.register(stage, self._analysis_handler)
+        self.runner.handlers.register("locked_task_spec", self._locked_analysis_spec)
         self.runner.handlers.register("join_evidence", self._analysis_join)
         self._analysis_services = {}
         self._loop = None
@@ -111,6 +112,9 @@ class ImplementationService:
     def _analysis_handler(self, context):
         return self._analysis_for(context.task_id)._agent_handler(context)
 
+    def _locked_analysis_spec(self, context):
+        return self._analysis_for(context.task_id)._locked_task_spec(context)
+
     def _analysis_join(self, context):
         return self._analysis_for(context.task_id)._join(context)
 
@@ -119,37 +123,41 @@ class ImplementationService:
         graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
         if graph.graph_id == "controlled-implementation.v1":
             expected = self.graph()
-        elif graph.graph_id == "task-analysis-implementation.v1":
+        elif graph.graph_id in {"task-analysis-implementation.v1", "task-analysis-implementation-locked.v1"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             from ..orchestration.models import _plain_json
-            expected = self._analysis_graph(task_id, AnalysisRequest.model_validate(_plain_json(draft.settings["request"])))
+            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v1") else None
+            expected = self._analysis_graph(task_id,
+                AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
+                locked_task_spec=locked)
         else:
             raise ForgePilotError("graph_definition", "Task was not created as an implementation graph")
         if graph.definition_hash != expected.definition_hash:
             raise ForgePilotError("graph_definition", "Persisted implementation definition or limits changed")
         return expected
 
-    def _analysis_graph(self, task_id, request):
-        analysis = self._analysis_for(task_id).graph(request)
+    def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
+        analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
         gate, implementer = self.graph().nodes
         from dataclasses import replace
         from ..orchestration.models import _plain_json
         original_gate = analysis.nodes[-1]
-        return GraphDefinition("task-analysis-implementation.v1", 1, (
+        return GraphDefinition("task-analysis-implementation-locked.v1" if locked_task_spec is not None
+                               else "task-analysis-implementation.v1", 1, (
             *analysis.nodes[:-1], replace(gate, dependencies=original_gate.dependencies,
                                           settings=_plain_json(gate.settings)),
             replace(implementer, dependencies=("execution_approval", "join_evidence"),
                     settings=_plain_json(implementer.settings)),
         ))
 
-    async def prepare_analysis(self, task_id, request):
+    async def prepare_analysis(self, task_id, request, *, locked_task_spec=None):
         """Analyze inside the managed Worktree, then stop at execution approval.
 
         This composes the existing read-only analysis workflow at graph creation;
         approval runs only Implementer afterward and ends at its checkpoint.
         """
-        graph = self._analysis_graph(task_id, request)
+        graph = self._analysis_graph(task_id, request, locked_task_spec=locked_task_spec)
         self._create_run(task_id, graph, ())
         return await self._run_worker(task_id, self.runner.run, task_id, graph)
 

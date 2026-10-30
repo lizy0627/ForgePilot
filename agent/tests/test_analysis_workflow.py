@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from forgepilot.agents.analysis import AnalysisRequest, AnalysisService
+from forgepilot.agents.contracts import validate_task_spec
 from forgepilot.artifacts.models import DataPolicy, RepositorySpec
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.gateway import ModelGateway
@@ -151,6 +152,41 @@ async def test_natural_request_parallel_join_artifacts_single_approval(cpp_repo,
         assert service.repository.audit_manifest() == before
         assert all(not any(name.startswith("mcp_") or "patch" in name or name in {"cmake_build", "run_tests"} for name in names)
                    for _, _, names in provider.seen)
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_trusted_locked_task_spec_skips_model_draft_but_preserves_analysis_and_review(cpp_repo, tmp_path):
+    service, provider, events, gateway = await service_for(cpp_repo, tmp_path)
+    frozen = validate_task_spec(spec_data())
+    task_id = str(uuid4())
+    try:
+        result = await service.run(task_id, request(), locked_task_spec=frozen)
+        assert result.status is NodeStatus.AWAITING_HUMAN
+        assert provider.counts == {"root": 1, "impact": 1, "plan": 1}
+        assert provider.peak == 2
+        review = service.review(task_id)
+        assert events.artifacts.get(review.task_spec_artifact_id).content == frozen
+        assert service.runner.store.snapshot(task_id).graph_id == "task-analysis-locked.v1"
+        assert next(node for node in service.graph(request(), locked_task_spec=frozen).nodes
+                    if node.node_id == "draft_task_spec").handler == "locked_task_spec"
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_locked_task_spec_rejects_changed_repository_before_model_or_graph(cpp_repo, tmp_path):
+    service, provider, events, gateway = await service_for(cpp_repo, tmp_path)
+    payload = spec_data()
+    payload["repository"]["base_ref"] = "other"
+    try:
+        with pytest.raises(ForgePilotError, match="policy_denied"):
+            await service.run(str(uuid4()), request(), locked_task_spec=payload)
+        assert provider.seen == []
+        assert not events._db.execute("SELECT 1 FROM task_graph_runs").fetchone()
     finally:
         await gateway.aclose()
         events.close()

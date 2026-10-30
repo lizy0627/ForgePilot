@@ -238,13 +238,21 @@ class MissionHost:
     async def create(self, **fields):
         return await self.host._submit(self._admit(fields))
 
-    async def _admit(self, fields):
+    async def create_locked(self, task_spec, **fields):
+        """Trusted in-process entry for a pre-registered TaskSpec.
+
+        The HTTP CreateMission schema has no such field. A caller must bind the
+        exact frozen content to the repository, toolchain, and task request.
+        """
+        return await self.host._submit(self._admit(fields, locked_task_spec=task_spec))
+
+    async def _admit(self, fields, *, locked_task_spec=None):
         if len(self.host._tasks) + self.host.extra_active() >= self.host.max_tasks:
             raise ForgePilotError("task_capacity", "Mission capacity reached")
         operation = asyncio.current_task()
         self._admissions.add(operation)
         try:
-            return await self._create(fields)
+            return await self._create(fields, locked_task_spec=locked_task_spec)
         finally:
             self._admissions.discard(operation)
 
@@ -264,21 +272,32 @@ class MissionHost:
             worker.result()
             raise
 
-    async def _create(self, fields):
+    async def _create(self, fields, *, locked_task_spec=None):
         if self._stopping or self.host._stopping:
             raise ForgePilotError("server_stopping", "Runtime is stopping")
         if fields["toolchain_profile"] not in {"auto", "cmake", "cmake-ctest-v1"}:
             raise ForgePilotError("invalid_toolchain_profile", "Unknown trusted toolchain profile")
         if fields["orchestration_mode"] != "multi_agent":
             raise ForgePilotError("invalid_mode", "Mission mode must be multi_agent")
+        if locked_task_spec is not None:
+            from .agents.contracts import validate_task_spec
+            locked_task_spec = validate_task_spec(locked_task_spec)
+            if (fields["request"] != locked_task_spec.objective
+                    or fields["task_type"] not in {"auto", locked_task_spec.task_type}
+                    or fields["base_ref"] != locked_task_spec.repository.base_ref):
+                raise ForgePilotError("policy_denied", "Locked TaskSpec does not match the mission request or base")
         task_id = str(uuid4())
         workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()))
         try:
-            await self._create_workspace(workflow.workspace, fields, task_id)
             # Trusted profile selection never accepts executable paths or shell text.
             profile = workflow.validator.profile.profile_id
+            if locked_task_spec is not None and (
+                    locked_task_spec.repository.toolchain_profile != profile
+                    or locked_task_spec.data_policy != getattr(workflow, "mission_data_policy", DataPolicy())):
+                raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted toolchain or data policy")
+            await self._create_workspace(workflow.workspace, fields, task_id)
             request_text = self.store.redactor.text(fields["request"])
-            if fields["task_type"] != "auto":
+            if fields["task_type"] != "auto" and locked_task_spec is None:
                 request_text += "\nRequested task type: " + fields["task_type"]
             if len(request_text) > 8192:
                 request_text = self.store.redactor.text(fields["request"])
@@ -286,7 +305,11 @@ class MissionHost:
                 base_ref=fields["base_ref"], toolchain_profile=profile),
                 data_policy=getattr(workflow, "mission_data_policy", DataPolicy()),
                 language=fields.get("language", "zh-CN"))
-            definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request)
+            if locked_task_spec is None:
+                definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request)
+            else:
+                definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request,
+                                                     locked_task_spec=locked_task_spec)
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
             record = workflow.workspace.record(task_id)

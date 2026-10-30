@@ -90,22 +90,26 @@ class DeliveryWorkflow(ImplementationService):
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
         return GraphDefinition("validated-delivery.v1", 1, tuple(nodes), tuple(edges))
 
-    def _analysis_graph(self, task_id, request):
-        analysis = self._analysis_for(task_id).graph(request)
+    def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
+        analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
         execution = self.graph()
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
-        return GraphDefinition("task-analysis-delivery.v1", 1,
+        return GraphDefinition("task-analysis-delivery-locked.v1" if locked_task_spec is not None
+                               else "task-analysis-delivery.v1", 1,
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
         graph = GraphDefinition.from_dict(json.loads(self.events.missions.get_graph_run(task_id)["definition_json"]))
         if graph.graph_id == "validated-delivery.v1":
             expected = self.graph()
-        elif graph.graph_id == "task-analysis-delivery.v1":
+        elif graph.graph_id in {"task-analysis-delivery.v1", "task-analysis-delivery-locked.v1"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
-            expected = self._analysis_graph(task_id, AnalysisRequest.model_validate(_plain_json(draft.settings["request"])))
+            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v1") else None
+            expected = self._analysis_graph(task_id,
+                AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
+                locked_task_spec=locked)
         else:
             raise ForgePilotError("graph_definition", "Task is not a validated delivery graph")
         if expected.definition_hash != graph.definition_hash:
