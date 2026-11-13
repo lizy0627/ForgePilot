@@ -280,6 +280,176 @@ private slots:
         QVERIFY(!approve->isEnabled());
         QCOMPARE(f.approvalPosts, 1);
     }
+    void deliveryPreviewSurvivesTabSwitchAndConfirmsOnce_data()
+    {
+        QTest::addColumn<QString>("mode");
+        QTest::addColumn<int>("modeIndex");
+        QTest::addColumn<QString>("targetBranch");
+        QTest::newRow("abandon") << QString("abandon") << 4 << QString();
+        QTest::newRow("squash") << QString("squash") << 3 << QString("release/delivery");
+    }
+    void deliveryPreviewSurvivesTabSwitchAndConfirmsOnce()
+    {
+        QFETCH(QString, mode);
+        QFETCH(int, modeIndex);
+        QFETCH(QString, targetBranch);
+        const QString token(64, 'f');
+        Fixture f;
+        f.snapshots[MissionA] = mission(MissionA, "succeeded");
+        QList<QJsonObject> deliveryPosts;
+        Request confirmation;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/delivery")) return false;
+            deliveryPosts.append(r.body);
+            if (r.body.contains("token")) confirmation = r;
+            else {
+                f.snapshots[MissionA] = mission(MissionA, "succeeded", 9);
+                Source::json(r, {{"mission", f.snapshots.value(MissionA)},
+                    {"delivery", QJsonObject{{"task_id", MissionA}, {"token", token},
+                        {"target_branch", targetBranch.isEmpty() ? QJsonValue::Null : QJsonValue(targetBranch)}}}});
+            }
+            return true;
+        };
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        if (!details->isVisible()) QVERIFY(ui.click("workbenchDetailsToggle"));
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", 7);
+        auto *modeInput = ui.find("missionDeliveryMode"); QVERIFY(modeInput);
+        auto *targetInput = ui.find("missionDeliveryTarget"); QVERIFY(targetInput);
+        QVERIFY(modeInput->setProperty("currentIndex", modeIndex));
+        QVERIFY(targetInput->setProperty("text", targetBranch));
+        auto *previewButton = ui.find("missionDeliveryPreviewButton"); QVERIFY(previewButton);
+        QVERIFY(previewButton->isEnabled());
+        QVERIFY(QMetaObject::invokeMethod(previewButton, "clicked"));
+        QTRY_VERIFY(ui.missions.delivery()->canConfirm());
+        QCOMPARE(deliveryPosts.size(), 1);
+        QCOMPARE(deliveryPosts.first().value("mode").toString(), mode);
+        QCOMPARE(deliveryPosts.first().value("target_branch").toString(), targetBranch);
+        QCOMPARE(deliveryPosts.first().value("expected_revision").toInteger(), 8);
+
+        QPointer<QQuickItem> oldPanel = ui.find("deliveryPanel"); QVERIFY(oldPanel);
+        tabs->setProperty("currentIndex", 4);
+        QTRY_VERIFY(oldPanel.isNull());
+        QVERIFY(ui.find("missionDiffPanel"));
+        tabs->setProperty("currentIndex", 7);
+        QTRY_VERIFY(ui.find("deliveryPanel"));
+        modeInput = ui.find("missionDeliveryMode"); QVERIFY(modeInput);
+        targetInput = ui.find("missionDeliveryTarget"); QVERIFY(targetInput);
+        QCOMPARE(modeInput->property("currentIndex").toInt(), modeIndex);
+        QCOMPARE(targetInput->property("text").toString(), targetBranch);
+        QVERIFY(!modeInput->isEnabled());
+        QVERIFY(!targetInput->isEnabled());
+        auto *warning = ui.find("missionDeliveryWarning"); QVERIFY(warning);
+        QVERIFY(warning->isVisible());
+        const auto warningText = warning->property("text").toString();
+        QVERIFY(warningText.contains("危险"));
+        if (mode == "abandon") QVERIFY(warningText.contains("丢弃任务的隔离工作区"));
+        else {
+            QVERIFY(warningText.contains("创建合并提交"));
+            QVERIFY(warningText.contains(targetBranch));
+        }
+        auto *confirmButton = ui.find("missionDeliveryConfirmButton"); QVERIFY(confirmButton);
+        QVERIFY(confirmButton->isEnabled());
+        QVERIFY(confirmButton->property("danger").toBool());
+        QVERIFY(QMetaObject::invokeMethod(confirmButton, "clicked"));
+        QTRY_VERIFY(ui.find("missionDeliveryDialogConfirmButton"));
+        auto *accept = ui.find("missionDeliveryDialogConfirmButton"); QVERIFY(accept);
+        auto *confirmText = ui.find("missionDeliveryConfirmText"); QVERIFY(confirmText);
+        QTRY_VERIFY(accept->isVisible());
+        QVERIFY(accept->isEnabled());
+        QVERIFY(accept->property("danger").toBool());
+        QVERIFY(confirmText->property("text").toString().contains("方式：" + mode));
+        if (mode == "abandon")
+            QVERIFY(confirmText->property("text").toString().contains("隔离工作区将被丢弃"));
+        else {
+            QVERIFY(confirmText->property("text").toString().contains("目标分支引用会改变"));
+            QVERIFY(confirmText->property("text").toString().contains(targetBranch));
+        }
+        QCOMPARE(deliveryPosts.size(), 1);
+        QVERIFY(ui.click("missionDeliveryDialogConfirmButton"));
+        ui.missions.delivery()->confirm();
+        QTRY_VERIFY(confirmation.socket);
+        QCOMPARE(deliveryPosts.size(), 2);
+        QCOMPARE(confirmation.body.value("mode").toString(), mode);
+        QCOMPARE(confirmation.body.value("target_branch").toString(), targetBranch);
+        QCOMPARE(confirmation.body.value("token").toString(), token);
+        QCOMPARE(confirmation.body.value("expected_revision").toInteger(), 9);
+        QVERIFY(ui.missions.delivery()->busy());
+        QVERIFY(!ui.missions.delivery()->canConfirm());
+        QVERIFY(!confirmButton->isEnabled());
+        QVERIFY(!accept->isEnabled());
+
+        f.snapshots[MissionA] = mission(MissionA, "succeeded", 10);
+        Source::json(confirmation, {{"mission", f.snapshots.value(MissionA)},
+            {"delivery", QJsonObject{{"mode", mode}, {"target_branch", targetBranch.isEmpty() ? QJsonValue::Null : QJsonValue(targetBranch)}}}});
+        QTRY_COMPARE(ui.missions.delivery()->result().value("mode").toString(), mode);
+        QTRY_VERIFY(ui.missions.synchronized());
+        ui.missions.delivery()->confirm();
+        QTest::qWait(50);
+        QCOMPARE(deliveryPosts.size(), 2);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void deliveryRevisionChangeClearsPreviewAndBlocksOpenConfirmation_data()
+    {
+        QTest::addColumn<QString>("mode");
+        QTest::newRow("abandon") << QString("abandon");
+        QTest::newRow("squash") << QString("squash");
+    }
+    void deliveryRevisionChangeClearsPreviewAndBlocksOpenConfirmation()
+    {
+        QFETCH(QString, mode);
+        Fixture f;
+        f.snapshots[MissionA] = mission(MissionA, "succeeded");
+        int deliveryPosts = 0;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/delivery")) return false;
+            ++deliveryPosts;
+            Source::json(r, {{"mission", f.snapshots.value(MissionA)},
+                {"delivery", QJsonObject{{"task_id", MissionA}, {"token", QString(64, 'f')}}}});
+            return true;
+        };
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        if (!details->isVisible()) QVERIFY(ui.click("workbenchDetailsToggle"));
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", 7);
+        ui.missions.delivery()->prepare(mode, mode == "squash" ? "release/delivery" : "");
+        QTRY_VERIFY(ui.missions.delivery()->canConfirm());
+        auto *confirmButton = ui.find("missionDeliveryConfirmButton"); QVERIFY(confirmButton);
+        QVERIFY(QMetaObject::invokeMethod(confirmButton, "clicked"));
+        QTRY_VERIFY(ui.find("missionDeliveryDialogConfirmButton"));
+        auto *accept = ui.find("missionDeliveryDialogConfirmButton"); QVERIFY(accept);
+        QTRY_VERIFY(accept->isVisible());
+        QVERIFY(accept->isEnabled());
+
+        f.snapshots[MissionA] = mission(MissionA, "succeeded", 9);
+        ui.missions.refresh();
+        QTRY_COMPARE(ui.missions.revision(), 9);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.missions.delivery()->preview().isEmpty());
+        QVERIFY(ui.missions.delivery()->property("previewMode").toString().isEmpty());
+        QVERIFY(ui.missions.delivery()->property("previewTarget").toString().isEmpty());
+        QVERIFY(!ui.missions.delivery()->canConfirm());
+        QVERIFY(!confirmButton->isVisible());
+        QVERIFY(!confirmButton->isEnabled());
+        QVERIFY(!accept->isEnabled());
+        QTRY_VERIFY(!accept->isVisible());
+        auto *warning = ui.find("missionDeliveryWarning"); QVERIFY(warning);
+        QVERIFY(!warning->isVisible());
+        ui.missions.delivery()->confirm();
+        QTest::qWait(50);
+        QCOMPARE(deliveryPosts, 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void rejectionNeedsDialogConfirmationAndUsesFrozenRevision()
     {
         Fixture f; Ui ui(f);

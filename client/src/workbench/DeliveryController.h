@@ -10,6 +10,8 @@ class DeliveryController : public QObject {
     Q_PROPERTY(bool canPreview READ canPreview NOTIFY changed)
     Q_PROPERTY(bool canConfirm READ canConfirm NOTIFY changed)
     Q_PROPERTY(QVariantMap preview READ preview NOTIFY changed)
+    Q_PROPERTY(QString previewMode READ previewMode NOTIFY changed)
+    Q_PROPERTY(QString previewTarget READ previewTarget NOTIFY changed)
     Q_PROPERTY(QVariantMap result READ result NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
 public:
@@ -19,6 +21,8 @@ public:
     bool canPreview() const;
     bool canConfirm() const;
     QVariantMap preview() const { return m_preview.toVariantMap(); }
+    QString previewMode() const;
+    QString previewTarget() const;
     QVariantMap result() const { return m_result.toVariantMap(); }
     QString error() const { return m_error; }
     void setMission(const QJsonObject &mission);

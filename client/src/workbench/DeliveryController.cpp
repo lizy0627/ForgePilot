@@ -68,6 +68,11 @@ bool DeliveryController::canConfirm() const
         && hash.match(m_preview.value("token").toString()).hasMatch()
         && m_preview.value("task_id") == m_mission.value("task_id");
 }
+// Keep the selected operation visible while its preview or confirmation is in flight.
+QString DeliveryController::previewMode() const
+{ return busy() || !m_preview.isEmpty() ? m_mode : QString{}; }
+QString DeliveryController::previewTarget() const
+{ return busy() || !m_preview.isEmpty() ? m_target : QString{}; }
 void DeliveryController::prepare(const QString &mode, const QString &targetBranch)
 {
     const QStringList modes{"squash", "keep_branch", "patch", "bundle", "abandon"};
