@@ -73,6 +73,7 @@ if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     qt_add_executable(ForgePilotClientTests tests/tst_communication.cpp)
     target_link_libraries(ForgePilotClientTests PRIVATE ForgePilotCommunication Qt6::Test Qt6::Quick Qt6::Qml)
+    target_compile_definitions(ForgePilotClientTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME client_communication COMMAND ForgePilotClientTests -o "${CMAKE_CURRENT_BINARY_DIR}/communication-results.txt,txt")
     # The communication executable intentionally contains the complete network,
     # controller, and streaming regression suite.  It exceeds one minute on

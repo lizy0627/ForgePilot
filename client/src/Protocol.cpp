@@ -38,7 +38,7 @@ bool Protocol::validState(const QString &state)
 bool Protocol::validEvent(const QJsonObject &p, const QString &event, const QString &taskId)
 {
     static const QSet<QString> events{"task_state_changed", "message", "plan_created", "approval_required",
-        "tool_started", "tool_finished", "file_changed", "build_started", "build_finished", "test_started",
+        "rag_usage", "tool_started", "tool_finished", "file_changed", "build_started", "build_finished", "test_started",
         "test_finished", "reflection", "task_completed", "task_failed"};
     return events.contains(event) && p.value("event").toString() == event && p.value("task_id").toString() == taskId
         && p.value("timestamp").isString() && p.value("data").isObject()

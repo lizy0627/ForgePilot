@@ -1338,6 +1338,21 @@ private slots:
         QCOMPARE(controller.messages()->get(1).value("content").toString(),QString(1000,'x'));
         QVERIFY(!controller.messages()->get(1).value("streaming").toBool());
     }
+    void protocolAcceptsAllPublicEvents() {
+        QFile file(QStringLiteral(FORGEPILOT_SOURCE_DIR "/protocol/events.schema.json"));
+        QVERIFY2(file.open(QIODevice::ReadOnly),qPrintable(file.errorString()));
+        QJsonParseError error;
+        const auto schema=QJsonDocument::fromJson(file.readAll(),&error);
+        QCOMPARE(error.error,QJsonParseError::NoError);
+        const auto events=schema.object().value("properties").toObject().value("event").toObject().value("enum").toArray();
+        QVERIFY(!events.isEmpty());
+        for(const auto &value:events) {
+            const auto event=value.toString();
+            const auto data=event=="task_state_changed"?QJsonObject{{"state","analyzing"}}:QJsonObject{};
+            QVERIFY2(Protocol::validEvent(payload(event,data),event,A),qPrintable(event));
+        }
+        QVERIFY(!Protocol::validEvent(payload("injected_authority"),"injected_authority",A));
+    }
     void sseFragmentReconnectReplayTerminal() {
         Source source; int connections=0;
         source.handle=[&](const Request &r) {
@@ -1386,6 +1401,60 @@ private slots:
         source.requests[1].socket->write(sseEvent(1,"message",{{"content","new"}},B));
         QTRY_COMPARE(events.size(),1); QCOMPARE(events[0][1].toJsonObject().value("task_id").toString(),B);
         client.disconnect(); QTest::qWait(300); QCOMPARE(source.requests.size(),2);
+    }
+    void controllerRagUsageDoesNotInterruptTaskStream() {
+        Source source; Request detail,stream; int approvals=0;
+        auto current=snapshot(A,"created",0,0);
+        current["last_event_id"]="";
+        current["plan"]=QJsonObject{};
+        current["rag_requested"]=true; current["rag_used"]=false; current["rag_status"]="available";
+        source.handle=[&](const Request &r) {
+            if(r.path.endsWith("/events")) { stream=r; Source::stream(r,{},false); }
+            else if(r.path.endsWith("/approve")) {
+                ++approvals; QCOMPARE(r.body.value("plan_version").toInt(),1);
+                current["state"]="modifying"; Source::json(r,current);
+            } else detail=r;
+        };
+        TaskController controller; controller.setBaseUrl(source.url());
+        QSignalSpy plans(&controller,&TaskController::planAvailable), approval(&controller,&TaskController::approvalRequired),
+            finished(&controller,&TaskController::taskFinished);
+        QStringList states;
+        connect(&controller,&TaskController::taskChanged,this,[&] { states.append(controller.state()); });
+        controller.selectTask(A); QTRY_VERIFY(detail.socket); QTRY_VERIFY(stream.socket);
+        Source::json(detail,current); QTRY_COMPARE(controller.state(),"created");
+        QVERIFY(!controller.canApprove()); QVERIFY(!controller.ragUsed());
+
+        const QJsonObject plan{{"summary","RAG-assisted plan"}};
+        stream.socket->write(sseEvent(1,"task_state_changed",{{"state","analyzing"}})
+            +sseEvent(2,"rag_usage",{{"rag_used",true},{"rag_status","used"}})
+            +sseEvent(3,"plan_created",{{"plan_version",1},{"plan",plan}})
+            +sseEvent(4,"task_state_changed",{{"state","waiting_approval"}})
+            +sseEvent(5,"approval_required",{{"plan_version",1},{"files",QJsonArray{}}}));
+        QTRY_COMPARE(controller.eventSequence(),5);
+        QVERIFY(states.contains("analyzing")); QCOMPARE(controller.state(),"waiting_approval");
+        QVERIFY(controller.ragRequested()); QVERIFY(controller.ragUsed()); QCOMPARE(controller.ragStatus(),"used");
+        QCOMPARE(controller.planVersion(),1); QCOMPARE(controller.plan(),plan.toVariantMap());
+        QCOMPARE(plans.size(),1); QCOMPARE(approval.size(),1); QVERIFY(controller.canApprove());
+        QVERIFY(finished.isEmpty()); QCOMPARE(controller.connectionState(),"connected");
+        QVERIFY(controller.connectionWarning().isEmpty()); QVERIFY(controller.error().isEmpty());
+
+        current=snapshot(A,"waiting_approval",5,1); current["plan"]=plan;
+        current["rag_requested"]=true; current["rag_used"]=true; current["rag_status"]="used";
+        controller.approvePlan(); QTRY_COMPARE(controller.state(),"modifying");
+        QCOMPARE(approvals,1); QVERIFY(!controller.canApprove());
+        const QJsonObject result{{"summary","Task completed"}};
+        stream.socket->write(sseEvent(6,"task_state_changed",{{"state","completed"}})
+            +sseEvent(7,"task_completed",{{"final_result",result},{"outcome","succeeded"}}));
+        // Leave the terminal refresh pending so only SSE can deliver the final result.
+        QTRY_COMPARE(controller.eventSequence(),7); QTRY_COMPARE(controller.connectionState(),"ended");
+        QCOMPARE(controller.state(),"completed"); QCOMPARE(finished.size(),1);
+        QCOMPARE(finished[0][0].toString(),QString("completed"));
+        QCOMPARE(controller.snapshot().value("final_result").toMap(),result.toVariantMap());
+        QCOMPARE(controller.snapshot().value("outcome").toString(),QString("succeeded"));
+        QVERIFY(controller.ragUsed()); QCOMPARE(controller.ragStatus(),"used");
+        QVERIFY(!controller.canApprove()); QCOMPARE(plans.size(),1); QCOMPARE(approval.size(),1);
+        QVERIFY(controller.connectionWarning().isEmpty()); QVERIFY(controller.error().isEmpty());
+        QTRY_COMPARE(source.requests.size(),4);
     }
     void controllerSnapshotReplayAndApproval_data() {
         QTest::addColumn<bool>("snapshotFirst");
