@@ -39,6 +39,8 @@ $fastTests = @(
     'tests/test_mission_events.py',
     'tests/test_mission_sse_network.py',
     'tests/test_mission_service.py',
+    'tests/test_mission_legacy_delivery.py',
+    'tests/test_delivery_baseline_approval.py',
     'tests/test_model_gateway_boundaries.py',
     'tests/test_implementation_boundaries.py',
     'tests/test_workspace_manager.py',
@@ -46,6 +48,7 @@ $fastTests = @(
     'tests/test_recovery_workspace.py',
     'tests/test_build_process.py',
     'tests/test_rag_retrieval.py',
+    'tests/test_rag_lifecycle.py',
     'tests/test_recovery.py',
     'tests/test_recovery_boundaries.py',
     'tests/test_protocol_v2.py'

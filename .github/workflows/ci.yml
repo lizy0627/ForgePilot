@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, 'release/**']
+    branches: [develop, main, 'release/**']
     tags: ['v*']
   release:
     types: [published]
@@ -61,12 +61,12 @@ jobs:
         shell: pwsh
         run: ./scripts/ci-python-tests.ps1 -Fast
 
-      - name: Python tests / main and release full set
+      - name: Python tests / develop, main and release full set
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: ./scripts/ci-python-tests.ps1 -Full
 
-      - name: Offline retrieval evaluation / main and release
+      - name: Offline retrieval evaluation / develop, main and release
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
@@ -123,15 +123,19 @@ jobs:
         run: |
           ctest --test-dir client/build -C Release --output-on-failure -R '^client_(mission_api|mission_sse|workbench_models|mission_controller|workbench_qml)$'
           if ($LASTEXITCODE -ne 0) { throw 'Qt fast tests failed' }
+          # Keep the full communication suite in full checks; run its RAG regressions on PRs.
+          & ./client/build/Release/ForgePilotClientTests.exe protocolAcceptsAllPublicEvents controllerRagUsageDoesNotInterruptTaskStream -o client/build/rag-events-results.txt,txt
+          Get-Content client/build/rag-events-results.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Qt RAG event regressions failed' }
 
-      - name: Qt tests / main and release full set
+      - name: Qt tests / develop, main and release full set
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           ctest --test-dir client/build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'Qt full tests failed' }
 
-      - name: Qt offline HTTP and QML integration / main and release
+      - name: Qt offline HTTP and QML integration / develop, main and release
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: ./scripts/ci-qt-integration.ps1
@@ -152,7 +156,7 @@ jobs:
           & ./agent.venv/Scripts/python.exe -I ./scripts/release_smoke.py
           if ($LASTEXITCODE -ne 0) { throw 'Offline backend smoke failed' }
 
-      - name: Package smoke / main and release full set
+      - name: Package smoke / develop, main and release full set
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: |

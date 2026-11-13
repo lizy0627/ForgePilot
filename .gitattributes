@@ -1,1 +1,2 @@
 *.cmd text eol=crlf
+resources/schemas/*.json text eol=lf
