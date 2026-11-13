@@ -124,8 +124,10 @@ async def test_infrastructure_pauses_without_spending_repair_then_retries(tmp_pa
         case.validator.generator = "ForgePilot unavailable generator"
         result = await case.service.approve(case.approval)
         assert result.status is NodeStatus.RETRYABLE, result
-        report = case.artifacts("ValidationReport")[-1].content
-        assert report.failure_classification == "infrastructure_failure"
+        baseline = next(node for node in result.nodes if node.node_id == "baseline_capture")
+        assert baseline.status is NodeStatus.RETRYABLE
+        assert not case.artifacts("ValidationReport")
+        assert case.providers["implement"].seen == []
         assert case.providers["repair"].seen == case.providers["review"].seen == []
         assert not case.artifacts("DeliveryBundle")
         case.save_evidence("infrastructure-pause", result)
@@ -133,10 +135,10 @@ async def test_infrastructure_pauses_without_spending_repair_then_retries(tmp_pa
         result = await case.service.resume_infrastructure(case.task_id)
         assert result.status is NodeStatus.SUCCEEDED, result
         assert case.providers["repair"].seen == []
-        assert len(case.artifacts("ValidationReport")) == 2
+        assert len(case.artifacts("ValidationReport")) == 1
         attempts = case.events._db.execute(
             "SELECT attempt FROM validation_runs WHERE task_id=? ORDER BY attempt", (case.task_id,)).fetchall()
-        assert [row[0] for row in attempts] == [1, 2]
+        assert [row[0] for row in attempts] == [1]
         assert case.artifacts("DeliveryBundle")
     finally:
         await case.close()

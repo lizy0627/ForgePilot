@@ -394,6 +394,7 @@ class MissionHost:
             self._check_revision(task_id, fields["expected_revision"])
             self._idle(task_id)
             workflow = self._workflow(task_id)
+            definition = workflow._stored_graph(task_id)
             with self.store._lock:
                 review = workflow.review(task_id)
                 if any(fields[name] != getattr(review, name) for name in ("task_spec_hash", "plan_hash", "scope_hash")):
@@ -422,7 +423,7 @@ class MissionHost:
             approval = {name: fields[name] for name in ("task_spec_hash", "plan_hash", "scope_hash")}
             approval["approval_id"] = str(uuid4())
             operation = workflow._run_worker(task_id, workflow.runner.approve_human, task_id,
-                workflow._stored_graph(task_id), "execution_approval", expected_revision=review.revision,
+                definition, "execution_approval", expected_revision=review.revision,
                 approval=approval, on_approved=admitted)
             self._launch(task_id, operation, admission=admission)
             await admission
@@ -449,13 +450,13 @@ class MissionHost:
         async with self._control(task_id):
             snapshot = self._check_revision(task_id, revision)
             self._idle(task_id)
+            workflow = self._workflow(task_id)
+            definition = workflow._stored_graph(task_id)
             candidates = [n for n in snapshot.nodes if n.status is NodeStatus.RETRYABLE]
             if node_id is None and len(candidates) == 1:
                 node_id = candidates[0].node_id
             if not any(n.node_id == node_id for n in candidates):
                 raise ForgePilotError("invalid_state", "Select a retryable mission node")
-            workflow = self._workflow(task_id)
-            definition = workflow._stored_graph(task_id)
             workflow.runner._assert_definition(snapshot, validate_graph(definition))
             selected = next(node for node in definition.nodes if node.node_id == node_id)
             if recovery_role(selected) in {"writer", "delivery"}:

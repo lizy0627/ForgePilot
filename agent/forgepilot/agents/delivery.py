@@ -23,6 +23,10 @@ from .implementation import ImplementationService
 
 
 MAX_REPAIR_ROUNDS = 3
+LEGACY_DELIVERY_GRAPH_IDS = frozenset({
+    "validated-delivery.v1", "validated-delivery-single.v1", "task-analysis-delivery.v1",
+    "task-analysis-delivery-locked.v1", "task-analysis-delivery-single-locked.v1",
+})
 
 
 def validation_passed(report):
@@ -54,6 +58,7 @@ class DeliveryWorkflow(ImplementationService):
         gateway.router.validate_agent(self.repair_definition)
         if workspace_manager.artifacts is None:
             workspace_manager.artifacts = events.artifacts
+        self.runner.handlers.register("baseline_capture.v1", self._baseline_handler)
         self.runner.handlers.register("validator.v1", self._validation_handler)
         self.runner.handlers.register("reviewer.v1", self._review_handler)
         self.runner.handlers.register("repair.v1", self._handler)
@@ -63,7 +68,11 @@ class DeliveryWorkflow(ImplementationService):
         gate, implementer = super().graph().nodes
         gate = replace(gate, settings={**_plain_json(gate.settings),
             "model_configuration_hash": content_sha256(self.gateway.router.configuration)})
-        nodes, edges = [gate, implementer], []
+        baseline = NodeDefinition("baseline_capture", NodeType.DETERMINISTIC, "baseline_capture.v1",
+            dependencies=("execution_approval",), settings={"recovery_role": "deterministic"})
+        implementer = replace(implementer, dependencies=("execution_approval", "baseline_capture"),
+                              settings=_plain_json(implementer.settings))
+        nodes, edges = [gate, baseline, implementer], []
         for round_number in range(MAX_REPAIR_ROUNDS + 1):
             writer = "implementer" if round_number == 0 else f"repair_{round_number}"
             validation, review = f"validation_{round_number}", f"reviewer_{round_number}"
@@ -88,25 +97,29 @@ class DeliveryWorkflow(ImplementationService):
         nodes.append(NodeDefinition("delivery_bundle", NodeType.DELIVERY, "delivery_bundle.v1",
             dependencies=("execution_approval", *reviews), settings={"recovery_role": "deterministic"}))
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
-        return GraphDefinition("validated-delivery.v1", 1, tuple(nodes), tuple(edges))
+        return GraphDefinition("validated-delivery.v2", 2, tuple(nodes), tuple(edges))
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
         execution = self.graph()
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
-        return GraphDefinition("task-analysis-delivery-locked.v1" if locked_task_spec is not None
-                               else "task-analysis-delivery.v1", 1,
+        return GraphDefinition("task-analysis-delivery-locked.v2" if locked_task_spec is not None
+                               else "task-analysis-delivery.v2", 2,
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
         graph = GraphDefinition.from_dict(json.loads(self.events.missions.get_graph_run(task_id)["definition_json"]))
-        if graph.graph_id == "validated-delivery.v1":
+        if graph.graph_id in LEGACY_DELIVERY_GRAPH_IDS:
+            raise ForgePilotError("graph_definition",
+                "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
+                "(请重新创建任务并审批执行方案)")
+        if graph.graph_id == "validated-delivery.v2":
             expected = self.graph()
-        elif graph.graph_id in {"task-analysis-delivery.v1", "task-analysis-delivery-locked.v1"}:
+        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery-locked.v2"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
-            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v1") else None
+            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None
             expected = self._analysis_graph(task_id,
                 AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
                 locked_task_spec=locked)
@@ -150,16 +163,22 @@ class DeliveryWorkflow(ImplementationService):
             return await self.reviewer.review(spec, changes, validation, evidence=evidence,
                 budget=budget, is_cancelled=lambda: self._cancelled(context))
 
-    def _gate(self, context):
-        spec, _, _ = self._package(context.task_id, context.input_artifact_ids)
+    def _baseline_handler(self, context):
+        spec, plan, _ = self._package(context.task_id, context.input_artifact_ids)
         try:
+            if not self._granted(context.task_id, spec, plan, "execution"):
+                raise ForgePilotError("approval_stale", "Baseline capture requires the frozen execution approval")
+            checkpoint = self.runner.recovery.writer_preflight(context.task_id)
+            approved_tests = (spec.content.test_policy.modifiable_existing_test_patterns
+                if self._granted(context.task_id, spec, plan, "existing_tests") else ())
             self._await(self.validator.capture(context.task_id, spec.content,
+                approved_test_files=approved_tests, approval_checkpoint=checkpoint,
                 is_cancelled=lambda: self._cancelled(context)))
         except (FutureCancelledError, asyncio.CancelledError):
             return NodeResult(NodeStatus.CANCELLED)
         except ForgePilotError as exc:
             return self._service_error(exc)
-        return super()._gate(context)
+        return NodeResult(NodeStatus.SUCCEEDED, decision_summary="Approved execution baseline captured")
 
     async def resume_infrastructure(self, task_id):
         snapshot = self.runner.store.snapshot(task_id)

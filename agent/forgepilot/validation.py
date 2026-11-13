@@ -1,6 +1,6 @@
 """Deterministic validation of checkpointed changes; no model is consulted.
 
-All command templates belong to ToolchainProfile. Build products, approval-time
+All command templates belong to ToolchainProfile. Build products, execution
 inventories and hidden Oracle sources live outside the Agent's repository view.
 """
 from __future__ import annotations
@@ -192,6 +192,7 @@ class ValidationService:
                  "modifiable_test_files": list(monitor.task_spec.test_files_to_modify),
                  "file_hashes": monitor._validation_manifest,
                  "oracle_manifest": monitor._validation_oracle,
+                 "approval_checkpoint_hash": getattr(monitor, "_validation_approval_checkpoint", None),
                  "files": {path: base64.b64encode(data).decode("ascii")
                            for path, data in monitor._baseline.items()}}
         self.guard.write(task_id + "/integrity.json", json.dumps(state, ensure_ascii=False).encode())
@@ -217,6 +218,7 @@ class ValidationService:
             monitor._ctest_bound = snapshot["ctest_inventory_source"] == "ctest"
             monitor._validation_manifest = raw["file_hashes"]
             monitor._validation_oracle = raw.get("oracle_manifest")
+            monitor._validation_approval_checkpoint = raw.get("approval_checkpoint_hash")
             if any(monitor._validation_manifest.get(path) != sha256(data).hexdigest()
                    for path, data in monitor._baseline.items()):
                 raise ValueError()
@@ -225,7 +227,7 @@ class ValidationService:
             raise ForgePilotError("validation_policy", "Validation approval baseline is invalid") from None
 
     async def capture(self, task_id, spec, *, approved_test_files=(), plan_version=1,
-                      is_cancelled=lambda: False):
+                      is_cancelled=lambda: False, approval_checkpoint=None):
         """Capture before writes; an existing baseline is never replaced by edits."""
         spec = TaskSpec.model_validate(spec)
         if spec.repository.toolchain_profile != self.profile.profile_id:
@@ -235,8 +237,16 @@ class ValidationService:
         async with self._lock:
             record, root, build = self._paths(task_id)
             expected = self._workspace_check(task_id)
+            if approval_checkpoint is not None and (
+                    expected.head_commit != approval_checkpoint.head_commit or
+                    dict(expected.file_hashes) != dict(approval_checkpoint.file_hashes)):
+                raise ForgePilotError("validation_policy", "Baseline differs from the approved checkpoint")
+            checkpoint_hash = approval_checkpoint.data_sha256 if approval_checkpoint is not None else None
             monitor = self._load_baseline(task_id, record, spec, root)
             if monitor is not None:
+                if (monitor._validation_approval_checkpoint != checkpoint_hash or
+                        monitor._validation_manifest != dict(expected.file_hashes)):
+                    raise ForgePilotError("validation_policy", "Stored baseline differs from the approved checkpoint")
                 monitor.capture(plan_version, approved_test_files=approved_test_files)
                 self._save_baseline(task_id, record, spec, monitor)
                 self._monitors[task_id] = monitor
@@ -245,6 +255,7 @@ class ValidationService:
             monitor.capture(plan_version, approved_test_files=approved_test_files)
             monitor._validation_manifest = dict(expected.file_hashes)
             monitor._validation_oracle = None
+            monitor._validation_approval_checkpoint = checkpoint_hash
             if self.oracle is not None:
                 oracle_root = Path(self.oracle.source_dir)
                 if (not oracle_root.is_absolute() or path_within(oracle_root, root)
@@ -258,15 +269,20 @@ class ValidationService:
             try:
                 for phase in ("cmake_configure", "ctest_inventory"):
                     result = await self._run(self._command(phase, values), is_cancelled)
+                    if result.status == "cancelled":
+                        raise asyncio.CancelledError()
                     if result.status != "succeeded":
-                        raise ForgePilotError("validation_infrastructure", "Approval-time CMake/CTest inventory could not be captured")
+                        raise ForgePilotError("validation_infrastructure", "Execution baseline CMake/CTest inventory could not be captured")
                 monitor.bind_ctest(BuildPipeline._inventory_names(result.stdout))
-                if self._workspace_check(task_id) != expected:
-                    raise ForgePilotError("validation_policy", "Worktree changed during baseline capture")
             except ForgePilotError as exc:
                 if exc.code == "command_denied":
                     raise ForgePilotError("validation_infrastructure", "Configured validation tool is unavailable") from None
                 raise
+            finally:
+                if self._workspace_check(task_id) != expected:
+                    raise ForgePilotError("validation_policy", "Worktree changed during baseline capture")
+            if is_cancelled():
+                raise asyncio.CancelledError()
             self._save_baseline(task_id, record, spec, monitor)
             self._monitors[task_id] = monitor
             return monitor.report()
@@ -400,7 +416,7 @@ class ValidationService:
             stages.append(PIPELINE_STAGES[1])
             monitor = self._load_baseline(task_id, record, spec, root)
             if monitor is None:
-                raise _Failure("policy_failure", "Approval-time test integrity baseline is missing")
+                raise _Failure("policy_failure", "Execution test integrity baseline is missing")
             monitor.verify()
             state["test_integrity"] = "passed"
             record_check("Test hashes, assertions, skip policy and registration locations match")

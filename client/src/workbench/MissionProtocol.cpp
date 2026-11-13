@@ -385,6 +385,7 @@ QString MissionProtocol::errorMessage(const QString &code, int status) {
     if (code == "unknown_mission" || code == "unknown_graph" || status == 404) return "任务或产物不存在，请检查任务标识并刷新状态。";
     if (status == 403) return "操作被权限或安全策略拒绝，请检查审批和允许范围。";
     if (code == "recovery_required" || code == "recovery_stale") return "任务需要恢复确认，请先刷新并检查恢复预览。";
+    if (code == "graph_definition") return "任务冻结流程已变化，请重新创建任务并审批执行方案；历史记录仍可查看。";
     if (status == 409) return "任务状态已变化，当前操作无法执行，请刷新后检查。";
     if (status == 429 || code == "task_capacity") return "后端繁忙，请稍后刷新。";
     if (status == 503 || code == "mission_unavailable") return "任务服务暂不可用，请检查后端配置并稍后刷新。";

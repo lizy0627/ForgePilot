@@ -52,7 +52,7 @@ async def test_http_dual_analyst_join_approval_real_build_repair_review_delivery
                 assert waiting["status"] == "awaiting_human"
                 before = (await client.get(path + "/graph")).json()
                 states = {node["node_id"]: node["status"] for node in before["nodes"]}
-                assert before["graph_id"] == "task-analysis-delivery.v1"
+                assert before["graph_id"] == "task-analysis-delivery.v2"
                 assert all(states[name] == "succeeded" for name in (
                     "draft_task_spec", "analyst_fanout", "root_cause_analysis",
                     "impact_test_analysis", "join_evidence", "generate_plan"))

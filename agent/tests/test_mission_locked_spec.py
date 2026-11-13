@@ -39,7 +39,7 @@ async def test_locked_task_spec_is_bound_to_durable_graph_without_model_draft(
         task_id = made["task_id"]
         run = host.store.missions.get_graph_run(task_id)
         graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
-        assert graph.graph_id == "task-analysis-delivery-locked.v1"
+        assert graph.graph_id == "task-analysis-delivery-locked.v2"
         draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
         assert draft.handler == "locked_task_spec"
         assert _plain_json(draft.settings["task_spec"]) == spec.model_dump(mode="json")

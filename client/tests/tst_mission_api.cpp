@@ -155,6 +155,22 @@ private slots:
             QCOMPARE(errors.last()[4].toString(), "invalid_response");
         }
     }
+    void previousGraphRequiresNewApproval() {
+        Source source;
+        source.handle = [](const Request &r) {
+            Source::json(r, {{"error", QJsonObject{{"code", "graph_definition"},
+                {"message", "Recreate the mission and approve its execution plan"},
+                {"details", QJsonArray{}}, {"task_id", A}}}}, 409);
+        };
+        AgentApiClient api; api.setBaseUrl(source.url());
+        QSignalSpy errors(&api, &AgentApiClient::requestError);
+        api.resumeMission(A, 8);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors[0][4].toString(), "graph_definition");
+        QVERIFY(errors[0][5].toString().contains("重新创建任务并审批执行方案"));
+        QVERIFY(errors[0][5].toString().contains("历史记录仍可查看"));
+        QTest::qWait(50); QCOMPARE(source.requests.size(), 1);
+    }
     void invalidRequestIsLocalAndCancellable() {
         Source source; AgentApiClient api; api.setBaseUrl(source.url()); QSignalSpy errors(&api, &AgentApiClient::requestError);
         auto invalid = approval(); invalid.remove("scope_hash");
