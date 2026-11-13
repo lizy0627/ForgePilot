@@ -1,6 +1,7 @@
 """Process-owned optional RAG resources and repository-scoped services."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 
 from .config import RagConfig, RagRuntimeAvailability, RagRuntimeSettings
 from .embedding import embedding_provider_from_runtime
-from .indexer import RepositoryIndexer
+from .indexer import RepositoryIndexer, _RepositoryIndexState
 from .retrieval import RetrievalService
 from .store import RagFileStore
 from .vector_store import QdrantVectorStore
@@ -45,6 +46,8 @@ class RagManager:
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self._active_indexes: set[str] = set()
+        self._index_states: dict[str, _RepositoryIndexState] = {}
+        self._closed = False
         self.reason = (runtime.reason if isinstance(runtime, RagRuntimeAvailability)
                        and runtime.settings is None else None)
         if not self.config.enabled:
@@ -77,7 +80,8 @@ class RagManager:
         repository_id = repository_id_for(repository.root)
         indexer = RepositoryIndexer(
             repository_id, repository, self.config, self.embedding_provider,
-            self.vector_store, self.file_store, redactor=self.redactor)
+            self.vector_store, self.file_store, redactor=self.redactor,
+            index_state=self._index_state(repository_id))
         retrieval = RetrievalService(
             repository_id, repository, self.config, self.embedding_provider,
             self.vector_store, code_intelligence=code_intelligence,
@@ -85,17 +89,43 @@ class RagManager:
             redactor=self.redactor)
         return RagRepositoryServices(indexer=indexer, retrieval=retrieval)
 
+    def _index_state(self, repository_id: str) -> _RepositoryIndexState:
+        state = self._index_states.get(repository_id)
+        if state is None:
+            state = _RepositoryIndexState(refresh_enabled=not self._closed)
+            self._index_states[repository_id] = state
+        return state
+
     def begin_index(self, repository_id: str) -> bool:
         """Claim one repository on the shared runtime loop without blocking Agent work."""
-        if repository_id in self._active_indexes:
+        if self._closed or repository_id in self._active_indexes:
             return False
         self._active_indexes.add(repository_id)
+        self._index_state(repository_id).refresh_enabled = False
         return True
 
     def finish_index(self, repository_id: str) -> None:
         self._active_indexes.discard(repository_id)
+        self._index_state(repository_id).refresh_enabled = not self._closed
+
+    async def cancel_refreshes(self, repository_id: str) -> None:
+        """Join refreshes after the repository claim has stopped new registration."""
+        tasks = list(self._index_state(repository_id).refresh_tasks.values())
+        for task in tasks:
+            # Clear and shutdown may join the same shielded vector mutation.
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for state in self._index_states.values():
+            state.refresh_enabled = False
+        await asyncio.gather(*(self.cancel_refreshes(repository_id)
+                               for repository_id in self._index_states))
         for resource in (self.embedding_provider, self.vector_store):
             close = getattr(resource, "aclose", None)
             if close is not None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import inspect
 from pathlib import Path
@@ -105,12 +106,22 @@ def _embedding_text(chunk: CodeChunk) -> str:
     return "\n".join(metadata) + "\n\n" + chunk.content
 
 
+@dataclass(slots=True)
+class _RepositoryIndexState:
+    """Manager-owned coordination; repository access stays request-scoped."""
+
+    run_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    refresh_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    refresh_enabled: bool = True
+
+
 class RepositoryIndexer:
     """Incrementally index one repository without participating in Agent runtime startup."""
 
     def __init__(self, repository_id: str, repository: Repository, config: RagConfig,
                  embedding_provider: EmbeddingProvider | None, vector_store: VectorStore | None,
-                 file_store: RagFileStore, *, redactor: Redactor | None = None) -> None:
+                 file_store: RagFileStore, *, redactor: Redactor | None = None,
+                 index_state: _RepositoryIndexState | None = None) -> None:
         self.repository_id = checked_repository_id(repository_id)
         self.repository = repository
         self.config = RagConfig.model_validate(config)
@@ -118,8 +129,9 @@ class RepositoryIndexer:
         self.vector_store = vector_store
         self.file_store = file_store
         self.redactor = redactor or Redactor()
-        self._run_lock = asyncio.Lock()
-        self._refresh_tasks: dict[str, asyncio.Task] = {}
+        self._index_state = index_state or _RepositoryIndexState()
+        self._run_lock = self._index_state.run_lock
+        self._refresh_tasks = self._index_state.refresh_tasks
         states = self.file_store.list(self.repository_id)
         chunks = sum(state.chunk_count for state in states
                      if state.content_hash != _UNINDEXED_HASH)
@@ -193,7 +205,7 @@ class RepositoryIndexer:
 
     def schedule_refresh(self, path: str) -> bool:
         """Coalesce a safe background refresh requested by stale-vector filtering."""
-        if not self.available:
+        if not self.available or not self._index_state.refresh_enabled:
             return False
         try:
             normalized = checked_relative_path(self.repository.normalize_plan_path(path))
@@ -320,7 +332,14 @@ class RepositoryIndexer:
             # retryable pending index instead of a false ready state.
             if previous is not None:
                 self.file_store.upsert(self._state(path, "pending", previous))
-            removed = await self.vector_store.delete_file(self.repository_id, path)
+            deletion = asyncio.create_task(self.vector_store.delete_file(self.repository_id, path))
+            try:
+                removed = await asyncio.shield(deletion)
+            except asyncio.CancelledError:
+                # A deleted stale file can also refresh through a worker thread.
+                # Keep the repository lock until that mutation has finished.
+                await deletion
+                raise
             self.file_store.delete(self.repository_id, path)
             return removed
         except asyncio.CancelledError:

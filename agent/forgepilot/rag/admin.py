@@ -284,6 +284,7 @@ class RagIndexCoordinator:
                    IndexProgress(repository_id=repository_id, status="indexing"))
         self._runs[repository_id] = run
         try:
+            await self.manager.cancel_refreshes(repository_id)
             removed = await services.indexer.clear_repository()
             empty = IndexProgress(repository_id=repository_id, status="empty")
             self._advance(run, progress=empty, error_code=None)
