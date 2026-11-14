@@ -15,7 +15,8 @@ from .models.accounting import close_accounting_logging, configure_accounting_lo
 from .process import executable
 from .security import Redactor
 from .settings import (add_build_arguments, add_connection_arguments, build_config_from_args,
-                       add_storage_arguments, model_gateway_from_args)
+                       add_storage_arguments)
+from .service_composition import DevelopmentConfig, compose_server_resources
 from .sqlite_store import SqliteEventStore
 from .task_service import TaskService
 from .repository import Repository
@@ -71,19 +72,26 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
     local_token = os.environ.get("FORGEPILOT_LOCAL_API_TOKEN") or secrets.token_urlsafe(32)
     redactor = Redactor((key, local_token))
     try:
-        model_clients = model_gateway_from_args(args)
-        redactor = model_clients.redactor.with_secrets((key, local_token))
+        def development_config():
+            # Resolve only when v1 work or a Mission needs development tools.
+            rg, git = executable(args.rg, "rg"), executable(args.git, "git")
+            return DevelopmentConfig(rg, git, build_config_from_args(args))
+
+        resources = compose_server_resources(args, api_token=local_token,
+                                             development=development_config)
+        model_clients = resources.gateway
+        redactor = resources.redactor
         rag_runtime = rag_runtime_availability_from_args(args, api_key=key)
         if not 1 <= args.port <= 65535:
             raise ForgePilotError("server_config", "Port must be between 1 and 65535")
         rag_manager = None
         def factory(trace):
             # Plain Q&A must start even when development tools are absent/misconfigured.
-            rg, git = executable(args.rg, "rg"), executable(args.git, "git")
-            config = build_config_from_args(args)
+            config = resources.development()
             llm = model_clients.for_route("task")
-            return TaskService(llm, rg_executable=rg, git_executable=git, trace=trace,
-                               redactor=redactor, build_config=config,
+            return TaskService(llm, rg_executable=config.rg_executable,
+                               git_executable=config.git_executable, trace=trace,
+                               redactor=redactor, build_config=config.build_config,
                                code_intelligence_config=code_intelligence_from_args(args),
                                rag_manager=rag_manager)
         def chat_factory():
@@ -133,7 +141,9 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  rag_coordinator=rag_coordinator, api_token=local_token)
                 from .mission_factory import build_mission_workflow
                 app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
-                    app.state.task_host, oracle_source=args.mission_oracle,
+                    resources.mission_dependencies(events,
+                        mcp_connection_factory=app.state.task_host.mcp_service.connection_factory),
+                    oracle_source=args.mission_oracle,
                     cloud_model_allowed=args.mission_allow_cloud_model,
                     mcp_snapshots=mcp_snapshots)
                 options = dict(host=args.host, port=args.port, workers=1,

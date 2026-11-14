@@ -10,6 +10,7 @@ from dataclasses import asdict
 from inspect import signature
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
@@ -23,6 +24,9 @@ from .orchestration.models import GraphDefinition, NodeResult, NodeStatus
 from .orchestration.recovery import recovery_role
 from .orchestration.store import GraphStore, _now
 
+if TYPE_CHECKING:
+    from .mission_factory import MissionDependencies
+
 
 def _revision_conflict():
     return ForgePilotError("mission_revision_conflict",
@@ -35,9 +39,12 @@ def _approval_conflict():
 
 
 class MissionHost:
-    def __init__(self, task_host, workflow_factory=None):
+    def __init__(self, task_host, workflow_factory=None, *, dependencies: MissionDependencies | None = None):
         self.host, self.store = task_host, task_host.store
         self.factory = workflow_factory
+        if dependencies is not None and dependencies.events is not self.store:
+            raise ValueError("Mission dependencies must use the host event store")
+        self.dependencies = dependencies
         self.graphs = GraphStore(self.store)
         self._services = {}
         self._running = {}
@@ -94,7 +101,9 @@ class MissionHost:
             if self.factory is None:
                 from .mission_factory import build_mission_workflow
                 snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
-                workflow = build_mission_workflow(self.host, mcp_snapshots=snapshots)
+                if self.dependencies is None:
+                    raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
+                workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots)
                 workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
             else:
                 if mcp_server_ids:

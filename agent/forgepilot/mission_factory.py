@@ -1,15 +1,43 @@
-"""Compose graph workflows from the same host-owned services used by API v1."""
+"""Compose graph workflows from explicit, trusted, non-owning dependencies."""
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .errors import ForgePilotError
 
+if TYPE_CHECKING:
+    from .agents.delivery import DeliveryWorkflow
+    from .mcp import MCPClient
+    from .mcp_config import MCPConfig, MCPHttpConfig
+    from .mcp_http import MCPHttpClient
+    from .models.gateway import ModelGateway
+    from .presets import BuildConfig
+    from .security import Redactor
+    from .sqlite_store import SqliteEventStore
 
-def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed=False,
-                           mcp_snapshots=()):
+
+@dataclass(frozen=True)
+class MissionDependencies:
+    """Borrow shared resources; their owners retain connection/close responsibility."""
+
+    gateway: ModelGateway
+    events: SqliteEventStore
+    rg_executable: str
+    git_executable: str
+    build_config: BuildConfig | None
+    redactor: Redactor
+    mcp_connection_factory: Callable[[MCPConfig | MCPHttpConfig], MCPClient | MCPHttpClient]
+
+
+def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=None, cloud_model_allowed=False,
+                           mcp_snapshots=()) -> DeliveryWorkflow:
     """Lazy composition: OpenAPI and v1 startup need no graph/model/build tools.
 
-    The compatibility TaskService supplies configuration and a non-owning gateway
-    handle. Graph execution uses the existing policy, workspace and validator
+    The composition root supplies trusted configuration and a borrowed gateway.
+    Graph execution uses the existing policy, workspace and validator
     implementations; HTTP input can never provide executables or commands.
     """
     from .agents.delivery import DeliveryWorkflow
@@ -18,12 +46,10 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
     from .mcp_manager import MCPManager
     from .process import executable
     from .toolchain import ToolchainProfile
-    from .trace import MemoryTrace
     from .validation import ProtectedOracle, ValidationService
     from .workspace_manager import WorkspaceManager
 
-    legacy = task_host.factory(MemoryTrace())
-    gateway = getattr(getattr(legacy, "llm", None), "gateway", None)
+    gateway = dependencies.gateway
     if gateway is None:
         raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
     try:
@@ -34,12 +60,12 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
         raise ForgePilotError("llm_config",
             "Missions require configured orchestration, analysis, implementation, review and repair "
             "model routes with Tool Calling support") from None
-    config = legacy.build_config
+    config = dependencies.build_config
     if config is not None and any((config.configure_preset, config.build_preset, config.test_preset)):
         raise ForgePilotError("build_config",
             "Mission validation does not support CMake presets; configure generator, architecture, "
             "make program and configuration instead")
-    events = task_host.store
+    events = dependencies.events
     oracle = None
     if oracle_source is not None:
         source = Path(oracle_source)
@@ -48,7 +74,7 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
         oracle = ProtectedOracle(source)
     # ArtifactStore has already chosen a safe durable root for this database.
     root = events.artifacts.root / "mission-workspaces"
-    workspace = WorkspaceManager(root, git_executable=legacy.git_executable,
+    workspace = WorkspaceManager(root, git_executable=dependencies.git_executable,
                                  artifacts=events.artifacts)
     profile = ToolchainProfile(
         cmake=config.cmake if config else executable(None, "cmake"),
@@ -60,15 +86,15 @@ def build_mission_workflow(task_host, *, oracle_source=None, cloud_model_allowed
         architecture=config.architecture if config else None,
         make_program=config.make_program if config else None,
         timeout=max(config.configure_timeout, config.build_timeout, config.test_timeout) if config else 300,
-        redactor=legacy.redactor)
+        redactor=dependencies.redactor)
     # The host admits exact saved server snapshots. Adapters are handed only to
     # fresh Analyst registries; all other roles have no MCP tool instance.
-    mcp_manager = MCPManager(tuple(mcp_snapshots), redactor=legacy.redactor,
-        connection_factory=task_host.mcp_service.connection_factory)
+    mcp_manager = MCPManager(tuple(mcp_snapshots), redactor=dependencies.redactor,
+        connection_factory=dependencies.mcp_connection_factory)
     analysis_kwargs = {"approved_mcp": mcp_manager.adapters(),
                        "approved_server_ids": tuple(s.server_id for s in mcp_manager.snapshots)}
     workflow = DeliveryWorkflow(events, workspace, gateway, validator=validator,
-                                rg_executable=legacy.rg_executable,
+                                rg_executable=dependencies.rg_executable,
                                 analysis_kwargs=analysis_kwargs)
     workflow.mission_mcp_manager = mcp_manager
     workflow.mission_data_policy = DataPolicy(cloud_model_allowed=cloud_model_allowed,

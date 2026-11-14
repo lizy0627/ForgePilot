@@ -8,7 +8,7 @@ import pytest
 from conftest import reply
 from forgepilot.api import create_app
 from forgepilot.errors import ForgePilotError
-from forgepilot.mission_factory import build_mission_workflow
+from forgepilot.mission_factory import MissionDependencies, build_mission_workflow
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
 from forgepilot.presets import BuildConfig
@@ -52,6 +52,12 @@ def build_host(tmp_path, git_exe, rg_exe, *, omit=None, build_config=None):
     return TaskHost(factory, store=store), gateway, provider
 
 
+def build_dependencies(host, gateway, git_exe, rg_exe, *, build_config=None):
+    return MissionDependencies(gateway=gateway, events=host.store,
+        rg_executable=rg_exe, git_executable=git_exe, build_config=build_config,
+        redactor=gateway.redactor, mcp_connection_factory=host.mcp_service.connection_factory)
+
+
 @pytest.mark.asyncio
 async def test_factory_composes_shared_gateway_trusted_validator_and_data_policy(tmp_path, git_exe, rg_exe):
     config = BuildConfig(cmake=shutil.which("cmake"), ctest=shutil.which("ctest"),
@@ -61,7 +67,8 @@ async def test_factory_composes_shared_gateway_trusted_validator_and_data_policy
     oracle = tmp_path / "trusted oracle"
     oracle.mkdir()
     try:
-        workflow = build_mission_workflow(host, oracle_source=oracle, cloud_model_allowed=True)
+        dependencies = build_dependencies(host, gateway, git_exe, rg_exe, build_config=config)
+        workflow = build_mission_workflow(dependencies, oracle_source=oracle, cloud_model_allowed=True)
         assert workflow.gateway is gateway
         assert workflow.events is host.store
         assert workflow.workspace.artifacts is host.store.artifacts
@@ -76,7 +83,7 @@ async def test_factory_composes_shared_gateway_trusted_validator_and_data_policy
         assert workflow.mission_data_policy.cloud_model_allowed is True
         assert workflow.mission_data_policy.external_mcp_allowed is False
         assert not gateway._providers and provider.calls == 0
-        assert build_mission_workflow(host).mission_data_policy.cloud_model_allowed is False
+        assert build_mission_workflow(dependencies).mission_data_policy.cloud_model_allowed is False
         # The compatibility handle remains non-owning: composition cannot close v1's gateway.
         legacy_handle = host.factory(None).llm
         await legacy_handle.aclose()
@@ -93,7 +100,7 @@ def test_missing_graph_route_fails_before_workspace_allocation(tmp_path, git_exe
     host, gateway, provider = build_host(tmp_path, git_exe, rg_exe, omit=missing_route)
     try:
         with pytest.raises(ForgePilotError) as caught:
-            build_mission_workflow(host)
+            build_mission_workflow(build_dependencies(host, gateway, git_exe, rg_exe))
         assert caught.value.code == "llm_config"
         assert "orchestration, analysis, implementation, review and repair" in caught.value.message
         assert not (host.store.artifacts.root / "mission-workspaces").exists()
@@ -110,7 +117,7 @@ def test_v2_rejects_unsupported_presets_before_workspace_allocation(tmp_path, gi
     host, gateway, provider = build_host(tmp_path, git_exe, rg_exe, build_config=config)
     try:
         with pytest.raises(ForgePilotError) as caught:
-            build_mission_workflow(host)
+            build_mission_workflow(build_dependencies(host, gateway, git_exe, rg_exe, build_config=config))
         assert caught.value.code == "build_config"
         assert "does not support CMake presets" in caught.value.message
         assert not (host.store.artifacts.root / "mission-workspaces").exists()

@@ -10,7 +10,7 @@ from forgepilot.mission_host import MissionHost
 from forgepilot.orchestration.models import GraphDefinition, _plain_json
 
 from test_analysis_contracts import task_payload
-from test_mission_factory import build_host
+from test_mission_factory import build_dependencies, build_host
 from test_workspace_manager import committed_repo
 
 
@@ -31,7 +31,7 @@ def fields(root, spec):
 async def test_locked_task_spec_is_bound_to_durable_graph_without_model_draft(
         tmp_path, git_exe, rg_exe, committed_repo):
     host, gateway, _ = build_host(tmp_path, git_exe, rg_exe)
-    missions = MissionHost(host)
+    missions = MissionHost(host, dependencies=build_dependencies(host, gateway, git_exe, rg_exe))
     spec = validate_task_spec(frozen_payload())
     await host.start()
     try:
@@ -62,7 +62,7 @@ async def test_locked_task_spec_is_bound_to_durable_graph_without_model_draft(
 async def test_locked_task_spec_rejects_request_mismatch_before_workspace(
         tmp_path, git_exe, rg_exe, committed_repo):
     host, gateway, provider = build_host(tmp_path, git_exe, rg_exe)
-    missions = MissionHost(host)
+    missions = MissionHost(host, dependencies=build_dependencies(host, gateway, git_exe, rg_exe))
     spec = validate_task_spec(frozen_payload())
     await host.start()
     try:
