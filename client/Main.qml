@@ -221,7 +221,7 @@ ApplicationWindow {
         visible: window.agentMode
         anchors.top: modeBar.bottom; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
         sourceComponent: Component {
-            Workbench.WorkbenchPage {
+            Workbench.WorkflowPage {
                 mission: window.missions
                 conversionRequest: window.conversionRequest
                 conversionSource: window.conversionSource

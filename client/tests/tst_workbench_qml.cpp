@@ -148,7 +148,13 @@ struct Ui {
     }
     bool load()
     {
-        engine.load(QUrl::fromLocalFile(QString(FORGEPILOT_SOURCE_DIR) + "/client/Main.qml"));
+        const auto mainPath = QString(FORGEPILOT_SOURCE_DIR) + "/client/Main.qml";
+        QFile mainFile(mainPath);
+        if (!mainFile.open(QIODevice::ReadOnly)) return false;
+        // Retain the legacy panel regressions; tst_workflow_qml exercises the
+        // production Main.qml with the new graph-first workbench.
+        engine.loadData(mainFile.readAll().replace("Workbench.WorkflowPage", "Workbench.WorkbenchPage"),
+                        QUrl::fromLocalFile(mainPath));
         if (engine.rootObjects().isEmpty()) return false;
         window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         return window && QTest::qWaitForWindowExposed(window);

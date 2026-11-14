@@ -4,6 +4,19 @@
 `client/workbench/` 提供 QML 工作台。自由聊天、v1 API 和旧 `TaskController`
 保留；聊天历史、记忆或 MCP 配置不会自动进入 Mission 请求。
 
+默认工作台为 `WorkflowPage.qml`：创建任务后收起表单，以八个业务阶段的
+流程图显示进度，阶段可以展开为真实执行节点。点击阶段或节点在右侧打开
+`WorkflowDetails.qml`；窄窗口显示详情页，关闭或按 Esc 返回流程图。
+默认跟随当前进度；手动选择节点后固定阅读位置，点击“跟随进度”恢复。
+审批、异常和中断仅提示，不抢走正在阅读的节点，也不自动执行操作。
+
+`WorkflowUi.js` 按节点的 `output_artifact_ids` 定位产物；没有正式输出引用时，
+才按 `producer_node` 查找。各轮验证、修复和审查不会使用全任务最新报告替代。
+节点成功执行但要求修复时，界面显示“需要修复”；交付包完成仍需预览和确认。
+恢复入口同时检查任务的 `recovery_required`，覆盖重启后停在审批门的任务。
+旧 `WorkbenchPage.qml` 与详情面板保留兼容回归，新界面由
+`tst_workflow_qml.cpp` 通过真实 Main.qml、控制器和本地 HTTP fixture 验证。
+
 实现前核对了 `docs/development-technical-plan.md` 第 5、20、21 节和实际后端 v2
 模型/路由。原 `AgentApiClient` 仅支持 v1，JSON 检查只覆盖顶层对象；原 `SseClient`
 只根据事件序号处理 v1，遇到缺口直接报错；旧 `TaskController` 同时承担计划、构建、

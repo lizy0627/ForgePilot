@@ -53,6 +53,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
     workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
+    workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js workbench/WorkflowTheme.js
     workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
     workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml
     workbench/ValidationPanel.qml workbench/ReviewPanel.qml workbench/DeliveryPanel.qml
@@ -102,17 +103,24 @@ if(BUILD_TESTING)
     forgepilot_backend_test(ForgePilotMcpTests tests/tst_mcp_backend.cpp)
     forgepilot_backend_test(ForgePilotMissionBackendTests tests/tst_mission_backend.cpp)
     forgepilot_backend_test(ForgePilotWorkbenchQmlTests tests/tst_workbench_qml.cpp)
+    forgepilot_backend_test(ForgePilotWorkflowQmlTests tests/tst_workflow_qml.cpp)
+    target_compile_options(ForgePilotWorkflowQmlTests PRIVATE /utf-8)
+    target_compile_definitions(ForgePilotWorkflowQmlTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME client_workflow_qml COMMAND ForgePilotWorkflowQmlTests -o "${CMAKE_CURRENT_BINARY_DIR}/workflow_qml-results.txt,txt")
+    set_tests_properties(client_workflow_qml PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     target_compile_definitions(ForgePilotWorkbenchQmlTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
     # The GUI test must also run directly from Visual Studio, before the main
     # application's separate deployment step. Include QtTest and the offscreen
     # platform plugin used by CTest in its own deployment.
     get_filename_component(qt_bin_dir "${qmake_path}" DIRECTORY)
-    add_custom_command(TARGET ForgePilotWorkbenchQmlTests POST_BUILD
+    foreach(ui_test ForgePilotWorkbenchQmlTests ForgePilotWorkflowQmlTests)
+    add_custom_command(TARGET ${ui_test} POST_BUILD
         COMMAND "${qt_bin_dir}/windeployqt.exe" --$<IF:$<CONFIG:Debug>,debug,release>
             --no-translations --qmldir "${CMAKE_CURRENT_SOURCE_DIR}"
-            --include-plugins qoffscreen "$<TARGET_FILE:ForgePilotWorkbenchQmlTests>"
-        COMMENT "Deploying Qt runtime for ForgePilotWorkbenchQmlTests"
+            --include-plugins qoffscreen "$<TARGET_FILE:${ui_test}>"
+        COMMENT "Deploying Qt runtime for ${ui_test}"
         VERBATIM)
+    endforeach()
     add_test(NAME client_workbench_qml COMMAND ForgePilotWorkbenchQmlTests -o "${CMAKE_CURRENT_BINARY_DIR}/workbench_qml-results.txt,txt")
     set_tests_properties(client_workbench_qml PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
