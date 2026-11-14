@@ -487,7 +487,8 @@ def start(config):
     deadline = time.monotonic() + 30 + CLIENT_START_TIMEOUT + SHUTDOWN_TIMEOUT + 15
     while not result.exists():
         if owner.poll() is not None and not result.exists():
-            print('Launcher owner exited before startup completed. Check runtime.json and Windows application control logs.')
+            print(f'Launcher owner exited before startup completed (supervisor_exit={owner.returncode}). '
+                  'Check runtime.json and Windows application control logs.')
             return 1
         if time.monotonic() >= deadline:
             stop(config)

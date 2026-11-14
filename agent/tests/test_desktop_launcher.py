@@ -59,11 +59,39 @@ def runtime(config):
     return json.loads((config.parent / 'runtime.json').read_text(encoding='utf-8'))
 
 
+def startup_evidence(config, result, env):
+    """Bounded test diagnostics; list fixture files without reading config or secrets."""
+    redactor = launcher.Redactor((KEY, env['FORGEPILOT_LOCAL_API_TOKEN']))
+    return json.dumps({
+        'returncode': result.returncode,
+        'stdout': redactor.text(result.stdout)[:4096],
+        'stderr': redactor.text(result.stderr)[:4096],
+        'runtime_exists': (config.parent / 'runtime.json').is_file(),
+        'files': sorted(str(path.relative_to(config.parent.parent))
+                        for path in config.parent.parent.rglob('*') if path.is_file()),
+    }, ensure_ascii=True)
+
+
 def wait_stopped(config):
     deadline = time.monotonic() + 8
     while launcher.Kernel(config).running() and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not launcher.Kernel(config).running()
+
+
+def test_startup_evidence_redacts_output_without_reading_config(configured):
+    config, _, env = configured
+    config.write_text('private-config-content', encoding='utf-8')
+    (config.parent / 'runtime.tmp').touch()
+    result = subprocess.CompletedProcess([], 1, stdout=KEY + '\n' + 'x' * 5000,
+                                         stderr=env['FORGEPILOT_LOCAL_API_TOKEN'])
+    evidence = startup_evidence(config, result, env)
+    details = json.loads(evidence)
+    assert details['returncode'] == 1 and not details['runtime_exists']
+    assert len(details['stdout']) == 4096 and details['stderr'] == '[REDACTED]'
+    assert details['files'] == ['settings with spaces\\config.json', 'settings with spaces\\runtime.tmp']
+    assert all(secret not in evidence for secret in
+               (KEY, env['FORGEPILOT_LOCAL_API_TOKEN'], 'private-config-content'))
 
 
 def test_real_start_repeat_stop_restart_preserves_unrelated_process(configured):
@@ -119,12 +147,19 @@ def test_port_conflict_does_not_stop_listener(configured):
         listener.bind(('127.0.0.1', data['port']))
         listener.listen()
         failed = invoke('start', config, env)
-        assert failed.returncode == 1
-        assert runtime(config)['error'] == 'port_in_use'
+        evidence = startup_evidence(config, failed, env)
+        assert failed.returncode == 1, evidence
+        assert (config.parent / 'runtime.json').is_file(), evidence
+        state = runtime(config)
+        assert state['status'] == 'failed' and state['error'] == 'port_in_use', evidence
+        assert '"error": "port_in_use"' in failed.stdout, evidence
+        assert not {'backend_pid', 'client_worker_pid', 'client_pid'} & state.keys(), evidence
         wait_stopped(config)
-        assert invoke('stop', config, env).returncode == 0
+        assert not list(config.parent.glob('start-*.json')), evidence
+        stopped = invoke('stop', config, env)
+        assert stopped.returncode == 0, startup_evidence(config, stopped, env)
         with socket.socket() as probe:
-            assert probe.connect_ex(('127.0.0.1', data['port'])) == 0
+            assert probe.connect_ex(('127.0.0.1', data['port'])) == 0, evidence
 
 
 def test_bad_backend_configuration_keeps_failure_logs(configured):
@@ -576,10 +611,15 @@ def test_owner_exiting_before_handshake_fails_promptly(configured, tmp_path):
     harness = fault_launcher(tmp_path, 'owner_exit')
     started = time.monotonic()
     result = subprocess.run([sys.executable, '-I', str(harness), 'start', '--config', str(config)],
-                            env=env, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-    assert result.returncode == 1 and b'owner exited' in result.stdout
-    assert time.monotonic() - started < 10
-    assert not launcher.Kernel(config).running()
+                            env=env, capture_output=True, text=True, timeout=15,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    evidence = startup_evidence(config, result, env)
+    assert result.returncode == 1 and 'owner exited' in result.stdout, evidence
+    assert 'supervisor_exit=9' in result.stdout, evidence
+    assert not (config.parent / 'runtime.json').exists(), evidence
+    assert not list(config.parent.glob('start-*.json')), evidence
+    assert time.monotonic() - started < 10, evidence
+    assert not launcher.Kernel(config).running(), evidence
 
 
 def test_client_crash_after_start_drains_backend_without_resurrecting_handshake(configured):
