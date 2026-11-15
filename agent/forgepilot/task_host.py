@@ -5,8 +5,9 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event, Thread
 
+from .host_runtime import HostRuntime
+from .task_capacity import TaskCapacity
 from .context import TaskContext, TaskState
 from .path_identity import path_key
 from .errors import ForgePilotError
@@ -47,37 +48,60 @@ class _Task:
 
 class TaskHost:
     def __init__(self, service_factory, *, store=None, max_tasks=32, mcp_disabled=False,
-                 legacy_mcp_config=None, rag_coordinator=None):
+                 legacy_mcp_config=None, rag_coordinator=None, runtime=None, capacity=None):
         self.factory = service_factory
         self.store = store if store is not None else SqliteEventStore()
-        self.max_tasks = max_tasks
+        self.runtime = runtime if runtime is not None else HostRuntime()
+        self.capacity = capacity if capacity is not None else TaskCapacity(max_tasks, mission_count=self.store.missions.active_count)
         self._tasks: dict[str, _Task] = {}
         self._repositories: dict[str, str] = {}
-        self._ready = Event()
-        self._loop = None
-        self._thread = None
-        self._stopping = False
-        self.extra_active = lambda: 0
         self.mcp_service = MCPService(self.store)  # No connection/decryption at startup.
         self.mcp_disabled = mcp_disabled
         self.legacy_mcp_config = legacy_mcp_config
         self.rag_coordinator = rag_coordinator
         self._mcp_active = set()  # Worker-loop owned; includes resource cleanup.
 
+    @property
+    def max_tasks(self):
+        return self.capacity.max_tasks
+
+    # Compatibility for embedded diagnostics; other hosts use the public runtime.
+    @property
+    def _loop(self):
+        return self.runtime._loop
+
+    @property
+    def _thread(self):
+        return self.runtime._thread
+
+    @property
+    def _stopping(self):
+        return self.runtime.stopping
+
+    @_stopping.setter
+    def _stopping(self, value):
+        if value:
+            self.runtime.stop_accepting()
+
+    def has_active_tasks(self):
+        """Worker-loop view, including tasks still closing resources."""
+        return bool(self._tasks)
+
+    def has_active_task(self, task_id):
+        return task_id in self._tasks
+
+    def mark_cancel_for_deletion(self, task_id):
+        """Worker-loop only: reject racing approvals before deletion yields."""
+        entry = self._tasks.get(task_id)
+        if entry is not None:
+            entry.cancel_requested = True
+
+    async def create_for_conversation(self, repository_path, prompt, **options):
+        """Worker-loop admission linked to an already persisted conversation request."""
+        return await self._create(repository_path, prompt, **options)
+
     async def start(self):
-        def work():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            self._ready.set()
-            try:
-                self._loop.run_forever()
-                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-                self._loop.run_until_complete(self._loop.shutdown_default_executor())
-            finally:
-                self._loop.close()
-        self._thread = Thread(target=work, name="ForgePilot-Runtime", daemon=False)
-        self._thread.start()
-        await asyncio.to_thread(self._ready.wait)
+        await self.runtime.start()
         if self.legacy_mcp_config and not self.mcp_disabled:
             await self._submit(self._schedule_legacy_import())
 
@@ -95,30 +119,13 @@ class TaskHost:
         self._mcp_active.add(operation)  # Same admission accounting and shutdown join as management.
 
     async def _submit(self, operation):
-        if self._loop is None or self._loop.is_closed():
-            operation.close()
-            raise ForgePilotError("server_stopping", "Runtime is not available")
-        future = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(operation, self._loop))
-        # Request cancellation/disconnection must never cancel an accepted task/control operation.
-        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        return await asyncio.shield(future)
+        """Compatibility shim; shared runtime users call runtime.submit directly."""
+        return await self.runtime.submit(operation)
 
     async def run_mcp(self, operation, *args, **kwargs):
-        """Management is request-scoped, unlike accepted tasks protected by _submit.
-
-        Never cancel run_coroutine_threadsafe's Future: it can report completion
-        before worker cleanup finishes. Cancel its owned Task, then join the
-        original Future, including when the HTTP waiter is cancelled repeatedly.
-        """
-        if self._loop is None or self._loop.is_closed():
-            raise ForgePilotError("server_stopping", "Runtime is not available")
-        cancelled, owned = Event(), []
-
+        """Management remains request-scoped; cancellation joins worker cleanup."""
         async def execute():
             task = asyncio.current_task()
-            owned.append(task)
-            if cancelled.is_set():
-                raise asyncio.CancelledError()
             if self._stopping:
                 raise ForgePilotError("server_stopping", "Server is shutting down")
             if operation not in ("probe", "save", "set_enabled", "test", "delete"):
@@ -142,28 +149,7 @@ class TaskHost:
             finally:
                 self._mcp_active.discard(task)
 
-        future = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(execute(), self._loop))
-
-        def cancel_owned():
-            if owned and not owned[0].done() and not owned[0].cancelling():
-                owned[0].cancel()
-
-        try:
-            return await asyncio.shield(future)
-        except asyncio.CancelledError:
-            cancelled.set()
-            if not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(cancel_owned)
-            while not future.done():
-                try:
-                    await asyncio.shield(future)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            if not future.cancelled():
-                future.exception()  # Retrieve a late failure without exposing it.
-            raise
+        return await self.runtime.run_request(execute())
 
     async def run_rag(self, operation, *args):
         if self.rag_coordinator is None:
@@ -226,8 +212,7 @@ class TaskHost:
                       use_rag=True):
         if self._stopping:
             raise ForgePilotError("server_stopping", "Server is shutting down")
-        if len(self._tasks) + self.extra_active() >= self.max_tasks:
-            raise ForgePilotError("task_capacity", "活动任务数量已达上限，请等待当前任务完成。")
+        self.capacity.check_available("活动任务数量已达上限，请等待当前任务完成。")
         key = path_key(str(Path(repository_path).resolve()))
         if key in self._repositories:
             error = ForgePilotError("repository_busy", "Another task owns this repository")
@@ -242,6 +227,7 @@ class TaskHost:
                                   connection_factory=self.mcp_service.connection_factory, disabled=self.mcp_disabled)
         stamp = now()
         entry = _Task(context, service, key, stamp, stamp, asyncio.Lock(), asyncio.get_running_loop().create_future())
+        self.capacity.acquire("v1", context.task_id, message="活动任务数量已达上限，请等待当前任务完成。")
         self._tasks[context.task_id] = entry
         self._repositories[key] = context.task_id
         try:
@@ -258,6 +244,7 @@ class TaskHost:
                 pass  # Preserve the creation error after attempting both resource cleanups.
             finally:
                 self._tasks.pop(context.task_id,None); self._repositories.pop(key,None)
+                self.capacity.release("v1", context.task_id)
             if isinstance(exc, sqlite3.Error):
                 raise ForgePilotError("storage_unavailable", "Cannot persist task creation") from None
             raise
@@ -345,6 +332,7 @@ class TaskHost:
             if self._repositories.get(entry.repository_key) == entry.initial_context.task_id:
                 del self._repositories[entry.repository_key]
             self._tasks.pop(entry.initial_context.task_id,None)
+            self.capacity.release("v1", entry.initial_context.task_id)
 
     def _entry(self, task_id):
         self.store._ensure_task_available(task_id)
@@ -444,13 +432,8 @@ class TaskHost:
                 raise
 
     async def close(self, close_resources=None):
-        if self._loop is None or self._loop.is_closed():
-            return
-        try:
-            await self._submit(self._shutdown(close_resources=close_resources))
-        finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            await asyncio.to_thread(self._thread.join)
+        await self.runtime.close(self._drain_tasks,
+            close_resources=lambda: self._close_resources(close_resources))
 
     async def stop_for_deletion(self, task_id):
         """Worker-loop only. Also join terminal tasks still closing their LLM/processes."""
@@ -478,6 +461,11 @@ class TaskHost:
                 raise
 
     async def _shutdown(self, *, close_resources=None):
+        """Compatibility entry for a worker-side legacy-only shutdown."""
+        await self._drain_tasks()
+        await self._close_resources(close_resources)
+
+    async def _drain_tasks(self):
         self._stopping = True
         if self.rag_coordinator is not None:
             await self.rag_coordinator.close()
@@ -490,6 +478,8 @@ class TaskHost:
                                if not entry.closed), return_exceptions=True)
         await asyncio.gather(*(entry.running for entry in self._tasks.values() if entry.running is not None),
                              return_exceptions=True)
+
+    async def _close_resources(self, close_resources=None):
         if self.rag_coordinator is not None:
             # The coordinator first stops index runs and rejects new work. Shared
             # embedding/vector resources close only after Agent tasks have joined.

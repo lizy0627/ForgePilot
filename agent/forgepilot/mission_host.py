@@ -1,7 +1,7 @@
 """Mission application boundary sharing the existing host, Graph and services.
 
 HTTP never supplies model configuration, tools, graph definitions or capability
-grants. Work runs on TaskHost's owning loop and survives request disconnects.
+grants. Work runs on the shared runtime loop and survives request disconnects.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import asdict
 from inspect import signature
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -39,8 +40,15 @@ def _approval_conflict():
 
 
 class MissionHost:
-    def __init__(self, task_host, workflow_factory=None, *, dependencies: MissionDependencies | None = None):
-        self.host, self.store = task_host, task_host.store
+    def __init__(self, task_host=None, workflow_factory=None, *, runtime=None, capacity=None,
+                 store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None):
+        # Positional TaskHost remains an in-process compatibility adapter only.
+        # Production composition injects these shared components explicitly.
+        self.runtime = runtime if runtime is not None else task_host.runtime
+        self.capacity = capacity if capacity is not None else task_host.capacity
+        self.store = store if store is not None else task_host.store
+        self.mcp_service = mcp_service if mcp_service is not None else task_host.mcp_service
+        self.mcp_disabled = task_host.mcp_disabled if mcp_disabled is None else mcp_disabled
         self.factory = workflow_factory
         if dependencies is not None and dependencies.events is not self.store:
             raise ValueError("Mission dependencies must use the host event store")
@@ -49,16 +57,9 @@ class MissionHost:
         self._services = {}
         self._running = {}
         self._admissions = set()
+        self._operations = set()
         self._controls = WeakValueDictionary()
         self._stopping = False
-        previous_extra = task_host.extra_active
-        task_host.extra_active = lambda: previous_extra() + self._active_count()
-
-    def _active_count(self):
-        with self.store._lock:
-            return self.store._db.execute("""SELECT count(*) FROM task_graph_runs g
-                WHERE status NOT IN ('succeeded','failed','cancelled','completed','skipped')
-                AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchone()[0] + len(self._admissions)
 
     def _selected_mcp_snapshots(self, server_ids, expected_revisions=None):
         """Resolve exact user-selected task servers before allocating a Worktree."""
@@ -70,9 +71,9 @@ class MissionHost:
             raise ForgePilotError("mcp_selection", "MCP selection requires server UUIDs") from None
         if len(selected) != len(set(selected)):
             raise ForgePilotError("mcp_selection", "Select distinct MCP servers")
-        if selected and self.host.mcp_disabled:
+        if selected and self.mcp_disabled:
             raise ForgePilotError("policy_denied", "Work-mode MCP is disabled by application policy")
-        available = {item.server_id: item for item in self.host.mcp_service.snapshots("task")} if selected else {}
+        available = {item.server_id: item for item in self.mcp_service.snapshots("task")} if selected else {}
         if any(server_id not in available for server_id in selected):
             raise ForgePilotError("mcp_selection", "Selected MCP server is not enabled for tasks")
         snapshots = tuple(available[server_id] for server_id in selected)
@@ -244,8 +245,19 @@ class MissionHost:
         values = [item for item in self.artifacts(task_id)["items"] if item["artifact_type"] == "ValidationReport"]
         return {"task_id": task_id, "items": values, "latest": values[-1] if values else None}
 
+    async def _execute_control(self, operation, *args, **kwargs):
+        """Join accepted controls during shutdown, including work offloaded to threads."""
+        if self._stopping:
+            raise ForgePilotError("server_stopping", "Runtime is stopping")
+        task = asyncio.current_task()
+        self._operations.add(task)
+        try:
+            return await operation(*args, **kwargs)
+        finally:
+            self._operations.discard(task)
+
     async def create(self, **fields):
-        return await self.host._submit(self._admit(fields))
+        return await self.runtime.submit(self._execute_control(self._admit, fields))
 
     async def create_locked(self, task_spec, **fields):
         """Trusted in-process entry for a pre-registered TaskSpec.
@@ -253,17 +265,16 @@ class MissionHost:
         The HTTP CreateMission schema has no such field. A caller must bind the
         exact frozen content to the repository, toolchain, and task request.
         """
-        return await self.host._submit(self._admit(fields, locked_task_spec=task_spec))
+        return await self.runtime.submit(self._execute_control(self._admit, fields, locked_task_spec=task_spec))
 
     async def _admit(self, fields, *, locked_task_spec=None):
-        if len(self.host._tasks) + self.host.extra_active() >= self.host.max_tasks:
-            raise ForgePilotError("task_capacity", "Mission capacity reached")
-        operation = asyncio.current_task()
-        self._admissions.add(operation)
-        try:
-            return await self._create(fields, locked_task_spec=locked_task_spec)
-        finally:
-            self._admissions.discard(operation)
+        with self.capacity.admission("Mission capacity reached"):
+            operation = asyncio.current_task()
+            self._admissions.add(operation)
+            try:
+                return await self._create(fields, locked_task_spec=locked_task_spec)
+            finally:
+                self._admissions.discard(operation)
 
     @staticmethod
     async def _create_workspace(workspace, fields, task_id):
@@ -282,7 +293,7 @@ class MissionHost:
             raise
 
     async def _create(self, fields, *, locked_task_spec=None):
-        if self._stopping or self.host._stopping:
+        if self._stopping or self.runtime.stopping:
             raise ForgePilotError("server_stopping", "Runtime is stopping")
         if fields["toolchain_profile"] not in {"auto", "cmake", "cmake-ctest-v1"}:
             raise ForgePilotError("invalid_toolchain_profile", "Unknown trusted toolchain profile")
@@ -391,12 +402,19 @@ class MissionHost:
                     pass
         running = asyncio.create_task(drive())
         self._running[task_id] = running
-        running.add_done_callback(lambda completed: self._running.pop(task_id, None)
-            if self._running.get(task_id) is completed else None)
+        def settled(completed):
+            if self._running.get(task_id) is completed:
+                self._running.pop(task_id, None)
+            if not completed.cancelled():
+                error = completed.exception()
+                if error is not None:
+                    code = error.code if isinstance(error, ForgePilotError) else "mission_internal"
+                    logging.getLogger(__name__).warning("Mission background cleanup failed (%s)", code)
+        running.add_done_callback(settled)
         return running
 
     async def approve(self, task_id, **fields):
-        return await self.host._submit(self._approve(task_id, fields))
+        return await self.runtime.submit(self._execute_control(self._approve, task_id, fields))
 
     async def _approve(self, task_id, fields):
         async with self._control(task_id):
@@ -439,7 +457,7 @@ class MissionHost:
             return self.get(task_id)
 
     async def cancel(self, task_id, *, expected_revision):
-        return await self.host._submit(self._cancel(task_id, expected_revision))
+        return await self.runtime.submit(self._execute_control(self._cancel, task_id, expected_revision))
 
     async def _cancel(self, task_id, expected_revision):
         async with self._control(task_id):
@@ -453,7 +471,7 @@ class MissionHost:
             return self.get(task_id)
 
     async def retry(self, task_id, *, expected_revision, node_id=None):
-        return await self.host._submit(self._retry(task_id, expected_revision, node_id))
+        return await self.runtime.submit(self._execute_control(self._retry, task_id, expected_revision, node_id))
 
     async def _retry(self, task_id, revision, node_id):
         async with self._control(task_id):
@@ -481,7 +499,7 @@ class MissionHost:
             return self.get(task_id)
 
     async def resume(self, task_id, *, expected_revision, recovery_token=None):
-        return await self.host._submit(self._resume(task_id, expected_revision, recovery_token))
+        return await self.runtime.submit(self._execute_control(self._resume, task_id, expected_revision, recovery_token))
 
     async def _resume(self, task_id, revision, token):
         async with self._control(task_id):
@@ -503,7 +521,7 @@ class MissionHost:
             return {"mission": self.get(task_id), "recovery": None}
 
     async def delivery(self, task_id, *, expected_revision, mode="preview", token=None, target_branch=None):
-        return await self.host._submit(self._delivery(task_id, expected_revision, mode, token, target_branch))
+        return await self.runtime.submit(self._execute_control(self._delivery, task_id, expected_revision, mode, token, target_branch))
 
     async def _delivery(self, task_id, revision, mode, token, target_branch):
         async with self._control(task_id):
@@ -542,8 +560,8 @@ class MissionHost:
             return {"mission": self.get(task_id), "delivery": delivery}
 
     async def close(self):
-        if self.host._loop is not None and not self.host._loop.is_closed():
-            await self.host._submit(self._close())
+        if self.runtime.available:
+            await self.runtime.drain(self._close())
 
     async def _close(self):
         self._stopping = True
@@ -552,6 +570,14 @@ class MissionHost:
             operation.cancel()
         if running:
             await asyncio.gather(*running, return_exceptions=True)
+        # A recovery or delivery control may still be completing to_thread work.
+        # Join it before closing workflows, then drain any execution it launched.
+        await asyncio.gather(*tuple(self._operations), return_exceptions=True)
+        late = [operation for operation in self._running.values() if not operation.done()]
+        for operation in late:
+            if not operation.cancelling():
+                operation.cancel()
+        await asyncio.gather(*late, return_exceptions=True)
 
 
 __all__ = ["MissionHost"]

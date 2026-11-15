@@ -26,7 +26,7 @@ def test_mission_mcp_requires_exact_user_selected_task_server():
     available = [_snapshot(selected), _snapshot(other)]
     service = SimpleNamespace(snapshots=lambda mode: available if mode == "task" else [])
     host = MissionHost.__new__(MissionHost)
-    host.host = SimpleNamespace(mcp_disabled=False, mcp_service=service)
+    host.mcp_disabled, host.mcp_service = False, service
 
     assert host._selected_mcp_snapshots(()) == ()
     assert host._selected_mcp_snapshots((selected,)) == (available[0],)
@@ -37,10 +37,10 @@ def test_mission_mcp_requires_exact_user_selected_task_server():
     with pytest.raises(ForgePilotError, match="mcp_catalog_changed"):
         host._selected_mcp_snapshots((selected,), (2,))
 
-    host.host.mcp_disabled = True
+    host.mcp_disabled = True
     with pytest.raises(ForgePilotError, match="policy_denied"):
         host._selected_mcp_snapshots((selected,))
-    host.host.mcp_disabled = False
+    host.mcp_disabled = False
     available[0] = _snapshot(selected, read_only=False)
     with pytest.raises(ForgePilotError, match="mcp_selection"):
         host._selected_mcp_snapshots((selected,))
@@ -51,8 +51,8 @@ def test_selected_mcp_snapshots_reach_custom_production_factory():
     snapshot = _snapshot(selected)
     captured = []
     host = MissionHost.__new__(MissionHost)
-    host.host = SimpleNamespace(mcp_disabled=False,
-        mcp_service=SimpleNamespace(snapshots=lambda mode: (snapshot,)))
+    host.mcp_disabled = False
+    host.mcp_service = SimpleNamespace(snapshots=lambda mode: (snapshot,))
     host.store = object()
     host._services = {}
     host.factory = lambda events, *, mcp_snapshots=(): captured.append(mcp_snapshots) or SimpleNamespace()

@@ -151,8 +151,12 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                     legacy_mcp_config=legacy_mcp_config, rag_coordinator=rag_coordinator)
     conversations = ConversationHost(host,chat_factory,summary_factory=summary_factory,
         stream_retention_seconds=conversation_stream_retention_seconds,
-        stream_max_subscribers=conversation_stream_max_subscribers)
-    missions = MissionHost(host, workflow_factory=mission_factory)
+        stream_max_subscribers=conversation_stream_max_subscribers,
+        runtime=host.runtime, capacity=host.capacity, mcp_service=host.mcp_service,
+        mcp_disabled=mcp_disabled)
+    missions = MissionHost(workflow_factory=mission_factory, runtime=host.runtime,
+        capacity=host.capacity, store=host.store, mcp_service=host.mcp_service,
+        mcp_disabled=mcp_disabled)
     mission_streams = MissionEventStream(host.store, heartbeat_seconds=heartbeat_seconds,
                                         max_subscribers=mission_stream_max_subscribers)
 
@@ -163,10 +167,15 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
             yield
         finally:
             try:
-                await missions.close()
+                try:
+                    await host.runtime.begin_shutdown()
+                finally:
+                    await missions.close()
             finally:
-                await conversations.close()
-                await host.close(close_resources=model_client_closer)
+                try:
+                    await conversations.close()
+                finally:
+                    await host.close(close_resources=model_client_closer)
 
     app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)

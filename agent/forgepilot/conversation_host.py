@@ -16,8 +16,12 @@ SUMMARY_IDLE_SECONDS=0.05
 
 class ConversationHost:
     def __init__(self, tasks, chat_factory, *, summary_factory=None, stream_retention_seconds=60.0,
-                 stream_max_subscribers=8, repository_cache=None):
+                 stream_max_subscribers=8, repository_cache=None, runtime=None, capacity=None, mcp_service=None, mcp_disabled=None):
         self.tasks, self.store, self.chat_factory=tasks,tasks.store,chat_factory
+        self.runtime = runtime if runtime is not None else tasks.runtime
+        self.capacity = capacity if capacity is not None else tasks.capacity
+        self.mcp_service = mcp_service if mcp_service is not None else tasks.mcp_service
+        self.mcp_disabled = tasks.mcp_disabled if mcp_disabled is None else mcp_disabled
         # Existing embedders that provide one factory keep the original behavior.
         self.summary_factory=summary_factory or chat_factory
         self._answers={}
@@ -29,28 +33,26 @@ class ConversationHost:
         self.repository_cache=repository_cache or RepositoryCache()
         self._stream_retention_seconds=stream_retention_seconds
         self._stream_max_subscribers=stream_max_subscribers
-        tasks.extra_active=lambda:len(self._answers)
 
     async def submit(self,cid,rid,mode,prompt,tool_mode='auto',use_rag=True):
         request_started=monotonic()
-        return await self.tasks._submit(self._submit(cid,rid,mode,prompt,tool_mode,use_rag,request_started))
+        return await self.runtime.submit(self._submit(cid,rid,mode,prompt,tool_mode,use_rag,request_started))
 
     async def _submit(self,cid,rid,mode,prompt,tool_mode,use_rag,request_started):
         if cid in self._deletions:
             raise ForgePilotError('conversation_deleting','对话正在删除，不能再发送请求。')
         retry=self.store.request_retry(cid,rid,mode,prompt)
         if retry: return retry
-        if self.tasks._stopping:
+        if self.runtime.stopping:
             raise ForgePilotError('server_stopping','服务正在关闭。')
-        if len(self.tasks._tasks)+len(self._answers)>=self.tasks.max_tasks:
-            raise ForgePilotError('task_capacity','活动请求数量已达上限，请等待当前请求完成。')
+        self.capacity.check_available('活动请求数量已达上限，请等待当前请求完成。')
         if mode=='chat' and self.chat_factory is None:
             raise ForgePilotError('llm_config','问答模型尚未配置。')
         _,notice=self.store.conversation_context(cid)
         request=self.store.begin_conversation_request(cid,rid,mode,prompt,notice)
         if mode=='task':
             try:
-                await self.tasks._create(request['repository_path'],prompt,request_id=rid,use_rag=use_rag,
+                await self.tasks.create_for_conversation(request['repository_path'],prompt,request_id=rid,use_rag=use_rag,
                     prepare_context=lambda:self._prepare_task_context(request),background=lambda:self.store.memory_background(cid,request['repository_path']))
             except Exception as exc:
                 if isinstance(exc, ForgePilotError) and exc.code == 'storage_unavailable':
@@ -65,14 +67,15 @@ class ConversationHost:
             return self.store.conversation_request(cid,rid)
         started=asyncio.Event()
         route=chat_tool_route(tool_mode,prompt,bool(request['repository_path']))
-        snapshots=(() if self.tasks.mcp_disabled or not route.web else
-                   web_mcp_snapshots(self.tasks.mcp_service.snapshots('chat')))
+        snapshots=(() if self.mcp_disabled or not route.web else
+                   web_mcp_snapshots(self.mcp_service.snapshots('chat')))
         metrics=StreamMetrics(started=request_started,mode=mode,
             project_tools_enabled=route.project,mcp_enabled=bool(snapshots),
             request_input_chars=len(prompt),tool_mode=tool_mode)
         broker=ConversationStreamBroker(cid,rid,max_subscribers=self._stream_max_subscribers,
                                         metrics=metrics)
         self._streams[rid]=broker
+        self.capacity.acquire('chat',rid,message='活动请求数量已达上限，请等待当前请求完成。')
         self._answers[rid]=asyncio.create_task(self._answer(request,started,snapshots,tool_mode))
         metrics.request_prepared()
         await started.wait()
@@ -89,7 +92,7 @@ class ConversationHost:
             if hasattr(service,'bind_repository_cache'):
                 service.bind_repository_cache(self.repository_cache)
             if hasattr(service,'configure_mcp'):
-                service.configure_mcp(snapshots,connection_factory=self.tasks.mcp_service.connection_factory,
+                service.configure_mcp(snapshots,connection_factory=self.mcp_service.connection_factory,
                     on_tool_event=lambda record:self.store.record_mcp_call(request['conversation_id'],rid,record))
             history,notice=await self._prepare_context(request,broker.metrics)
             content=await service.answer(history,request['prompt'],request['repository_path'],notice,
@@ -164,6 +167,7 @@ class ConversationHost:
                         broker.metrics.set_error(error_code)
                     broker.metrics.request_finished()
                     self._answers.pop(rid,None)
+                    self.capacity.release('chat',rid)
                     summary_queued=(persisted_status=='completed' and committed is not None
                                     and self._queue_summary(request['conversation_id'],broker.metrics))
                     if not summary_queued: broker.metrics.emit()
@@ -214,7 +218,7 @@ class ConversationHost:
             if metrics: metrics.context_finished(context_started)
 
     def _queue_summary(self,cid,metrics):
-        if self.summary_factory is None or self.tasks._stopping or cid in self._deletions:
+        if self.summary_factory is None or self.runtime.stopping or cid in self._deletions:
             metrics.summary_not_started('unavailable')
             return False
         existing=self._summary_tasks.get(cid)
@@ -245,14 +249,14 @@ class ConversationHost:
             # Yield to follow-up requests and wait for all foreground model work to become idle.
             await asyncio.sleep(SUMMARY_IDLE_SECONDS)
             async with self._summary_slot:
-                while (self._answers or self.tasks._tasks) and not self.tasks._stopping and cid not in self._deletions:
+                while (self._answers or self.tasks.has_active_tasks()) and not self.runtime.stopping and cid not in self._deletions:
                     await asyncio.sleep(SUMMARY_IDLE_SECONDS)
-                if self.tasks._stopping or cid in self._deletions or asyncio.current_task().cancelling():
+                if self.runtime.stopping or cid in self._deletions or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
                 metrics.start_summary(); summary_started=monotonic()
                 service=self.summary_factory()
                 content=await service.summarize(plan)
-                if self.tasks._stopping or cid in self._deletions or asyncio.current_task().cancelling():
+                if self.runtime.stopping or cid in self._deletions or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
                 result='committed' if self.store.commit_summary(plan,content) else 'stale'
         except asyncio.CancelledError:
@@ -290,17 +294,17 @@ class ConversationHost:
             source=self.store.memory_source(mid) if mid else values.get('source_conversation_id')
             if source in self._deletions: raise ForgePilotError('conversation_deleting','来源对话正在删除，不能保存记忆。')
             return self.store.save_memory(values,mid)
-        return await self.tasks._submit(save())
+        return await self.runtime.submit(save())
 
     async def edit_summary(self,cid,revision,**changes):
         async def edit():
             if cid in self._deletions: raise ForgePilotError('conversation_deleting','对话正在删除，不能修改摘要。')
             await self._cancel_summary(cid)
             return self.store.edit_summary(cid,revision,**changes)
-        return await self.tasks._submit(edit())
+        return await self.runtime.submit(edit())
 
     async def stop(self,cid,rid):
-        return await self.tasks._submit(self._stop(cid,rid))
+        return await self.runtime.submit(self._stop(cid,rid))
 
     async def _stop(self,cid,rid):
         request=self.store.conversation_request(cid,rid)
@@ -316,7 +320,7 @@ class ConversationHost:
 
     async def close(self):
         async def stop_all():
-            self.tasks._stopping=True
+            self.runtime.stop_accepting()
             await asyncio.gather(*list(self._deletions.values()),return_exceptions=True)
             summaries=list(self._summary_tasks.values())
             for task in summaries:
@@ -339,10 +343,10 @@ class ConversationHost:
                 broker.shutdown()
             self._streams.clear()
             await self.repository_cache.aclose()
-        await self.tasks._submit(stop_all())
+        await self.runtime.drain(stop_all())
 
     async def delete(self,cid,stop_active=False):
-        return await self.tasks._submit(self._delete(cid,stop_active))
+        return await self.runtime.submit(self._delete(cid,stop_active))
 
     async def _delete(self,cid,stop_active):
         existing=self._deletions.get(cid)
@@ -351,11 +355,10 @@ class ConversationHost:
         exists,requests=self.store.conversation_deletion_info(cid)
         if not exists:
             return {'conversation_id':cid,'deleted':True}
-        if any(r['status']=='running' or r['request_id'] in self._answers or r['task_id'] in self.tasks._tasks for r in requests) and not stop_active:
+        if any(r['status']=='running' or r['request_id'] in self._answers or self.tasks.has_active_task(r['task_id']) for r in requests) and not stop_active:
             raise ForgePilotError('conversation_busy','本对话仍在运行，请确认“停止任务并删除”。')
         for r in requests:
-            entry=self.tasks._tasks.get(r['task_id'])
-            if entry: entry.cancel_requested=True
+            self.tasks.mark_cancel_for_deletion(r['task_id'])
         operation=asyncio.create_task(self._delete_owned(cid,requests))
         self._deletions[cid]=operation
         try:

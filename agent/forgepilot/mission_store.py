@@ -406,6 +406,13 @@ class MissionRepository:
     def __init__(self, event_store) -> None:
         self.events = event_store
 
+    def active_count(self) -> int:
+        """Count admitted, nonterminal Missions, including unloaded recovery runs."""
+        with self.events._lock:
+            return self.events._db.execute("""SELECT count(*) FROM task_graph_runs g
+                WHERE status NOT IN ('succeeded','failed','cancelled','completed','skipped')
+                AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchone()[0]
+
     def create_graph_run(self, *, task_id: str, graph_id: str, graph_version: int,
                          status: str = "pending", task_spec_artifact_id: str | None = None,
                          plan_artifact_id: str | None = None, scope_hash: str | None = None,

@@ -179,13 +179,13 @@ async def test_waiting_approval_counts_against_shared_capacity(tmp_path, git_exe
         assert isinstance(second, ForgePilotError) and second.code == "task_capacity"
         tid = first["task_id"]
         mission = await settled(missions, tid)
-        assert tasks.extra_active() == 1
+        assert tasks.capacity.active_count() == 1
         with pytest.raises(ForgePilotError, match="task_capacity"):
             await create(missions, committed_repo)
         with pytest.raises(ForgePilotError, match="task_capacity"):
             await tasks.create(str(committed_repo), "another")
         await missions.cancel(tid, expected_revision=mission["current_revision"])
-        assert tasks.extra_active() == 0
+        assert tasks.capacity.active_count() == 0
     finally:
         await missions.close()
         await tasks.close()
