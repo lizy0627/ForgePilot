@@ -238,7 +238,7 @@ async def test_failed_gate_publication_rolls_back_approval(tmp_path, git_exe, co
 @pytest.mark.asyncio
 async def test_delivery_recovers_committed_outcome_after_event_failure(tmp_path, git_exe, committed_repo, monkeypatch):
     import sqlite3
-    import forgepilot.mission_host as module
+    import forgepilot.mission_store as module
     tasks, missions = await setup(tmp_path, git_exe)
     try:
         tid = (await create(missions, committed_repo))["task_id"]

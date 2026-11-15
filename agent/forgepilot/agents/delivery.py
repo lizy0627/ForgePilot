@@ -205,7 +205,7 @@ class DeliveryWorkflow(ImplementationService):
         artifact = create_artifact(task_id=context.task_id, producer=producer,
             producer_node=context.node.node_id, content=content,
             parent_artifact_ids=tuple(dict.fromkeys(parents if parents is not None else context.input_artifact_ids)))
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             if isinstance(content, DeliveryBundle) and self._cancelled(context):
                 raise FutureCancelledError()
             self.events.artifacts.put(artifact)
@@ -247,14 +247,10 @@ class DeliveryWorkflow(ImplementationService):
             artifact = self._save(context, report, "validator.v1", (spec.artifact_id, changes.artifact_id))
             # Audit attempts count every validation, including infrastructure
             # retries. Repair rounds remain fixed by the graph, independently.
-            with self.events._lock:
-                attempt = self.events._db.execute(
-                    "SELECT COALESCE(MAX(attempt),0)+1 FROM validation_runs WHERE task_id=?",
-                    (context.task_id,)).fetchone()[0]
-                self.events.missions.record_validation(validation_id=str(uuid4()), task_id=context.task_id,
-                    attempt=attempt, status=report.status,
-                    started_at=report.commands[0].started_at, finished_at=report.commands[-1].finished_at,
-                    report_artifact_id=artifact.artifact_id, error_code=report.failure_classification)
+            self.delivery_records.record_next_validation(validation_id=str(uuid4()), task_id=context.task_id,
+                status=report.status,
+                started_at=report.commands[0].started_at, finished_at=report.commands[-1].finished_at,
+                report_artifact_id=artifact.artifact_id, error_code=report.failure_classification)
             outputs = (artifact.artifact_id,)
             if self._cancelled(context) or report.status == "cancelled":
                 return NodeResult(NodeStatus.CANCELLED, output_artifact_ids=outputs)

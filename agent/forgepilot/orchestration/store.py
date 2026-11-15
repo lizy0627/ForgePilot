@@ -1,9 +1,11 @@
 """Atomic SQLite projection for graph state, attempts, results, and events."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import sqlite3
+from threading import Lock
 from typing import Any, Mapping
 
 from ..errors import ForgePilotError
@@ -23,6 +25,66 @@ class GraphStore:
 
     def __init__(self, event_store) -> None:
         self.events_store = event_store
+        with event_store._lock:
+            # One execution quota for all runners sharing this database owner.
+            if not hasattr(event_store, "_graph_execution_lock"):
+                event_store._graph_execution_lock = Lock()
+            self._execution_lock = event_store._graph_execution_lock
+
+    @contextmanager
+    def publication_boundary(self):
+        """Serialize node checks, checkpoint preparation and final publication.
+
+        This is a consistency boundary, not a SQLite transaction. Checkpoint
+        intents and files must remain independently durable if the later graph
+        state/event commit fails; each repository keeps its existing transaction.
+        """
+        with self.events_store._lock:
+            yield
+
+    @contextmanager
+    def recovery_boundary(self):
+        """Keep cancellation outside recovery compare/effect/publication."""
+        with self.events_store._lock:
+            yield
+
+    def acquire_execution_slot(self, *, blocking=True, timeout=-1):
+        return self._execution_lock.acquire(blocking=blocking, timeout=timeout)
+
+    def release_execution_slot(self):
+        self._execution_lock.release()
+
+    def begin_execution(self, task_id):
+        """Claim the live batch marker, or return its current durable view."""
+        with self.events_store._lock:
+            active = getattr(self.events_store, "_graph_executing", None)
+            if active is None:
+                active = self.events_store._graph_executing = set()
+            if task_id in active:
+                return self.snapshot(task_id)
+            active.add(task_id)
+        return None
+
+    def end_execution(self, task_id):
+        with self.events_store._lock:
+            self.events_store._graph_executing.discard(task_id)
+
+    def assert_recovery_idle(self, task_id):
+        with self.events_store._lock:
+            if task_id in getattr(self.events_store, "_graph_executing", ()):
+                raise ForgePilotError("graph_active", "A live node must stop before preparing recovery")
+
+    def run_record(self, task_id):
+        return self.events_store.missions.get_graph_run(task_id)
+
+    def assert_recovery_storage(self):
+        self.events_store._assert_integrity("recovery")
+
+    def verify_recovery_integrity(self):
+        self.assert_recovery_storage()
+        with self.events_store._lock:
+            if self.events_store._db.execute("PRAGMA foreign_key_check").fetchone():
+                raise ForgePilotError("storage_integrity", "Recovery foreign key check failed")
 
     def _json(self, value: Mapping[str, Any]) -> str:
         from ..mission_events import safe_event_data

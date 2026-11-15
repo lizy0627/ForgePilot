@@ -5,6 +5,7 @@ nodes; callers use the repository methods instead of embedding SQL in orchestrat
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import re
@@ -13,6 +14,7 @@ from typing import Any, Mapping
 
 from .artifacts.canonical import canonical_json_bytes
 from .errors import ForgePilotError
+from .mission_events import append_mission_event
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -405,6 +407,141 @@ class MissionRepository:
 
     def __init__(self, event_store) -> None:
         self.events = event_store
+
+    @contextmanager
+    def consistent_view(self):
+        """Serialize cross-repository checks without nesting their transactions.
+
+        Artifact and checkpoint methods retain their own durable commit points;
+        callers must not interpret this consistency boundary as a transaction.
+        """
+        with self.events._lock:
+            yield
+
+    def metadata(self, task_id):
+        with self.events._lock:
+            row = self.events._db.execute("SELECT payload_json FROM graph_events WHERE task_id=? "
+                "AND event_type='task.created' ORDER BY sequence LIMIT 1", (task_id,)).fetchone()
+            if row is None:
+                raise ForgePilotError("unknown_mission", "Mission does not exist")
+            return json.loads(row[0])
+
+    def is_admitted(self, task_id):
+        from .mission_events import is_v2_mission
+        with self.events._lock:
+            return is_v2_mission(self.events, task_id)
+
+    def record_observation(self, task_id, kind, data, *, node_id, actor):
+        from .mission_events import append_record_event
+        with self.events._transaction():
+            return append_record_event(self.events, task_id, kind, data, node_id=node_id, actor=actor)
+
+    def mission_view(self, task_id):
+        from .orchestration.analysis_review import AnalysisReviewStore
+        with self.events._lock:
+            metadata = self.metadata(task_id)
+            run = self.get_graph_run(task_id)
+            sequence = self.events._db.execute("SELECT MAX(sequence) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+            review = (AnalysisReviewStore(self.events).get(task_id)
+                      if run["task_spec_artifact_id"] and run["plan_artifact_id"] else None)
+            return metadata, run, sequence, review
+
+    def graph_view(self, task_id):
+        from .orchestration.store import GraphStore
+        with self.events._lock:
+            self.metadata(task_id)
+            return GraphStore(self.events).snapshot(task_id), json.loads(self.get_graph_run(task_id)["definition_json"])
+
+    def owned_artifact(self, task_id, artifact_id):
+        with self.events._lock:
+            owner = self.events._db.execute("SELECT task_id FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+            if owner is None or owner[0] != task_id:
+                raise ForgePilotError("unknown_artifact", "Artifact does not belong to this mission")
+            return self.events.artifacts.get(artifact_id)
+
+    @contextmanager
+    def delivery_reconciliation(self, task_id):
+        """Hold the outcome inspection/publication boundary; never repeat Git."""
+        with self.events._lock:
+            row = self.events._db.execute("""SELECT sequence,event_type,payload_json FROM graph_events
+                WHERE task_id=? AND event_type IN ('workspace.delivery_requested','workspace.delivered',
+                'workspace.delivery_failed') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
+            yield dict(row) if row is not None else None
+
+    def admit_mission(self, task_id, workspace_record, fields):
+        """Commit workspace binding and both admission events as one unit."""
+        record = workspace_record
+        with self.events._transaction():
+            stamp = _now()
+            self.events._db.execute("""INSERT INTO workspace_records(workspace_id,task_id,
+                repository_path,worktree_path,base_ref,head_commit,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""", tuple(record[key] for key in (
+                "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
+            self.events._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
+                                   (record["workspace_id"], task_id))
+            append_mission_event(self.events, task_id, "task.created", fields, actor="user")
+            append_mission_event(self.events, task_id, "workspace.created", {
+                "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
+                "head_commit": record["head_commit"]}, actor="workspace-manager")
+
+    def discard_unadmitted_graph(self, task_id):
+        with self.events._transaction():
+            self.events._db.execute("DELETE FROM task_graph_runs WHERE task_id=?", (task_id,))
+
+    def fail_background(self, task_id, code):
+        with self.events._transaction():
+            row = self.events._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if row is not None and row[0] not in {"cancelled", "failed", "succeeded"}:
+                self.events._db.execute("UPDATE task_graph_runs SET status='failed',finished_at=? WHERE task_id=?", (_now(), task_id))
+                append_mission_event(self.events, task_id, "task.failed", {"error_code": code})
+
+    def _check_mission_revision(self, task_id, revision):
+        from .orchestration.store import GraphStore
+        self.metadata(task_id)
+        if GraphStore(self.events).snapshot(task_id).revision != revision:
+            raise ForgePilotError("mission_revision_conflict", "Mission revision changed; refresh the mission before retrying")
+
+    def request_recovery(self, task_id, expected_revision):
+        with self.events._transaction():
+            self._check_mission_revision(task_id, expected_revision)
+            self.events._db.execute("UPDATE task_graph_runs SET recovery_required=1 WHERE task_id=?", (task_id,))
+            append_mission_event(self.events, task_id, "task.recovery_requested", {}, actor="user")
+
+    def request_delivery(self, task_id, expected_revision, mode, operation_id):
+        with self.events._transaction():
+            self._check_mission_revision(task_id, expected_revision)
+            append_mission_event(self.events, task_id, "workspace.delivery_requested", {
+                "mode": mode, "operation_id": operation_id}, actor="user")
+
+    def record_delivery_outcome(self, task_id, event_type, mode, *, result=None, error_code=None, recovered=False):
+        if event_type not in {"workspace.delivered", "workspace.delivery_failed"}:
+            raise ValueError("Unknown delivery outcome")
+        data = {"mode": mode}
+        if event_type == "workspace.delivery_failed":
+            data["error_code"] = error_code
+        else:
+            data["result"] = result
+        if recovered:
+            data["recovered"] = True
+        with self.events._transaction():
+            append_mission_event(self.events, task_id, event_type, data, actor="user")
+
+    def event_high_water(self, task_id):
+        with self.events._lock:
+            if self.events._db.execute("SELECT 1 FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone() is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            return self.events._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+
+    def event_page(self, task_id, after, limit):
+        with self.events._lock:
+            run = self.events._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if run is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            rows = self.events._db.execute("""SELECT e.*,a.agent_id FROM graph_events e
+                LEFT JOIN task_node_attempts a ON a.task_id=e.task_id AND a.node_id=e.node_id AND a.attempt=e.attempt
+                WHERE e.task_id=? AND e.sequence>? ORDER BY e.sequence LIMIT ?""", (task_id, after, limit)).fetchall()
+            maximum = self.events._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+            return dict(run), tuple(dict(row) for row in rows), maximum
 
     def active_count(self) -> int:
         """Count admitted, nonterminal Missions, including unloaded recovery runs."""

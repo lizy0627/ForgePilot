@@ -120,7 +120,7 @@ class AnalysisService:
         self._validate_test_policy(spec)
         artifact = create_artifact(task_id=context.task_id, producer="orchestrator.v1",
             producer_node="draft_task_spec", content=spec)
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             if context.is_cancelled():
                 return NodeResult(NodeStatus.CANCELLED)
             self.events.artifacts.put(artifact)
@@ -149,7 +149,7 @@ class AnalysisService:
             # Publish cancellation before draining workers; no late Artifact may
             # be published and no join/approval runs after cancellation.
             self._cancel_requests.add(task_id)
-            with self.events._lock:
+            with self.events.missions.consistent_view():
                 try:
                     snapshot = self.runner.store.snapshot(task_id)
                     self.runner.cancel(task_id, expected_revision=snapshot.revision)
@@ -327,7 +327,7 @@ class AnalysisService:
             self._validate_plan_paths(spec_artifact.content, content)
         artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
             producer_node=stage, parent_artifact_ids=context.input_artifact_ids, content=content)
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             if context.is_cancelled():
                 return NodeResult(NodeStatus.CANCELLED)
             self.events.artifacts.put(artifact)
@@ -376,7 +376,7 @@ class AnalysisService:
             merged = EvidenceBundle(items=tuple(items), summary="Root Cause and Impact/Test evidence joined; original provenance retained in parent artifacts.")
             artifact = create_artifact(task_id=context.task_id, producer="orchestrator.v1",
                 producer_node="join_evidence", parent_artifact_ids=tuple(a.artifact_id for a in bundles), content=merged)
-            with self.events._lock:
+            with self.events.missions.consistent_view():
                 if context.is_cancelled():
                     return NodeResult(NodeStatus.CANCELLED)
                 self.events.artifacts.put(artifact)
@@ -432,7 +432,7 @@ class AnalysisService:
         self._validate_test_policy(spec)
         proposed = create_artifact(task_id=review.task_id, producer="orchestrator.v1", producer_node="review_revision",
             parent_artifact_ids=(revised.artifact_id, *evidence_ids, review.plan_artifact_id), content=revised_plan)
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             if self.reviews.get(review.task_id) != review:
                 raise ForgePilotError("approval_stale", "Review changed during revision")
             self.events.artifacts.put(revised)

@@ -226,10 +226,7 @@ class RecoveryManager:
 
     def _inspect(self, task_id, graph: GraphDefinition):
         checks = []
-        self.events._assert_integrity("recovery")
-        with self.events._lock:
-            if self.events._db.execute("PRAGMA foreign_key_check").fetchone():
-                raise ForgePilotError("storage_integrity", "Recovery foreign key check failed")
+        self.store.verify_recovery_integrity()
         checks.append("sqlite")
         snapshot = self.store.snapshot(task_id)
         definitions = {node.node_id: node for node in graph.nodes}
@@ -471,9 +468,8 @@ class RecoveryManager:
         return workspace_matches
 
     def prepare(self, task_id, graph):
-        with self.events._lock:
-            if task_id in getattr(self.events, "_graph_executing", ()):
-                raise ForgePilotError("graph_active", "A live node must stop before preparing recovery")
+        with self.store.recovery_boundary():
+            self.store.assert_recovery_idle(task_id)
             return self._prepare(task_id, graph)
 
     def _prepare(self, task_id, graph):
@@ -481,7 +477,7 @@ class RecoveryManager:
         if snapshot.status in {NodeStatus.CANCELLED, NodeStatus.SUCCEEDED, NodeStatus.FAILED}:
             return RecoveryPlan(task_id, snapshot.revision, "", None, (), (), "terminal_graph", False)
         try:
-            self.events._assert_integrity("recovery")
+            self.store.assert_recovery_storage()
             self.store.reconcile_events(task_id)
             plan, _, _ = self._inspect(task_id, graph)
         except Exception as exc:
@@ -495,11 +491,11 @@ class RecoveryManager:
         # Serialize cancellation with the complete compare/effect/publication
         # boundary. Backend operations must also compare their own expected
         # Worktree snapshot atomically; a SQLite transaction cannot cover Git.
-        with self.events._lock:
+        with self.store.recovery_boundary():
             return self._confirm(task_id, graph, token=token, expected_revision=expected_revision)
 
     def _confirm(self, task_id, graph, *, token, expected_revision):
-        run = self.events.missions.get_graph_run(task_id)
+        run = self.store.run_record(task_id)
         saved = json.loads(run["recovery_plan_json"] or "{}")
         if saved.get("token") == token and token and saved.get("confirmed"):
             return self.store.snapshot(task_id)
@@ -511,7 +507,7 @@ class RecoveryManager:
             raise ForgePilotError("recovery_changed", "Recovery evidence changed; inspect and confirm again")
         saved["applying"] = True
         self.store.save_recovery_plan(task_id, expected_revision=expected_revision, plan=saved)
-        current_run = self.events.missions.get_graph_run(task_id)
+        current_run = self.store.run_record(task_id)
         if current_run["current_revision"] != expected_revision or current_run["status"] in {"cancelled", "failed", "succeeded"}:
             raise ForgePilotError("graph_conflict", "Graph changed before recovery effects")
         definitions = {node.node_id: node for node in graph.nodes}

@@ -20,6 +20,7 @@ from ..artifacts.canonical import content_sha256
 from ..artifacts.models import ArtifactModel, TaskSpec, ExecutionPlan, EvidenceBundle
 from ..artifacts.sqlite_store import ArtifactStorageError
 from ..artifacts.validation import create_artifact, validate_plan_coverage
+from ..delivery_store import DeliveryRepository
 from ..errors import ForgePilotError
 from ..mission_observability import model_call, tool_call, validate_tool
 from ..models.accounting import ModelBudget
@@ -57,10 +58,11 @@ class ImplementationService:
     """
 
     def __init__(self, events, workspace_manager, gateway, *, limits=None,
-                 rg_executable="rg", retrieval_factory=None, analysis_kwargs=None):
+                 rg_executable="rg", retrieval_factory=None, analysis_kwargs=None, delivery_records=None):
         if not isinstance(workspace_manager, WorkspaceManager):
             raise ForgePilotError("workspace_unavailable", "Implementation requires WorkspaceManager")
         self.events, self.workspace, self.gateway = events, workspace_manager, gateway
+        self.delivery_records = delivery_records if delivery_records is not None else DeliveryRepository(events)
         self.agents = AgentRegistry()
         self.definition = self.agents.get("implementer.v1")
         self.limits = self.definition.limits if limits is None else self.agents.validate_limits(
@@ -99,7 +101,7 @@ class ImplementationService:
         ))
 
     def _analysis_for(self, task_id):
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             if task_id not in self._analysis_services:
                 from .analysis import AnalysisService
                 self._analysis_services[task_id] = AnalysisService(
@@ -162,7 +164,7 @@ class ImplementationService:
         return await self._run_worker(task_id, self.runner.run, task_id, graph)
 
     def _create_run(self, task_id, graph, ids):
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             try:
                 current = self.runner.store.snapshot(task_id)
             except ForgePilotError as exc:
@@ -246,7 +248,7 @@ class ImplementationService:
 
     def approve_existing_tests(self, review, *, approved_by="user"):
         """Independent host approval of the exact test paths listed in TaskSpec."""
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             self._check_review(review)
             spec = self.events.artifacts.get(review.task_spec_artifact_id)
             paths = spec.content.test_policy.modifiable_existing_test_patterns
@@ -260,7 +262,7 @@ class ImplementationService:
 
     async def approve(self, review, *, approved_by="user"):
         def approve_and_run():
-            with self.events._lock:
+            with self.events.missions.consistent_view():
                 self._check_review(review)
                 self._save_approval(review, approved_by, "execution")
             return self.runner.approve_human(review.task_id, self._stored_graph(review.task_id), "execution_approval",
@@ -283,7 +285,7 @@ class ImplementationService:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
             self._cancel_requested.add(task_id)
-            with self.events._lock:
+            with self.events.missions.consistent_view():
                 snapshot = self.runner.store.snapshot(task_id)
                 if snapshot.status not in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
                     self.runner.cancel(task_id, expected_revision=snapshot.revision)
@@ -306,12 +308,9 @@ class ImplementationService:
                           decision_summary="Approve frozen TaskSpec, ExecutionPlan and Scope")
 
     def _granted(self, task_id, spec, plan, kind):
-        with self.events._lock:
-            ids = self.events._db.execute(
-                "SELECT approval_id FROM approvals WHERE task_id=? AND approval_type=? AND status='approved'",
-                (task_id, kind)).fetchall()
-            for row in ids:
-                grant = self.events.missions.get_approval(row[0])
+        with self.events.missions.consistent_view():
+            for approval_id in self.delivery_records.approved_grant_ids(task_id, kind):
+                grant = self.events.missions.get_approval(approval_id)
                 if (grant["valid"] and grant["task_spec_artifact_id"] == spec.artifact_id
                         and grant["task_spec_hash"] == spec.content_sha256
                         and grant["plan_artifact_id"] == plan.artifact_id
@@ -461,7 +460,7 @@ class ImplementationService:
         changes = controlled.change_set(summary=self.gateway.redactor.text(outcome.summary))
         artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
             producer_node=context.node.node_id, parent_artifact_ids=context.input_artifact_ids, content=changes)
-        with self.events._lock:
+        with self.events.missions.consistent_view():
             check_approval()
             self.events.artifacts.put(artifact)
         return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=(artifact.artifact_id,),

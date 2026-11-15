@@ -18,12 +18,11 @@ from weakref import WeakValueDictionary
 from .agents.analysis import AnalysisRequest
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
-from .mission_events import append_mission_event, safe_event_data
-from .orchestration.analysis_review import AnalysisReviewStore
+from .mission_events import safe_event_data
 from .orchestration.graph import validate_graph
 from .orchestration.models import GraphDefinition, NodeResult, NodeStatus
 from .orchestration.recovery import recovery_role
-from .orchestration.store import GraphStore, _now
+from .orchestration.store import GraphStore
 
 if TYPE_CHECKING:
     from .mission_factory import MissionDependencies
@@ -121,12 +120,7 @@ class MissionHost:
         return self._services[task_id]
 
     def _metadata(self, task_id):
-        with self.store._lock:
-            row = self.store._db.execute("SELECT payload_json FROM graph_events WHERE task_id=? "
-                "AND event_type='task.created' ORDER BY sequence LIMIT 1", (task_id,)).fetchone()
-            if row is None:
-                raise ForgePilotError("unknown_mission", "Mission does not exist")
-            return json.loads(row[0])
+        return self.store.missions.metadata(task_id)
 
     def _check_revision(self, task_id, revision):
         self._metadata(task_id)
@@ -145,20 +139,15 @@ class MissionHost:
 
     def get(self, task_id):
         self._reconcile_delivery(task_id)
-        with self.store._lock:
-            metadata = self._metadata(task_id)
-            run = self.store.missions.get_graph_run(task_id)
-            sequence = self.store._db.execute("SELECT MAX(sequence) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
-            review = None
-            if run["task_spec_artifact_id"] and run["plan_artifact_id"]:
-                review = asdict(AnalysisReviewStore(self.store).get(task_id))
-            result = {key: run[key] for key in ("task_id", "status", "current_revision", "graph_id",
-                "graph_version", "created_at", "updated_at", "finished_at")}
-            result.update({key: metadata[key] for key in ("repository_path", "request", "task_type",
-                "orchestration_mode", "base_ref", "toolchain_profile")})
-            result.update(review=review, last_event_id=f"{task_id}:{sequence}" if sequence else None,
-                          recovery_required=bool(run["recovery_required"]))
-            return safe_event_data(self.store.redactor, result)
+        metadata, run, sequence, review = self.store.missions.mission_view(task_id)
+        review = asdict(review) if review is not None else None
+        result = {key: run[key] for key in ("task_id", "status", "current_revision", "graph_id",
+            "graph_version", "created_at", "updated_at", "finished_at")}
+        result.update({key: metadata[key] for key in ("repository_path", "request", "task_type",
+            "orchestration_mode", "base_ref", "toolchain_profile")})
+        result.update(review=review, last_event_id=f"{task_id}:{sequence}" if sequence else None,
+                      recovery_required=bool(run["recovery_required"]))
+        return safe_event_data(self.store.redactor, result)
 
     def observability(self, task_id):
         self._metadata(task_id)
@@ -174,10 +163,7 @@ class MissionHost:
         control = self._controls.get(task_id)
         if control is not None and control.locked():
             return
-        with self.store._lock:
-            row = self.store._db.execute("""SELECT sequence,event_type,payload_json FROM graph_events
-                WHERE task_id=? AND event_type IN ('workspace.delivery_requested','workspace.delivered',
-                'workspace.delivery_failed') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
+        with self.store.missions.delivery_reconciliation(task_id) as row:
             if row is None or row["event_type"] != "workspace.delivery_requested":
                 return
             intent = json.loads(row["payload_json"])
@@ -201,22 +187,18 @@ class MissionHost:
                 result = {"status": "abandoned", "worktree_path": state["worktree_path"], "branch": state["branch"]}
             if result is None or (state["status"] != "abandoned" and result.get("mode") != intent["mode"]):
                 return
-            with self.store._transaction():
-                append_mission_event(self.store, task_id, "workspace.delivered", {
-                    "mode": intent["mode"], "result": result, "recovered": True}, actor="user")
+            self.store.missions.record_delivery_outcome(task_id, "workspace.delivered",
+                intent["mode"], result=result, recovered=True)
 
     def graph(self, task_id):
-        with self.store._lock:
-            self._metadata(task_id)
-            snapshot = self.graphs.snapshot(task_id)
-            definition = json.loads(self.store.missions.get_graph_run(task_id)["definition_json"])
-            result = dict(task_id=task_id, graph_id=snapshot.graph_id, graph_version=snapshot.graph_version,
-                definition_hash=snapshot.definition_hash, status=snapshot.status.value,
-                current_revision=snapshot.revision, definition=definition, nodes=[{
-                    "node_id": n.node_id, "node_type": n.node_type.value, "status": n.status.value,
-                    "attempt": n.attempt, "result": n.result.to_dict() if n.result else None,
-                } for n in snapshot.nodes])
-            return safe_event_data(self.store.redactor, result)
+        snapshot, definition = self.store.missions.graph_view(task_id)
+        result = dict(task_id=task_id, graph_id=snapshot.graph_id, graph_version=snapshot.graph_version,
+            definition_hash=snapshot.definition_hash, status=snapshot.status.value,
+            current_revision=snapshot.revision, definition=definition, nodes=[{
+                "node_id": n.node_id, "node_type": n.node_type.value, "status": n.status.value,
+                "attempt": n.attempt, "result": n.result.to_dict() if n.result else None,
+            } for n in snapshot.nodes])
+        return safe_event_data(self.store.redactor, result)
 
     def artifacts(self, task_id):
         self._metadata(task_id)
@@ -228,11 +210,7 @@ class MissionHost:
 
     def artifact(self, task_id, artifact_id):
         self._metadata(task_id)
-        with self.store._lock:
-            owner = self.store._db.execute("SELECT task_id FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
-            if owner is None or owner[0] != task_id:
-                raise ForgePilotError("unknown_artifact", "Artifact does not belong to this mission")
-            return self._artifact(self.store.artifacts.get(artifact_id))
+        return self._artifact(self.store.missions.owned_artifact(task_id, artifact_id))
 
     def diff(self, task_id):
         values = [item for item in self.artifacts(task_id)["items"] if item["artifact_type"] == "ChangeSet"]
@@ -333,20 +311,8 @@ class MissionHost:
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
             record = workflow.workspace.record(task_id)
-            with self.store._transaction():
-                stamp = _now()
-                self.store._db.execute("""INSERT INTO workspace_records(workspace_id,task_id,
-                    repository_path,worktree_path,base_ref,head_commit,status,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?)""", tuple(record[key] for key in (
-                    "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
-                self.store._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
-                                       (record["workspace_id"], task_id))
-                append_mission_event(self.store, task_id, "task.created",
-                    {**fields, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))},
-                    actor="user")
-                append_mission_event(self.store, task_id, "workspace.created", {
-                    "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
-                    "head_commit": record["head_commit"]}, actor="workspace-manager")
+            self.store.missions.admit_mission(task_id, record,
+                {**fields, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))})
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
         except BaseException:
@@ -361,8 +327,7 @@ class MissionHost:
                 except (ForgePilotError, OSError):
                     pass
                 self._services.pop(task_id, None)
-                with self.store._transaction():
-                    self.store._db.execute("DELETE FROM task_graph_runs WHERE task_id=?", (task_id,))
+                self.store.missions.discard_unadmitted_graph(task_id)
             raise
 
     def _launch(self, task_id, operation, *, admission=None):
@@ -379,12 +344,7 @@ class MissionHost:
                     return
                 code = exc.code if isinstance(exc, ForgePilotError) else "mission_internal"
                 # Persist a stable failure, never exception strings, model text or credentials.
-                with self.store._transaction():
-                    row = self.store._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
-                    if row is not None and row[0] not in {"cancelled", "failed", "succeeded"}:
-                        stamp = _now()
-                        self.store._db.execute("UPDATE task_graph_runs SET status='failed',finished_at=? WHERE task_id=?", (stamp, task_id))
-                        append_mission_event(self.store, task_id, "task.failed", {"error_code": code})
+                self.store.missions.fail_background(task_id, code)
             finally:
                 workflow = self._services.get(task_id)
                 manager = getattr(workflow, "mission_mcp_manager", None)
@@ -422,7 +382,7 @@ class MissionHost:
             self._idle(task_id)
             workflow = self._workflow(task_id)
             definition = workflow._stored_graph(task_id)
-            with self.store._lock:
+            with self.store.missions.consistent_view():
                 review = workflow.review(task_id)
                 if any(fields[name] != getattr(review, name) for name in ("task_spec_hash", "plan_hash", "scope_hash")):
                     self.store.missions.record_security_event(event_id=str(uuid4()), task_id=task_id,
@@ -509,10 +469,7 @@ class MissionHost:
             graph = workflow._stored_graph(task_id)
             if token is None:
                 if snapshot.status not in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
-                    with self.store._transaction():
-                        self._check_revision(task_id, revision)
-                        self.store._db.execute("UPDATE task_graph_runs SET recovery_required=1 WHERE task_id=?", (task_id,))
-                        append_mission_event(self.store, task_id, "task.recovery_requested", {}, actor="user")
+                    self.store.missions.request_recovery(task_id, revision)
                 plan = await asyncio.to_thread(workflow.runner.prepare_recovery, task_id, graph)
                 return {"mission": self.get(task_id), "recovery": plan.to_dict()}
             await asyncio.to_thread(workflow.runner.confirm_recovery, task_id, graph,
@@ -535,22 +492,16 @@ class MissionHost:
             else:
                 bundles = [item for item in self.store.artifacts.list_for_task(task_id) if item.artifact_type == "DeliveryBundle"]
                 operation_id = uuid4().hex
-                with self.store._transaction():
-                    self._check_revision(task_id, revision)
-                    append_mission_event(self.store, task_id, "workspace.delivery_requested", {
-                        "mode": mode, "operation_id": operation_id}, actor="user")
+                self.store.missions.request_delivery(task_id, revision, mode, operation_id)
                 try:
                     result = await asyncio.to_thread(workflow.workspace.deliver, task_id, mode,
                         approved=True, token=token, bundle=bundles[-1] if bundles else None,
                         operation_id=operation_id)
                 except ForgePilotError as exc:
-                    with self.store._transaction():
-                        append_mission_event(self.store, task_id, "workspace.delivery_failed", {
-                            "mode": mode, "error_code": exc.code}, actor="user")
+                    self.store.missions.record_delivery_outcome(task_id, "workspace.delivery_failed",
+                        mode, error_code=exc.code)
                     raise
-                with self.store._transaction():
-                    append_mission_event(self.store, task_id, "workspace.delivered", {"mode": mode,
-                        "result": result}, actor="user")
+                self.store.missions.record_delivery_outcome(task_id, "workspace.delivered", mode, result=result)
             delivery = safe_event_data(self.store.redactor, result)
             if isinstance(result, dict) and "token" in result:
                 # This freshly generated one-time approval capability must reach

@@ -166,11 +166,7 @@ class MissionEventStream:
                     or not re.fullmatch(re.escape(task_id) + r":[1-9][0-9]{0,18}", last_event_id)):
                 raise ForgePilotError("invalid_event_id", "Last-Event-ID is not a mission cursor")
             after = int(last_event_id.rsplit(":", 1)[1])
-        with self.store._lock:
-            run = self.store._db.execute("SELECT 1 FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
-            if run is None:
-                raise ForgePilotError("unknown_graph", "Mission does not exist")
-            maximum = self.store._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+        maximum = self.store.missions.event_high_water(task_id)
         if after > maximum:
             raise ForgePilotError("event_cursor_ahead", "Last-Event-ID is ahead of the committed event log")
         return after
@@ -205,15 +201,7 @@ class MissionSubscription:
     def read(self):
         """Peek at one bounded page without advancing the acknowledged cursor."""
         store = self.stream.store
-        with store._lock:
-            run = store._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (self.task_id,)).fetchone()
-            if run is None:
-                raise ForgePilotError("unknown_graph", "Mission does not exist")
-            rows = store._db.execute("""SELECT e.*,a.agent_id FROM graph_events e
-                LEFT JOIN task_node_attempts a ON a.task_id=e.task_id AND a.node_id=e.node_id AND a.attempt=e.attempt
-                WHERE e.task_id=? AND e.sequence>? ORDER BY e.sequence LIMIT ?""",
-                (self.task_id, self.after, self.stream.page_size)).fetchall()
-            maximum = store._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (self.task_id,)).fetchone()[0]
+        run, rows, maximum = store.missions.event_page(self.task_id, self.after, self.stream.page_size)
         events = []
         for row in rows:
             payload = safe_event_data(store.redactor, json.loads(row["payload_json"]))

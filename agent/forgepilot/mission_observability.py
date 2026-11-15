@@ -5,7 +5,6 @@ from uuid import uuid4
 
 from .artifacts.canonical import content_sha256
 from .errors import ForgePilotError
-from .mission_events import append_record_event, is_v2_mission
 from .tools.change_tools import WRITE_TOOLS
 
 
@@ -16,14 +15,12 @@ _AUDIT_DENIAL_CODES = frozenset({"policy_denied", "path_escape", "file_denied",
 
 
 def _enabled(events, task_id):
-    with events._lock:
-        return is_v2_mission(events, task_id)
+    return events.missions.is_admitted(task_id)
 
 
 def _emit(events, context, kind, data):
-    with events._transaction():
-        append_record_event(events, context.task_id, kind, data,
-                            node_id=context.node.node_id, actor=context.node.agent_id)
+    events.missions.record_observation(context.task_id, kind, data,
+        node_id=context.node.node_id, actor=context.node.agent_id)
 
 
 async def model_call(events, context, definition, client, messages, tools, **kwargs):
