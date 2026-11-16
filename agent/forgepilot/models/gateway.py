@@ -11,6 +11,7 @@ import json
 import re
 from threading import Lock
 from time import monotonic
+from typing import Callable
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator
@@ -246,8 +247,10 @@ class GatewayClient:
     async def aclose(self):
         return None
 
-    async def chat(self, messages, tools=None, *, output_schema=None):
-        iterator = self._request(messages, tools, stream=False, output_schema=output_schema)
+    async def chat(self, messages, tools=None, *, output_schema=None,
+                   is_cancelled: Callable[[], bool] | None = None):
+        iterator = self._request(messages, tools, stream=False, output_schema=output_schema,
+                                 is_cancelled=is_cancelled)
         try:
             async for reply in iterator:
                 return reply
@@ -255,9 +258,10 @@ class GatewayClient:
             await iterator.aclose()
 
     async def stream_chat(self, messages, tools=None, *, diagnostics=None, model_started=None,
-                          output_schema=None):
+                          output_schema=None, is_cancelled: Callable[[], bool] | None = None):
         iterator = self._request(messages, tools, stream=True, output_schema=output_schema,
-                                 diagnostics=diagnostics, model_started=model_started)
+                                 diagnostics=diagnostics, model_started=model_started,
+                                 is_cancelled=is_cancelled)
         try:
             async for event in iterator:
                 yield event
@@ -284,7 +288,8 @@ class GatewayClient:
             elif self.role not in ("root_cause_analyst", "impact_test_analyst"):
                 raise ForgePilotError("policy_denied", "MCP is unavailable to this Agent")
 
-    async def _request(self, messages, tools, *, stream, output_schema, diagnostics=None, model_started=None):
+    async def _request(self, messages, tools, *, stream, output_schema, diagnostics=None, model_started=None,
+                       is_cancelled: Callable[[], bool] | None = None):
         messages, tools = deepcopy(messages), deepcopy(tools)
         self._check_tools(tools)
         validator = _output_validator(output_schema)
@@ -297,6 +302,11 @@ class GatewayClient:
         repaired = False
         call_id = uuid4().hex
         while True:
+            # A durable Mission cancel can precede its coroutine monitor. Check
+            # every provider boundary, including recovery attempts, before
+            # allocating a provider or reserving any additional model budget.
+            if is_cancelled is not None and is_cancelled():
+                raise asyncio.CancelledError()
             if tools and not profile.supports_tool_calling or stream and not profile.supports_streaming:
                 raise ForgePilotError("llm_config", "Model lacks a required request capability")
             provider = self.gateway._provider(profile)

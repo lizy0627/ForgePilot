@@ -25,7 +25,7 @@ def _emit(events, context, kind, data):
 
 async def model_call(events, context, definition, client, messages, tools, **kwargs):
     if not _enabled(events, context.task_id):
-        return await client.chat(messages, tools, **kwargs)
+        return await client.chat(messages, tools, is_cancelled=context.is_cancelled, **kwargs)
     def record_attempt(record):
         events.missions.record_model_call(
             call_id=str(uuid4()), task_id=context.task_id, node_id=context.node.node_id,
@@ -39,7 +39,7 @@ async def model_call(events, context, definition, client, messages, tools, **kwa
     # Context-local accounting isolates concurrent Analysts and records every
     # actual provider attempt, including retries/fallbacks and failed responses.
     with client.gateway.accounting.scoped_sink(record_attempt):
-        return await client.chat(messages, tools, **kwargs)
+        return await client.chat(messages, tools, is_cancelled=context.is_cancelled, **kwargs)
 
 
 def validate_tool(events, context, registry, name, arguments, **kwargs):

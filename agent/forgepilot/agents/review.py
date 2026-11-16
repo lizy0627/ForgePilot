@@ -135,7 +135,8 @@ class ReviewerService:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
         budget = budget or ModelBudget.from_limits(self.definition.limits)
         client = self.gateway.for_agent(self.definition, budget=budget)
-        operation = asyncio.create_task(client.chat(messages, [], output_schema=review_schema(spec.content)))
+        operation = asyncio.create_task(client.chat(messages, [], output_schema=review_schema(spec.content),
+                                                     is_cancelled=is_cancelled))
         try:
             while not operation.done():
                 if is_cancelled():

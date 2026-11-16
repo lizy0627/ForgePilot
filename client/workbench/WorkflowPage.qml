@@ -76,13 +76,12 @@ Item {
         var nextArtifacts = Flow.artifactsForNode(mission.artifacts, selectedNode)
         // Keep the reader's command/file selection and scroll position during
         // unrelated node updates instead of rebuilding its detail delegates.
-        if (JSON.stringify(nodeArtifacts) !== JSON.stringify(nextArtifacts)) nodeArtifacts = nextArtifacts
+        if (!Flow.sameArtifacts(nodeArtifacts, nextArtifacts)) nodeArtifacts = nextArtifacts
     }
     function selectNode(nodeId) {
         if (!nodeId) return
         selectedNodeId = nodeId; selectionPinned = true; detailsVisible = true
         if (compactLayout) taskCenterExpanded = false
-        updateDetails()
         Qt.callLater(function() { detailView.focusHeader() })
     }
     function closeDetails() {

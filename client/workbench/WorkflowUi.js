@@ -32,6 +32,19 @@ function idOf(record) { return record ? (record.nodeId || record.node_id || "") 
 function artifactId(record) { return record.artifactId || record.artifact_id || ""; }
 function artifactType(record) { return record.artifactType || record.artifact_type || ""; }
 
+// Persisted Artifacts are immutable. Their identity and verified content hash
+// describe the complete reader payload without serializing large Diff/log text.
+function sameArtifacts(current, next) {
+    if (current.length !== next.length) return false;
+    for (var i = 0; i < current.length; ++i) {
+        var id = artifactId(current[i]);
+        var hash = current[i].contentHash || current[i].content_sha256;
+        if (!id || !hash || id !== artifactId(next[i])
+                || hash !== (next[i].contentHash || next[i].content_sha256)) return false;
+    }
+    return true;
+}
+
 function stageId(record) {
     var id = idOf(record);
     if (id === "draft_task_spec") return "requirement";

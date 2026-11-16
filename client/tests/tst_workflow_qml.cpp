@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QCryptographicHash>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QJsonDocument>
@@ -393,6 +394,127 @@ private slots:
         for (const auto &name : {"msyh.ttc", "msyhbd.ttc", "segoeui.ttf", "seguisym.ttf", "seguiemj.ttf"})
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
+    }
+    void productionWorkflowLatencyProfile()
+    {
+        Fixture fixture;
+        // A realistic large immutable ChangeSet stays open while other nodes advance.
+        const QString largeDiff = QString("+ local offline large diff payload 0123456789\n").repeated(20000);
+        auto artifacts = fixture.artifacts.value("items").toArray();
+        for (int i = 0; i < artifacts.size(); ++i) {
+            auto artifact = artifacts[i].toObject();
+            if (artifact.value("artifact_type") != "ChangeSet") continue;
+            auto content = artifact.value("content").toObject();
+            auto files = content.value("files").toArray();
+            auto file = files.first().toObject(); file["unified_diff"] = largeDiff;
+            files[0] = file; content["files"] = files; artifact["content"] = content;
+            artifact["content_sha256"] = QString::fromLatin1(QCryptographicHash::hash(
+                QJsonDocument(content).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex());
+            artifacts[i] = artifact;
+        }
+        fixture.artifacts["items"] = artifacts;
+        fixture.setPhase("running", "reviewer_0");
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *page = ui.find("workflowPage"); QVERIFY(page);
+        QTRY_VERIFY(!page->property("selectedNodeId").toString().isEmpty());
+        QVERIFY(ui.expandStage("implementation"));
+        QVERIFY(ui.expandStage("verification"));
+        QVERIFY(ui.chooseNode("implementer"));
+        QTRY_VERIFY(ui.find("workflowNodeDiff"));
+        auto *diff = ui.find("workflowNodeDiff");
+        QCOMPARE(diff->property("value").toString(), largeDiff);
+        auto rawClick = [&](QQuickItem *item) {
+            if (!item || !item->isVisible() || !item->isEnabled()) return false;
+            QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier,
+                item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
+            return true;
+        };
+        auto render = [&] {
+            QCoreApplication::processEvents(); ui.window->update();
+            return !ui.window->grabWindow().isNull();
+        };
+        auto measure = [](QElapsedTimer &timer) { return timer.nsecsElapsed() / 1000000.0; };
+        QJsonObject results;
+        auto record = [&](const QString &name, QList<double> samples) {
+            std::sort(samples.begin(), samples.end());
+            const auto median = (samples[(samples.size() - 1) / 2] + samples[samples.size() / 2]) / 2;
+            const auto p95 = samples[(95 * samples.size() + 99) / 100 - 1];
+            results[name] = QJsonObject{{"samples", samples.size()}, {"p50_ms", median}, {"p95_ms", p95}};
+            qInfo().noquote() << "workflow_profile" << name << "p50_ms=" << median << "p95_ms=" << p95;
+        };
+        QList<double> modes, nodes, pages, refreshes, updates;
+        QElapsedTimer timer;
+        for (int i = 0; i < 20; ++i) {
+            timer.start(); QVERIFY(rawClick(ui.find(i % 2 ? "agentWorkbenchModeButton" : "freeChatModeButton")));
+            QCOMPARE(page->isVisible(), bool(i % 2)); QVERIFY(render()); modes.append(measure(timer));
+        }
+        for (int i = 0; i < 20; ++i) {
+            const QString node = i % 2 ? "implementer" : "reviewer_0";
+            auto *button = ui.find("workflowNode", "nodeId", node); QVERIFY(button); ui.reveal(button);
+            timer.start(); QVERIFY(rawClick(button));
+            QCOMPARE(page->property("selectedNodeId").toString(), node); QVERIFY(render()); nodes.append(measure(timer));
+        }
+        diff = ui.find("workflowNodeDiff"); QVERIFY(diff);
+        for (int i = 0; i < 20; ++i) {
+            auto *button = ui.find("workflowNextOutput", {}, {}, diff); QVERIFY(button); ui.reveal(button);
+            const auto offset = diff->property("offset").toInt();
+            timer.start(); QVERIFY(rawClick(button));
+            QCOMPARE(diff->property("offset").toInt(), offset + 12000); QVERIFY(render()); pages.append(measure(timer));
+        }
+        const auto retainedOffset = diff->property("offset").toInt();
+        QPointer<QQuickItem> retainedDiff(diff);
+        for (int i = 0; i < 20; ++i) {
+            timer.start(); QVERIFY(QMetaObject::invokeMethod(page, "refreshView"));
+            refreshes.append(measure(timer));
+        }
+        for (int i = 0; i < 12; ++i) {
+            const auto revision = 9 + i;
+            fixture.setPhase("running", i % 2 ? "validation_1" : "repair_1", revision);
+            QTRY_VERIFY(!fixture.streams.isEmpty() && fixture.streams.last().socket);
+            const QJsonObject event{{"event_id", MissionId + ':' + QString::number(revision)}, {"task_id", MissionId},
+                {"task_revision", revision}, {"timestamp", "2026-11-16T00:00:00Z"}, {"event_type", "node.completed"},
+                {"node_id", "reviewer_0"}, {"actor", "fixture"}, {"data", QJsonObject{}}};
+            const auto frame = "id: " + event.value("event_id").toString().toUtf8() + "\nevent: node.completed\ndata: "
+                + QJsonDocument(event).toJson(QJsonDocument::Compact) + "\n\n";
+            const auto requestStart = fixture.source.requests.size();
+            timer.start(); fixture.streams.last().socket->write(frame); fixture.streams.last().socket->flush();
+            QVERIFY(QTest::qWaitFor([&] { return ui.missions.revision() == revision && ui.missions.synchronized(); }, 10000));
+            QVERIFY(render()); updates.append(measure(timer));
+            // One coherent read bundle per update: start, four parts and fence.
+            int detailReads = 0;
+            for (int r = requestStart; r < fixture.source.requests.size(); ++r)
+                if (fixture.source.requests[r].method == "GET"
+                        && fixture.source.requests[r].path.startsWith("/api/v2/missions/")) ++detailReads;
+            QCOMPARE(detailReads, 6);
+            const auto records = page->property("nodeRecords").value<QJSValue>().toVariant().toList();
+            bool activeVisible = false;
+            for (const auto &record : records) {
+                const auto node = record.toMap();
+                if (node.value("nodeId") == (i % 2 ? "validation_1" : "repair_1")
+                        && node.value("status") == "running") activeVisible = true;
+            }
+            QVERIFY(activeVisible);
+            QVERIFY(retainedDiff); QCOMPARE(ui.find("workflowNodeDiff"), retainedDiff.data());
+            QCOMPARE(retainedDiff->property("offset").toInt(), retainedOffset);
+            QCOMPARE(page->property("selectedNodeId").toString(), QString("implementer"));
+        }
+        record("mode_switch_to_frame", modes); record("node_selection_to_frame", nodes);
+        record("long_diff_page_to_frame", pages); record("unchanged_view_refresh_cpu", refreshes);
+        record("sse_to_view_frame", updates);
+        results["scope"] = "Real Main.qml / production WorkflowPage, loopback HTTP/SSE fixture, offscreen software renderer; frame readback included except refresh CPU";
+        results["diff_characters"] = largeDiff.size();
+        const auto outputPath = qEnvironmentVariable("FORGEPILOT_WORKFLOW_PROFILE");
+        if (!outputPath.isEmpty()) {
+            QVERIFY2(!QFileInfo::exists(outputPath), "Profile output already exists; choose a new evidence path");
+            QSaveFile output(outputPath); QVERIFY(output.open(QIODevice::WriteOnly));
+            output.write(QJsonDocument(results).toJson()); QVERIFY(output.commit());
+        }
+        QVERIFY(ui.capture("stage5-main-workflow-long-diff"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void runtimeConfigurationFirstRunAndSettingsShareFormWithoutBackend()
     {
@@ -866,6 +988,42 @@ print(json.dumps(result))
             QCOMPARE(output->property("offset").toInt(), offset);
             QCOMPARE(viewport->property("contentY").toReal(), 160.0);
         }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void pinnedReaderUpdatesWhenNodePublishesAnotherAttempt()
+    {
+        Fixture fixture; fixture.setPhase("running", "reviewer_0"); Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId); QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.expandStage("implementation")); QVERIFY(ui.chooseNode("implementer"));
+        QTRY_VERIFY(ui.find("workflowNodeDiff"));
+        QPointer<QQuickItem> previous = ui.find("workflowNodeDiff");
+        auto artifacts = fixture.artifacts.value("items").toArray();
+        const QString replacementId = "10000000-0000-4000-a000-000000000036";
+        for (const auto &value : fixture.artifacts.value("items").toArray()) {
+            auto replacement = value.toObject();
+            if (replacement.value("artifact_type") != "ChangeSet") continue;
+            replacement["artifact_id"] = replacementId;
+            auto content = replacement.value("content").toObject();
+            auto files = content.value("files").toArray();
+            auto file = files.first().toObject(); file["unified_diff"] = "+ corrected next attempt\n";
+            files[0] = file; content["files"] = files; replacement["content"] = content;
+            replacement["content_sha256"] = QString::fromLatin1(QCryptographicHash::hash(
+                QJsonDocument(content).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex());
+            artifacts.append(replacement);
+        }
+        fixture.artifacts["items"] = artifacts;
+        fixture.setOutputs("implementer", QJsonArray{replacementId});
+        fixture.setPhase("running", "validation_1", 9); ui.missions.refresh();
+        QTRY_COMPARE(ui.missions.revision(), 9); QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_VERIFY(!previous);
+        auto *output = ui.find("workflowNodeDiff"); QVERIFY(output);
+        QCOMPARE(output->property("value").toString(), QString("+ corrected next attempt\n"));
+        QCOMPARE(output->property("offset").toInt(), 0);
+        auto *page = ui.find("workflowPage"); QVERIFY(page);
+        QCOMPARE(page->property("selectedNodeId").toString(), QString("implementer"));
+        QVERIFY(page->property("selectionPinned").toBool());
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void completedStagesCanExpandAndCollapse()
