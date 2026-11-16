@@ -45,6 +45,29 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void creationPreviewShowsConcretePresetFailureAndSupportsDisposal() {
+        const QJsonObject preview{{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
+            {"source_head", QString(40, 'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{"main.cpp"}},
+            {"patch", ""}, {"build", QJsonObject{{"source", "default"}}}};
+        QVERIFY(MissionProtocol::validResponse("mission.preview", {}, preview));
+        auto bad=preview; bad["changed_files"]=QJsonArray{1}; QVERIFY(!MissionProtocol::validResponse("mission.preview", {}, bad));
+        Source source; source.handle=[&](const Request &request) {
+            if(request.method == "DELETE") Source::json(request, {{"discarded", true}});
+            else if(request.body.value("configure_preset") == "unsupported")
+                Source::json(request, {{"error", QJsonObject{{"code", "preset_fields"}, {"message", "configure preset toolchainFile is unsupported"},
+                    {"details", QJsonArray{}}, {"task_id", QJsonValue::Null}}}}, 422);
+            else Source::json(request, preview);
+        };
+        AgentApiClient api; api.setBaseUrl(source.url());
+        QSignalSpy responses(&api,&AgentApiClient::responseReceived), errors(&api,&AgentApiClient::requestError);
+        api.previewMission({{"repository_path", "D:/fixture"}, {"baseline_paths", QJsonArray{}}}); QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(source.requests.first().method, QByteArray("POST")); QCOMPARE(source.requests.first().path, QByteArray("/api/v2/missions/preview"));
+        api.discardMissionPreview(QString(64,'c')); QTRY_COMPARE(responses.size(), 2);
+        QCOMPARE(source.requests.last().method, QByteArray("DELETE"));
+        QCOMPARE(source.requests.last().path, QByteArray("/api/v2/missions/previews/")+QByteArray(64,'c'));
+        api.previewMission({{"repository_path", "D:/fixture"}, {"configure_preset", "unsupported"}}); QTRY_COMPARE(errors.size(), 1);
+        QVERIFY(errors.first()[5].toString().contains("toolchainFile"));
+    }
     void missionHistoryUsesCollectionGetAndValidatesSummaryPages() {
         auto summary = mission();
         for (const auto &key : {"review", "last_event_id", "graph_id", "graph_version", "base_ref", "toolchain_profile"}) summary.remove(key);
@@ -175,10 +198,17 @@ private slots:
             QCOMPARE(errors.last()[4].toString(), "invalid_response");
         }
     }
+    void previousGraphRequiresNewApproval_data() {
+        QTest::addColumn<QString>("code"); QTest::addColumn<QString>("reason");
+        QTest::newRow("previous-graph") << QString("graph_definition") << QString("任务冻结流程已变化");
+        QTest::newRow("missing-source-build") << QString("mission_frozen_config_missing") << QString("缺少冻结的源码基线或构建配置");
+        QTest::newRow("changed-build-selection") << QString("build_selection_changed") << QString("预设文件、构建配置或工具身份已变化");
+    }
     void previousGraphRequiresNewApproval() {
+        QFETCH(QString, code); QFETCH(QString, reason);
         Source source;
-        source.handle = [](const Request &r) {
-            Source::json(r, {{"error", QJsonObject{{"code", "graph_definition"},
+        source.handle = [&code](const Request &r) {
+            Source::json(r, {{"error", QJsonObject{{"code", code},
                 {"message", "Recreate the mission and approve its execution plan"},
                 {"details", QJsonArray{}}, {"task_id", A}}}}, 409);
         };
@@ -186,7 +216,8 @@ private slots:
         QSignalSpy errors(&api, &AgentApiClient::requestError);
         api.resumeMission(A, 8);
         QTRY_COMPARE(errors.size(), 1);
-        QCOMPARE(errors[0][4].toString(), "graph_definition");
+        QCOMPARE(errors[0][4].toString(), code);
+        QVERIFY(errors[0][5].toString().contains(reason));
         QVERIFY(errors[0][5].toString().contains("重新创建任务并审批执行方案"));
         QVERIFY(errors[0][5].toString().contains("历史记录仍可查看"));
         QTest::qWait(50); QCOMPARE(source.requests.size(), 1);

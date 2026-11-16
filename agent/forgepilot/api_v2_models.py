@@ -22,6 +22,44 @@ class MissionRequest(BaseModel):
         return value
 
 
+class PreviewMission(MissionRequest):
+    repository_path: str = Field(min_length=1, max_length=4096)
+    base_ref: str = Field(default="HEAD", min_length=1, max_length=256)
+    baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
+    configure_preset: str | None = Field(default=None, min_length=1, max_length=256)
+    build_preset: str | None = Field(default=None, min_length=1, max_length=256)
+    test_preset: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("baseline_paths")
+    @classmethod
+    def baseline_selection(cls, value):
+        for path in value:
+            path.encode("utf-8", errors="strict")
+        if len(value) != len(set(value)) or any(not path or len(path)>4096 or "\x00" in path for path in value):
+            raise ValueError("Select distinct bounded baseline paths")
+        return value
+
+    @field_validator("repository_path")
+    @classmethod
+    def local_absolute_path(cls, value):
+        return CreateMission.local_absolute_path(value)
+
+    @field_validator("base_ref")
+    @classmethod
+    def bounded_git_ref(cls, value):
+        return CreateMission.bounded_git_ref(value)
+
+
+class MissionSourcePreview(BaseModel):
+    preview_token: MissionHash
+    base_commit: str
+    source_head: str
+    baseline_paths: list[str]
+    changed_files: list[str]
+    patch: str
+    build: dict[str, Any]
+
+
 class CreateMission(MissionRequest):
     repository_path: str = Field(min_length=1, max_length=4096)
     request: str = Field(min_length=1, max_length=8192)
@@ -31,6 +69,17 @@ class CreateMission(MissionRequest):
     toolchain_profile: str = Field(default="auto", pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", max_length=128)
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
     mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
+    baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
+    preview_token: MissionHash | None = None
+    baseline_confirmed: bool = False
+    configure_preset: str | None = Field(default=None, min_length=1, max_length=256)
+    build_preset: str | None = Field(default=None, min_length=1, max_length=256)
+    test_preset: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("baseline_paths")
+    @classmethod
+    def baseline_selection(cls, value):
+        return PreviewMission.baseline_selection(value)
 
     @field_validator("mcp_server_ids")
     @classmethod
@@ -141,6 +190,8 @@ class MissionResponse(BaseModel):
     review: MissionReview | None
     last_event_id: str | None
     recovery_required: bool
+    source_baseline: dict[str, Any] | None = None
+    build_selection: dict[str, Any] | None = None
 
 
 class MissionNode(BaseModel):

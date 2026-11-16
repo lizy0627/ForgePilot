@@ -61,10 +61,6 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
             "Missions require configured orchestration, analysis, implementation, review and repair "
             "model routes with Tool Calling support") from None
     config = dependencies.build_config
-    if config is not None and any((config.configure_preset, config.build_preset, config.test_preset)):
-        raise ForgePilotError("build_config",
-            "Mission validation does not support CMake presets; configure generator, architecture, "
-            "make program and configuration instead")
     events = dependencies.events
     oracle = None
     if oracle_source is not None:
@@ -97,6 +93,7 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
                                 rg_executable=dependencies.rg_executable,
                                 analysis_kwargs=analysis_kwargs)
     workflow.mission_mcp_manager = mcp_manager
+    workflow.mission_build_config = config
     workflow.mission_data_policy = DataPolicy(cloud_model_allowed=cloud_model_allowed,
                                              external_mcp_allowed=bool(mcp_snapshots))
     return workflow

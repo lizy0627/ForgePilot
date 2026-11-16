@@ -95,7 +95,7 @@ async def test_http_mission_analysis_approval_validation_delivery_and_sse(tmp_pa
                 path = f"/api/v2/missions/{tid}"
                 mission = await poll(client, path, {"awaiting_human", "failed", "retryable"})
                 assert mission["status"] == "awaiting_human", (await client.get(path + "/graph")).json()
-                assert (await client.get(path + "/graph")).json()["graph_id"] == "task-analysis-delivery.v2"
+                assert (await client.get(path + "/graph")).json()["graph_id"] == "task-analysis-delivery.v3"
                 artifacts = (await client.get(path + "/artifacts")).json()["items"]
                 assert {a["artifact_type"] for a in artifacts} == {"TaskSpec", "EvidenceBundle", "ExecutionPlan"}
                 assert (await client.get(path + "/artifacts/" + artifacts[0]["artifact_id"])).json() == artifacts[0]

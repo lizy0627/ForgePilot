@@ -12,6 +12,7 @@ Item {
     required property var mission
     property string conversionRequest: ""
     property string conversionSource: ""
+    property string conversionRepository: ""
     property bool taskCenterExpanded: false
     property string selectedNodeId: ""
     property bool selectionPinned: false
@@ -152,7 +153,7 @@ Item {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: 0
             TaskCenter {
                 id: taskCenter
-                mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource
+                mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository
                 visible: !root.demandCollapsed
                 Layout.preferredWidth: root.hasTask ? 300 : Math.min(420, root.width * 0.48)
                 Layout.fillWidth: !root.hasTask && root.compactLayout

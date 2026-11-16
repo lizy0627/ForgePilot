@@ -68,6 +68,10 @@ class DeliveryWorkflow(ImplementationService):
         gate, implementer = super().graph().nodes
         gate = replace(gate, settings={**_plain_json(gate.settings),
             "model_configuration_hash": content_sha256(self.gateway.router.configuration)})
+        if getattr(self, "mission_source_baseline", None) is not None:
+            gate = replace(gate, settings={**_plain_json(gate.settings),
+                "source_baseline_hash": content_sha256(self.mission_source_baseline),
+                "build_selection_hash": content_sha256(self.mission_build_selection)})
         baseline = NodeDefinition("baseline_capture", NodeType.DETERMINISTIC, "baseline_capture.v1",
             dependencies=("execution_approval",), settings={"recovery_role": "deterministic"})
         implementer = replace(implementer, dependencies=("execution_approval", "baseline_capture"),
@@ -97,7 +101,8 @@ class DeliveryWorkflow(ImplementationService):
         nodes.append(NodeDefinition("delivery_bundle", NodeType.DELIVERY, "delivery_bundle.v1",
             dependencies=("execution_approval", *reviews), settings={"recovery_role": "deterministic"}))
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
-        return GraphDefinition("validated-delivery.v2", 2, tuple(nodes), tuple(edges))
+        version = 3 if getattr(self, "mission_source_baseline", None) is not None else 2
+        return GraphDefinition(f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
@@ -105,7 +110,7 @@ class DeliveryWorkflow(ImplementationService):
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
         return GraphDefinition("task-analysis-delivery-locked.v2" if locked_task_spec is not None
-                               else "task-analysis-delivery.v2", 2,
+                               else f"task-analysis-delivery.v{execution.version}", execution.version,
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
@@ -114,9 +119,9 @@ class DeliveryWorkflow(ImplementationService):
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
                 "(请重新创建任务并审批执行方案)")
-        if graph.graph_id == "validated-delivery.v2":
+        if graph.graph_id in {"validated-delivery.v2", "validated-delivery.v3"}:
             expected = self.graph()
-        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery-locked.v2"}:
+        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery-locked.v2"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None

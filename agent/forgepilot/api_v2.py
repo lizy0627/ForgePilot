@@ -6,8 +6,8 @@ from starlette.datastructures import Headers
 from .api_v2_models import (
     CreateMission, MissionApproval, MissionArtifacts, MissionControl, MissionDelivery,
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
-    MissionID, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
-    MissionValidation,
+    MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
+    MissionValidation, PreviewMission, MissionSourcePreview,
 )
 from .errors import ForgePilotError
 from .mcp import decode
@@ -28,6 +28,8 @@ V2_ERROR_STATUS = {
     "workspace_corrupted": 409, "delivery_changed": 409, "delivery_recovery": 409,
     "mission_stream_capacity": 429, "graph_storage": 503,
     "artifact_storage": 503, "mission_unavailable": 503,
+    "baseline_changed": 409, "baseline_approval": 403, "baseline_capacity": 429,
+    "build_selection_changed": 409, "mission_frozen_config_missing": 409,
 }
 
 
@@ -84,6 +86,15 @@ def register_mission_routes(app, host, streams):
     @app.post(prefix, response_model=MissionResponse, status_code=202, responses=errors)
     async def create_mission(body: CreateMission):
         return await host.create(**body.model_dump())
+
+    @app.post(prefix + "/preview", response_model=MissionSourcePreview, responses=errors)
+    async def preview_mission(body: PreviewMission):
+        return await host.preview(**body.model_dump())
+
+    @app.delete(prefix + "/previews/{token}", responses=errors)
+    async def discard_mission_preview(token: MissionHash):
+        await host.discard_preview(token)
+        return {"discarded": True}
 
     @app.get(prefix, response_model=MissionPage, responses=errors)
     def list_missions(limit: int = Query(default=20, ge=1, le=100),

@@ -11,6 +11,7 @@ Item {
     required property var mission
     property string conversionRequest: ""
     property string conversionSource: ""
+    property string conversionRepository: ""
     property bool detailsExpanded: width >= 1120
     property var activityEvents: []
     onWidthChanged: { if (width < 1060) detailsExpanded = false }
@@ -34,7 +35,7 @@ Item {
     property string currentTaskId: ""
     RowLayout {
         anchors.fill: parent; spacing: 0
-        TaskCenter { mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; Layout.preferredWidth: 244; Layout.fillHeight: true }
+        TaskCenter { mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository; Layout.preferredWidth: 244; Layout.fillHeight: true }
         ScrollView {
             id: centerScroll; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             ScrollBar.vertical: Controls.AppScrollBar {}

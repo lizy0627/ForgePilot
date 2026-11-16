@@ -6,6 +6,19 @@
 
 MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
 {
+    connect(&m_creationApi, &AgentApiClient::responseReceived, this,
+        [this](quint64 id, const QString &operation, const QString &, const QJsonObject &body) {
+            if (operation != "mission.preview") return;
+            if (id != m_previewRequest) { m_creationApi.discardMissionPreview(body.value("preview_token").toString()); return; }
+            m_previewRequest = 0; m_creationPreview = body; m_creationReady = true; m_creationError.clear();
+            emit creationChanged();
+        });
+    connect(&m_creationApi, &AgentApiClient::requestError, this,
+        [this](quint64 id, const QString &, const QString &, int, const QString &, const QString &message) {
+            if (id != m_previewRequest) return;
+            m_previewRequest = 0; m_creationReady = false; m_creationError = message;
+            emit creationChanged();
+        });
     connect(&m_historyApi, &AgentApiClient::responseReceived, this,
         [this](quint64 id, const QString &, const QString &, const QJsonObject &body) {
             if (id != m_historyRequest) return;
@@ -39,7 +52,15 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
     connect(&m_api, &AgentApiClient::responseReceived, this,
         [this](quint64 id, const QString &, const QString &task, const QJsonObject &body) { received(id, task, body); });
     connect(&m_api, &AgentApiClient::requestError, this,
-        [this](quint64 id, const QString &, const QString &, int status, const QString &code, const QString &) { failed(id, status, code); });
+        [this](quint64 id, const QString &, const QString &, int status, const QString &code, const QString &message) {
+            QPointer<MissionController> guard(this);
+            if (m_requests.value(id) == RequestKind::Create && m_requests.contains(id)) {
+                invalidateCreationPreview();
+                if (!guard) return;
+                m_creationError = message; emit creationChanged();
+            }
+            if (guard) failed(id, status, code);
+        });
     connect(&m_approval, &ApprovalController::snapshotReceived, this, &MissionController::mutationSnapshot);
     connect(&m_delivery, &DeliveryController::snapshotReceived, this, &MissionController::mutationSnapshot);
     connect(&m_approval, &ApprovalController::refreshRequired, this, &MissionController::refresh);
@@ -79,7 +100,7 @@ MissionController::~MissionController()
 {
     m_loader.invalidate(); m_requests.clear();
     QObject::disconnect(&m_sse, nullptr, this, nullptr);
-    m_api.abortPending(); m_historyApi.abortPending(); m_sse.disconnect();
+    m_api.abortPending(); m_historyApi.abortPending(); m_creationApi.abortPending(); m_sse.disconnect();
 }
 std::function<bool()> MissionController::continuation()
 {
@@ -115,7 +136,8 @@ void MissionController::setBaseUrl(const QUrl &url)
     const auto current = continuation();
     m_missions.clear();
     if (!current()) return;
-    m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_sse.setBaseUrl(url);
+    m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_creationApi.setBaseUrl(url); m_sse.setBaseUrl(url);
+    invalidateCreationPreview(true);
     if (!current()) return;
     emit baseUrlChanged();
     if (current()) refreshMissions();
@@ -207,6 +229,23 @@ void MissionController::selectMission(const QString &taskId)
     m_task = taskId; m_loader.selectTask(taskId); emit missionChanged();
     if (current()) refresh();
 }
+void MissionController::invalidateCreationPreview(bool forget)
+{
+    m_previewRequest = 0;
+    const auto token = m_creationPreview.take("preview_token").toString();
+    if (!token.isEmpty()) m_creationApi.discardMissionPreview(token);
+    m_creationReady = false; m_creationError.clear();
+    if (forget) m_creationPreview = {};
+    emit creationChanged();
+}
+void MissionController::previewCreation(const QVariantMap &request)
+{
+    QPointer<MissionController> guard(this);
+    invalidateCreationPreview();
+    if (!guard) return;
+    m_previewRequest = m_creationApi.previewMission(QJsonObject::fromVariantMap(request));
+    emit creationChanged();
+}
 void MissionController::createMission(const QVariantMap &request)
 {
     if (busy()) return;
@@ -242,6 +281,9 @@ void MissionController::received(quint64 request, const QString &task, const QJs
     const auto current = continuation();
     const auto kind = m_requests.take(request);
     if (kind == RequestKind::Create) {
+        m_creationPreview.remove("preview_token"); m_creationReady = false; m_creationError.clear();
+        emit creationChanged();
+        if (!current()) return;
         m_mutation = 0; m_task = body.value("task_id").toString();
         m_loader.selectTask(m_task);
         refreshMissions();

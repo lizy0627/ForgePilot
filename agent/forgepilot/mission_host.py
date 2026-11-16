@@ -6,11 +6,12 @@ grants. Work runs on the shared runtime loop and survives request disconnects.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from inspect import signature
 import json
 import logging
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
@@ -26,6 +27,8 @@ from .orchestration.store import GraphStore
 
 if TYPE_CHECKING:
     from .mission_factory import MissionDependencies
+    from .presets import BuildConfig, MissionBuildSelection
+    from .workspace_manager import WorkspaceManager
 
 
 def _revision_conflict():
@@ -36,6 +39,20 @@ def _revision_conflict():
 def _approval_conflict():
     return ForgePilotError("mission_approval_conflict",
         "TaskSpec, Plan or Scope changed; review the current approval package")
+
+
+@dataclass(frozen=True)
+class _SourcePreview:
+    task_id: str
+    workspace: WorkspaceManager
+    fields: dict[str, object]
+    source_head: str
+    base_commit: str
+    file_hashes: dict[str, str | None]
+    patch_sha256: str | None
+    selection: MissionBuildSelection
+    build_config: BuildConfig
+    expires_at: float
 
 
 class MissionHost:
@@ -54,6 +71,8 @@ class MissionHost:
         self.dependencies = dependencies
         self.graphs = GraphStore(self.store)
         self._services = {}
+        self._previews: dict[str, _SourcePreview] = {}
+        self._source_lock = asyncio.Lock()
         self._running = {}
         self._admissions = set()
         self._operations = set()
@@ -89,9 +108,15 @@ class MissionHost:
         return snapshots
 
     def _workflow(self, task_id, *, mcp_server_ids=None):
+        restoring = mcp_server_ids is None
         if task_id not in self._services:
             if mcp_server_ids is None:
                 metadata = self._metadata(task_id)
+                if (metadata.get("source_baseline") is None and self.graphs.snapshot(task_id).graph_id in {
+                        "task-analysis-delivery.v2", "task-analysis-delivery.v3",
+                        "validated-delivery.v2", "validated-delivery.v3"}):
+                    raise ForgePilotError("mission_frozen_config_missing",
+                        "This historical task has no frozen source/build selection; it remains readable, but must be recreated before execution or recovery")
                 mcp_server_ids = metadata.get("mcp_server_ids", ())
                 expected_revisions = metadata.get("mcp_server_revisions")
                 if mcp_server_ids and expected_revisions is None:
@@ -116,6 +141,17 @@ class MissionHost:
                     workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
                 else:
                     workflow = self.factory(self.store)
+            if restoring and metadata.get("source_baseline") is not None:
+                from .presets import MissionBuildSelection
+                config = self._build_config(metadata)
+                if not isinstance(metadata.get("build_selection"), dict):
+                    raise ForgePilotError("build_selection_changed", "Frozen build selection is missing; recreate this task")
+                if asdict(config) != metadata.get("frozen_build_config"):
+                    raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; recreate this task")
+                workflow.mission_source_baseline = metadata["source_baseline"]
+                workflow.mission_build_selection = metadata["build_selection"]
+                if hasattr(workflow.validator, "bind_build_selection"):
+                    workflow.validator.bind_build_selection(task_id, MissionBuildSelection.from_dict(metadata["build_selection"]))
             self._services[task_id] = workflow
         return self._services[task_id]
 
@@ -153,6 +189,7 @@ class MissionHost:
             "orchestration_mode", "base_ref", "toolchain_profile")})
         result.update(review=review, last_event_id=f"{task_id}:{sequence}" if sequence else None,
                       recovery_required=bool(run["recovery_required"]))
+        result.update(source_baseline=metadata.get("source_baseline"), build_selection=metadata.get("build_selection"))
         return safe_event_data(self.store.redactor, result)
 
     def observability(self, task_id):
@@ -240,6 +277,93 @@ class MissionHost:
         finally:
             self._operations.discard(task)
 
+    def _build_config(self, fields):
+        from .presets import BuildConfig
+        from .process import executable
+        config = self.dependencies.build_config if self.dependencies else None
+        config = config or BuildConfig(executable(None, "cmake"), executable(None, "ctest"), configuration="Debug")
+        names = {key: fields.get(key) or getattr(config, key)
+                 for key in ("configure_preset", "build_preset", "test_preset")}
+        if any(names.values()):
+            # Explicit preset semantics replace the host's non-preset fallback flags.
+            return replace(config, **names, generator=None, architecture=None, make_program=None)
+        return replace(config, **names)
+
+    def _preview_workspace(self):
+        from .workspace_manager import WorkspaceManager
+        configured = getattr(self.store, "workspace_backend", None)
+        if isinstance(configured, WorkspaceManager):
+            return configured
+        return WorkspaceManager(self.store.artifacts.root / "mission-workspaces", artifacts=self.store.artifacts,
+            git_executable=self.dependencies.git_executable if self.dependencies else None)
+
+    @staticmethod
+    def _preview_fields(fields):
+        return {"repository_path": fields["repository_path"], "base_ref": fields.get("base_ref", "HEAD"),
+            "baseline_paths": sorted(fields.get("baseline_paths", [])),
+            **{key: fields.get(key) for key in ("configure_preset", "build_preset", "test_preset")}}
+
+    async def preview(self, **fields):
+        return await self.runtime.submit(self._execute_control(self._preview, fields))
+
+    async def _preview(self, fields):
+        async with self._source_lock:
+            for token, preview in tuple(self._previews.items()):
+                if monotonic() >= preview.expires_at:
+                    await self._discard_pending_preview(token)
+            return await self._preview_locked(fields)
+
+    async def _preview_locked(self, fields):
+        from .presets import Presets
+        from .build_process import build_environment
+        if len(self._previews) >= 8:
+            raise ForgePilotError("baseline_capacity", "Discard an unused source preview before creating another")
+        fields = self._preview_fields(fields)
+        workspace, task_id = self._preview_workspace(), str(uuid4())
+        config = self._build_config(fields)
+        try:
+            await self._create_workspace(workspace, fields, task_id)
+            source = await asyncio.to_thread(workspace.source_baseline_view, task_id, fields["baseline_paths"])
+            record = workspace.record(task_id)
+            patch, patch_sha = "", None
+            if fields["baseline_paths"]:
+                if record["base_ref"] != source["source_head"]:
+                    raise ForgePilotError("baseline_changed", "Selected working changes require the current HEAD baseline")
+                prepared = await asyncio.to_thread(workspace.prepare_baseline, task_id, fields["baseline_paths"])
+                if prepared["source_head"] != source["source_head"] or prepared["file_hashes"] != source["file_hashes"]:
+                    raise ForgePilotError("baseline_changed", "Selected source changed; preview again")
+                patch, patch_sha = prepared["patch_text"], prepared["sha256"]
+            selection = await asyncio.to_thread(lambda: Presets(Path(record["worktree_path"]), build_environment(),
+                overrides=source["files"]).resolve_mission(config))
+            token = uuid4().hex + uuid4().hex
+            self._previews[token] = _SourcePreview(task_id, workspace, fields, source["source_head"], record["base_ref"],
+                source["file_hashes"], patch_sha, selection, config, monotonic() + 900)
+            return {"preview_token": token, "base_commit": record["base_ref"],
+                "source_head": source["source_head"], "baseline_paths": fields["baseline_paths"],
+                "changed_files": source["changed_files"], "patch": self.store.redactor.text(patch),
+                "build": selection.to_dict()}
+        except BaseException as creation_error:
+            try:
+                expected = await asyncio.to_thread(workspace.inspect_task, task_id)
+            except FileNotFoundError:
+                raise creation_error
+            await asyncio.to_thread(workspace.cleanup, task_id, approved=True, expected=expected)
+            raise
+
+    async def discard_preview(self, token):
+        return await self.runtime.submit(self._execute_control(self._discard_preview, token))
+
+    async def _discard_preview(self, token):
+        async with self._source_lock:
+            await self._discard_pending_preview(token)
+
+    async def _discard_pending_preview(self, token):
+        preview = self._previews.get(token)
+        if preview is not None:
+            expected = await asyncio.to_thread(preview.workspace.inspect_task, preview.task_id)
+            await asyncio.to_thread(preview.workspace.cleanup, preview.task_id, approved=True, expected=expected)
+            self._previews.pop(token)
+
     async def create(self, **fields):
         return await self.runtime.submit(self._execute_control(self._admit, fields))
 
@@ -256,6 +380,9 @@ class MissionHost:
             operation = asyncio.current_task()
             self._admissions.add(operation)
             try:
+                if fields.get("preview_token"):
+                    async with self._source_lock:
+                        return await self._create(fields, locked_task_spec=locked_task_spec)
                 return await self._create(fields, locked_task_spec=locked_task_spec)
             finally:
                 self._admissions.discard(operation)
@@ -290,7 +417,25 @@ class MissionHost:
                     or fields["task_type"] not in {"auto", locked_task_spec.task_type}
                     or fields["base_ref"] != locked_task_spec.repository.base_ref):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec does not match the mission request or base")
-        task_id = str(uuid4())
+        token = fields.get("preview_token")
+        preview = self._previews.get(token) if token else None
+        if token and (preview is None or monotonic() >= preview.expires_at or self._preview_fields(fields) != preview.fields):
+            raise ForgePilotError("baseline_changed", "Source preview expired or selection changed; preview and confirm again")
+        config_requires_preview = any(getattr(self._build_config(fields), key)
+            for key in ("configure_preset", "build_preset", "test_preset"))
+        if config_requires_preview and preview is None:
+            raise ForgePilotError("baseline_approval", "Preview the resolved preset configuration before creating the task")
+        if fields.get("baseline_paths") and (preview is None or fields.get("baseline_confirmed") is not True):
+            raise ForgePilotError("baseline_approval", "Preview and explicitly confirm selected source changes")
+        if preview is not None:
+            if not preview.selection.matches_config(self._build_config(fields)):
+                raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; preview and confirm again")
+            preview.selection.verify_tools(preview.build_config.cmake, preview.build_config.ctest)
+            source = await asyncio.to_thread(preview.workspace.source_baseline_view, preview.task_id,
+                                             fields.get("baseline_paths", ()))
+            if source["source_head"] != preview.source_head or source["file_hashes"] != preview.file_hashes:
+                raise ForgePilotError("baseline_changed", "Source HEAD or selected files changed; preview and confirm again")
+        task_id = preview.task_id if preview else str(uuid4())
         workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()))
         try:
             # Trusted profile selection never accepts executable paths or shell text.
@@ -299,14 +444,48 @@ class MissionHost:
                     locked_task_spec.repository.toolchain_profile != profile
                     or locked_task_spec.data_policy != getattr(workflow, "mission_data_policy", DataPolicy())):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted toolchain or data policy")
-            await self._create_workspace(workflow.workspace, fields, task_id)
+            from .presets import Presets
+            from .build_process import build_environment
+            if preview is None:
+                await self._create_workspace(workflow.workspace, fields, task_id)
+            else:
+                if workflow.workspace.root != preview.workspace.root:
+                    raise ForgePilotError("workspace_unavailable", "Preview and task must share the same WorkspaceManager root")
+                self._previews.pop(token)
+                if preview.patch_sha256 is not None:
+                    prepared = await asyncio.to_thread(workflow.workspace.prepare_baseline, task_id, fields["baseline_paths"])
+                    if (prepared["sha256"] != preview.patch_sha256 or prepared["source_head"] != preview.source_head
+                            or prepared["file_hashes"] != preview.file_hashes):
+                        raise ForgePilotError("baseline_changed", "Selected patch changed; preview and confirm again")
+                    expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
+                    applied = await asyncio.to_thread(workflow.workspace.apply_baseline, task_id,
+                        preview.patch_sha256, approved=True, expected=expected)
+                    await asyncio.to_thread(workflow.workspace.freeze_source_baseline, task_id,
+                        preview.patch_sha256, approved=True, expected=applied)
+            record = workflow.workspace.record(task_id)
+            config = preview.build_config if preview else self._build_config(fields)
+            selection = await asyncio.to_thread(lambda: Presets(Path(record["worktree_path"]),
+                build_environment()).resolve_mission(config))
+            if preview and selection.to_dict() != preview.selection.to_dict():
+                raise ForgePilotError("build_selection_changed", "Resolved preset selection changed; preview and confirm again")
+            if locked_task_spec is None:
+                workflow.mission_source_baseline = {"version": 1,
+                    "source_commit": preview.base_commit if preview else record["base_ref"],
+                    "task_commit": record["base_ref"], "paths": fields.get("baseline_paths", []),
+                    "file_hashes": preview.file_hashes if preview else {},
+                    "patch_sha256": preview.patch_sha256 if preview else None}
+                workflow.mission_build_selection = selection.to_dict()
+                if hasattr(workflow.validator, "bind_build_selection"):
+                    workflow.validator.bind_build_selection(task_id, selection)
+                fields = {**fields, "source_baseline": workflow.mission_source_baseline,
+                          "build_selection": selection.to_dict(), "frozen_build_config": asdict(config)}
             request_text = self.store.redactor.text(fields["request"])
             if fields["task_type"] != "auto" and locked_task_spec is None:
                 request_text += "\nRequested task type: " + fields["task_type"]
             if len(request_text) > 8192:
                 request_text = self.store.redactor.text(fields["request"])
             request = AnalysisRequest(request=request_text, repository=RepositorySpec(
-                base_ref=fields["base_ref"], toolchain_profile=profile),
+                base_ref=record["base_ref"] if locked_task_spec is None else fields["base_ref"], toolchain_profile=profile),
                 data_policy=getattr(workflow, "mission_data_policy", DataPolicy()),
                 language=fields.get("language", "zh-CN"))
             if locked_task_spec is None:
@@ -330,8 +509,10 @@ class MissionHost:
                 try:
                     expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
                     await asyncio.to_thread(workflow.workspace.cleanup, task_id, approved=True, expected=expected)
-                except (ForgePilotError, OSError):
-                    pass
+                except (ForgePilotError, OSError) as cleanup_error:
+                    if preview is not None:
+                        raise ForgePilotError("baseline_cleanup",
+                            "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
                 self._services.pop(task_id, None)
                 self.store.missions.discard_unadmitted_graph(task_id)
             raise
@@ -535,6 +716,8 @@ class MissionHost:
             if not operation.cancelling():
                 operation.cancel()
         await asyncio.gather(*late, return_exceptions=True)
+        for token in tuple(self._previews):
+            await self._discard_preview(token)
 
 
 __all__ = ["MissionHost"]

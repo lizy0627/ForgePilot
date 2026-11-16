@@ -70,6 +70,47 @@ class MissionControllerTests : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(MissionProtocol::validMission(mission())); QVERIFY(MissionProtocol::validGraph(graph(mission()))); }
+    void creationPreviewInvalidationDisposesLateResultsAndRequiresReconfirmation_data()
+    {
+        QTest::addColumn<QString>("conflictCode");
+        QTest::newRow("source-changed") << QString("baseline_changed");
+        QTest::newRow("build-selection-changed") << QString("build_selection_changed");
+    }
+    void creationPreviewInvalidationDisposesLateResultsAndRequiresReconfirmation()
+    {
+        QFETCH(QString, conflictCode);
+        Fixture f; QList<Request> previews; QStringList disposed;
+        f.intercept=[&](const Request &request) {
+            if(request.path == "/api/v2/missions/preview") { previews.append(request); return true; }
+            if(request.path.startsWith("/api/v2/missions/previews/")) {
+                disposed.append(QString::fromUtf8(request.path.mid(request.path.lastIndexOf('/')+1)));
+                Source::json(request, {{"discarded", true}}); return true;
+            }
+            if(request.method == "POST" && request.path == "/api/v2/missions") {
+                Source::json(request, conflict(conflictCode), 409); return true;
+            }
+            return false;
+        };
+        auto preview=[](char token) { return QJsonObject{{"preview_token", QString(64, token)}, {"base_commit", QString(40,'a')},
+            {"source_head", QString(40,'a')}, {"baseline_paths", QJsonArray{"main.cpp"}}, {"changed_files", QJsonArray{"main.cpp"}},
+            {"patch", "selected patch"}, {"build", QJsonObject{{"source", "preset"}}}}; };
+        MissionController c; c.setBaseUrl(f.source.url());
+        c.selectMission(A); QTRY_VERIFY(c.synchronized());
+        c.previewCreation({{"repository_path", "D:/fixture"}}); QTRY_COMPARE(previews.size(), 1);
+        c.invalidateCreationPreview(true); c.previewCreation({{"repository_path", "D:/other"}}); QTRY_COMPARE(previews.size(), 2);
+        Source::json(previews[0], preview('b')); QTRY_VERIFY(disposed.contains(QString(64,'b')));
+        QVERIFY(!c.creationReady()); QVERIFY(c.previewLoading());
+        Source::json(previews[1], preview('c')); QTRY_VERIFY(c.creationReady());
+        QCOMPARE(c.taskId(), A); QVERIFY(c.synchronized());
+        c.invalidateCreationPreview(); QVERIFY(!c.creationReady()); QTRY_VERIFY(disposed.contains(QString(64,'c')));
+        QCOMPARE(c.creationPreview().value("changed_files").toStringList(), QStringList{"main.cpp"});
+        c.previewCreation({{"repository_path", "D:/other"}}); QTRY_COMPARE(previews.size(), 3);
+        Source::json(previews[2], preview('d')); QTRY_VERIFY(c.creationReady());
+        c.createMission({{"repository_path", "D:/other"}, {"request", "fixture"}, {"preview_token", QString(64,'d')},
+            {"baseline_paths", QJsonArray{"main.cpp"}.toVariantList()}, {"baseline_confirmed", true}});
+        QTRY_VERIFY(!c.creationError().isEmpty()); QVERIFY(!c.creationReady()); QVERIFY(!c.busy());
+        QVERIFY(!c.creationPreview().contains("preview_token"));
+    }
     void historyDiscoverySurvivesClientRestartWithoutResuming()
     {
         Fixture f; f.current = mission(A, 8, "interrupted"); f.current.insert("recovery_required", true);

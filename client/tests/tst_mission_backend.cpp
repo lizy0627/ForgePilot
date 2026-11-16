@@ -33,7 +33,13 @@ private slots:
         const auto repository = qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");
         QVERIFY(url.isValid()); QVERIFY(!repository.isEmpty());
         MissionController controller; controller.setBaseUrl(url);
-        controller.createMission({{"repository_path", repository}, {"request", "Fix the worker"}, {"task_type", "bug_fix"}});
+        controller.previewCreation({{"repository_path", repository}});
+        QTRY_VERIFY_WITH_TIMEOUT(controller.creationReady(), 15000);
+        const auto baseline = controller.creationPreview();
+        QVERIFY(!baseline.value("base_commit").toString().isEmpty());
+        QVERIFY(baseline.value("baseline_paths").toList().isEmpty());
+        controller.createMission({{"repository_path", repository}, {"request", "Fix the worker"}, {"task_type", "bug_fix"},
+            {"preview_token", baseline.value("preview_token")}, {"baseline_confirmed", false}});
         QTRY_VERIFY_WITH_TIMEOUT(controller.approval()->available(), 15000);
         QVERIFY2(controller.error().isEmpty(), qPrintable(controller.error()));
         QCOMPARE(controller.status(), "awaiting_human"); QCOMPARE(controller.graph()->rowCount(), 3);

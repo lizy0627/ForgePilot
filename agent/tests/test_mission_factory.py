@@ -112,15 +112,13 @@ def test_missing_graph_route_fails_before_workspace_allocation(tmp_path, git_exe
 
 
 @pytest.mark.parametrize("field", ["configure_preset", "build_preset", "test_preset"])
-def test_v2_rejects_unsupported_presets_before_workspace_allocation(tmp_path, git_exe, rg_exe, field):
+def test_v2_defers_preset_resolution_until_source_preview(tmp_path, git_exe, rg_exe, field):
     config = BuildConfig(cmake=shutil.which("cmake"), ctest=shutil.which("ctest"), **{field: "trusted-preset"})
     host, gateway, provider = build_host(tmp_path, git_exe, rg_exe, build_config=config)
     try:
-        with pytest.raises(ForgePilotError) as caught:
-            build_mission_workflow(build_dependencies(host, gateway, git_exe, rg_exe, build_config=config))
-        assert caught.value.code == "build_config"
-        assert "does not support CMake presets" in caught.value.message
-        assert not (host.store.artifacts.root / "mission-workspaces").exists()
+        workflow = build_mission_workflow(build_dependencies(host, gateway, git_exe, rg_exe, build_config=config))
+        assert workflow.mission_build_config is config
+        assert not list((host.store.artifacts.root / "mission-workspaces" / "worktrees").iterdir())
         assert not gateway._providers and provider.calls == 0
         # The existing v1 service still receives the exact original preset config.
         assert host.factory(None).build_config is config

@@ -25,6 +25,7 @@ from .build_process import BuildCancelled, build_environment, run_build_process
 from .errors import ForgePilotError
 from .integrity import IntegrityMonitor, IntegritySnapshot, Registration
 from .path_identity import path_key, path_within, same_path
+from .presets import MissionBuildSelection
 from .repository import Repository
 from .security import Redactor
 from .toolchain import ToolchainProfile
@@ -93,6 +94,7 @@ class ValidationService:
         self.timeout, self.output_limit = timeout, output_limit
         self.log_sink, self.redactor = log_sink, redactor or Redactor()
         self._monitors = {}
+        self._selection_hashes = {}
         self._lock = asyncio.Lock()
 
     def _store_log(self, task_id, phase, data):
@@ -143,13 +145,60 @@ class ValidationService:
             self.workspace._assert_expected(state, current)
             return current
 
+    def bind_build_selection(self, task_id: str, selection: MissionBuildSelection) -> None:
+        """Bind once after source-baseline confirmation; restoring never changes frozen options."""
+        if not isinstance(selection, MissionBuildSelection):
+            raise TypeError("Mission build selection must be a resolved immutable selection")
+        record, root, _ = self._paths(task_id)
+        selection.verify(root)
+        selection.verify_tools(self.profile.cmake, self.profile.ctest)
+        state = {"version": 1, "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
+                 "selection": selection.to_dict(), "selection_hash": content_sha256(selection.to_dict())}
+        encoded = json.dumps(state, ensure_ascii=False, sort_keys=True).encode()
+        path = task_id + "/build-selection.json"
+        if _exists(self.guard.path(path, missing=True)):
+            try:
+                previous = json.loads(self.guard.read(path))
+            except (ValueError, TypeError, RecursionError):
+                raise ForgePilotError("build_selection_changed", "Stored Mission build selection is invalid") from None
+            if previous != json.loads(encoded):
+                raise ForgePilotError("build_selection_changed", "Mission build selection is already frozen with different inputs")
+            self._selection_hashes[task_id] = state["selection_hash"]
+            return
+        self.guard.write(path, encoded)
+        self._selection_hashes[task_id] = state["selection_hash"]
+
+    def _build_selection(self, task_id, record, root):
+        path = task_id + "/build-selection.json"
+        if not _exists(self.guard.path(path, missing=True)):
+            if task_id in self._selection_hashes:
+                raise ForgePilotError("build_selection_changed", "Required frozen Mission build selection is missing")
+            return None  # Historical tasks keep their original explicit configuration.
+        try:
+            state = json.loads(self.guard.read(path))
+            if (state["version"] != 1 or state["workspace_id"] != record["workspace_id"]
+                    or state["base_ref"] != record["base_ref"]
+                    or state["selection_hash"] != content_sha256(state["selection"])
+                    or (task_id in self._selection_hashes and state["selection_hash"] != self._selection_hashes[task_id])):
+                raise ValueError()
+            selection = MissionBuildSelection.from_dict(state["selection"])
+            selection.verify(root)
+            selection.verify_tools(self.profile.cmake, self.profile.ctest)
+            return selection
+        except (KeyError, ValueError, TypeError):
+            raise ForgePilotError("build_selection_changed", "Frozen Mission build selection identity or hash changed") from None
+
     def _values(self, root, build_dir, *, report_path=None):
         return {"source_dir": str(root), "build_dir": str(build_dir),
                 "configuration": self.configuration, "jobs": "1",
                 "generator": self.generator or "", "architecture": self.architecture or "",
                 "make_program": self.make_program or "", "report_path": str(report_path or "")}
 
-    def _command(self, phase, values, *, hidden=False):
+    def _command(self, phase, values, *, hidden=False, selection=None):
+        if selection is not None and not hidden:
+            selection.verify_tools(self.profile.cmake, self.profile.ctest)
+            selection.verify(Path(values["source_dir"]))
+            return self.profile.resolve_mission(phase, values, selection)
         options = {"generator": bool(self.generator), "architecture": bool(self.architecture),
                    "make_program": bool(self.make_program),
                    "multi_config": bool(self.generator and (
@@ -195,6 +244,8 @@ class ValidationService:
                  "approval_checkpoint_hash": getattr(monitor, "_validation_approval_checkpoint", None),
                  "files": {path: base64.b64encode(data).decode("ascii")
                            for path, data in monitor._baseline.items()}}
+        selection = self._build_selection(task_id, record, Path(record["worktree_path"]))
+        state["build_selection_sha256"] = content_sha256(selection.to_dict()) if selection is not None else None
         self.guard.write(task_id + "/integrity.json", json.dumps(state, ensure_ascii=False).encode())
 
     def _load_baseline(self, task_id, record, spec, root):
@@ -206,6 +257,9 @@ class ValidationService:
             if (raw["version"] != 1 or raw["workspace_id"] != record["workspace_id"]
                     or raw["base_ref"] != record["base_ref"] or raw["spec_hash"] != content_sha256(spec)):
                 raise ValueError()
+            selection = self._build_selection(task_id, record, root)
+            if raw.get("build_selection_sha256") != (content_sha256(selection.to_dict()) if selection is not None else None):
+                raise ForgePilotError("build_selection_changed", "Validation baseline requires its original frozen build selection")
             snapshot = raw["snapshot"]
             monitor = IntegrityMonitor(Repository(root, ""), spec)
             monitor.snapshot = IntegritySnapshot(snapshot["plan_version"],
@@ -265,10 +319,11 @@ class ValidationService:
                     monitor._validation_oracle = manifest(oracle_root)
                 except (ForgePilotError, OSError):
                     raise ForgePilotError("validation_infrastructure", "Protected Oracle is unavailable") from None
+            selection = self._build_selection(task_id, record, root)
             values = self._values(root, build)
             try:
                 for phase in ("cmake_configure", "ctest_inventory"):
-                    result = await self._run(self._command(phase, values), is_cancelled)
+                    result = await self._run(self._command(phase, values, selection=selection), is_cancelled)
                     if result.status == "cancelled":
                         raise asyncio.CancelledError()
                     if result.status != "succeeded":
@@ -360,7 +415,7 @@ class ValidationService:
         passed = failed = 0
         classification, status, summary = "none", "passed", "All deterministic validation stages passed"
         compile_errors = ()
-        expected = monitor = None
+        expected = monitor = selection = None
 
         def record_check(message, *, success=True):
             now = _now()
@@ -370,7 +425,7 @@ class ValidationService:
         async def execute(phase, values, *, hidden=False):
             started = _now()
             try:
-                command = self._command(phase, values, hidden=hidden)
+                command = self._command(phase, values, hidden=hidden, selection=selection)
                 result = await self._run(command, is_cancelled)
             except ForgePilotError as exc:
                 category = "infrastructure_failure" if exc.code in {"command_denied", "build_job", "platform_unsupported"} else "policy_failure"
@@ -408,6 +463,7 @@ class ValidationService:
             if is_cancelled():
                 raise asyncio.CancelledError()
             record, root, build = self._paths(task_id)
+            selection = self._build_selection(task_id, record, root)
             if spec.repository.toolchain_profile != self.profile.profile_id:
                 raise _Failure("policy_failure", "Configured ToolchainProfile differs from the frozen TaskSpec")
             expected = self._workspace_check(task_id)

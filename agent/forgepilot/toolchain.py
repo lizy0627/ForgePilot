@@ -4,6 +4,8 @@ No command string is evaluated by a shell. Repository/model text cannot add
 placeholders, executables, arguments, or approvals to a built-in profile.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -12,6 +14,10 @@ from pathlib import Path, PureWindowsPath
 import re
 import stat
 from string import Formatter
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .presets import MissionBuildSelection
 
 from .errors import ForgePilotError
 from .path_identity import path_within, same_path
@@ -133,6 +139,45 @@ class ToolchainProfile:
             args += ("-C", "{configuration}", "--output-on-failure", "--no-tests=error", "--output-junit", "{report_path}")
         executable = validate_executable(self.cmake if kind == "cmake" else self.ctest, expected=kind)
         return ResolvedCommand(str(executable), tuple(_expand(arg, values) for arg in args), source)
+
+    def resolve_mission(self, phase: str, values: dict[str, str], selection: MissionBuildSelection) -> ResolvedCommand:
+        """Translate the reviewed safe preset subset, never invoke native --preset."""
+        if selection.source == "default":
+            selected = dict(values, generator=selection.generator or "", architecture=selection.architecture or "",
+                            configuration=selection.configuration,
+                            make_program=next((value for name, _, value in selection.cache_variables if name == "CMAKE_MAKE_PROGRAM"), ""))
+            return self.resolve(phase, selected, generator=bool(selected["generator"]),
+                architecture=bool(selected["architecture"]), make_program=bool(selected["make_program"]),
+                multi_config=bool(selection.generator and ("Visual Studio" in selection.generator or "Multi-Config" in selection.generator or selection.generator == "Xcode")))
+        source = Path(_scalar(values["source_dir"]))
+        if not source.is_absolute() or not same_path(source.resolve(strict=True), source) or source.is_symlink():
+            raise ForgePilotError("command_denied", "Toolchain source directory must be the trusted real workspace")
+        build = _scalar(values["build_dir"])
+        configuration = ("-C", selection.configuration) if selection.configuration else ()
+        if phase == "cmake_configure":
+            args = ("-S", str(source), "-B", build, "-G", selection.generator)
+            if selection.architecture: args += ("-A", selection.architecture)
+            if selection.toolset: args += ("-T", selection.toolset)
+            args += tuple("-D" + name + (":" + kind if kind else "") + "=" + value for name, kind, value in selection.cache_variables)
+        elif phase == "cmake_build":
+            args = ("--build", build)
+            if selection.configuration: args += ("--config", selection.configuration)
+            if selection.build_jobs is not None: args += ("--parallel", str(selection.build_jobs))
+            if selection.build_verbose: args += ("--verbose",)
+            if selection.build_clean_first: args += ("--clean-first",)
+            if selection.build_targets: args += ("--target", *selection.build_targets)
+        elif phase == "ctest_inventory":
+            args = ("--test-dir", build, *configuration, "--show-only=json-v1")
+        elif phase == "run_tests":
+            args = ("--test-dir", build, *configuration, "--no-tests=error", "--output-junit", values["report_path"])
+            if selection.test_output_on_failure: args += ("--output-on-failure",)
+            if selection.test_jobs is not None: args += ("--parallel", str(selection.test_jobs))
+            if selection.test_timeout is not None: args += ("--timeout", str(selection.test_timeout))
+        else:
+            raise ForgePilotError("command_denied", "Phase is absent from the Mission ToolchainProfile")
+        kind = "cmake" if phase.startswith("cmake_") else "ctest"
+        executable = validate_executable(self.cmake if kind == "cmake" else self.ctest, expected=kind)
+        return ResolvedCommand(str(executable), tuple(_scalar(arg) for arg in args), source)
 
     def resolve_oracle(self, phase: str, values: dict[str, str], **options) -> ResolvedCommand:
         """Host-only Oracle project; neither paths nor commands are model inputs.

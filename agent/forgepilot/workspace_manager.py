@@ -5,6 +5,7 @@ flags and snapshots are supplied by the application after a human decision.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager
 from hashlib import sha256
 import json
@@ -12,13 +13,14 @@ import os
 from pathlib import Path
 import re
 import threading
+from typing import TypedDict
 from uuid import uuid4
 
 from .errors import ForgePilotError
 from .path_identity import path_key, path_within, same_path
 from .git import SafeGit
 from .process import executable
-from .repository import Repository
+from .repository import Repository, excluded
 from .orchestration.workspace import WorkspaceSnapshot
 from .workspace_safety import (
     Guard, WriterLease, manifest, validate_relative, remove_worktree_files, remove_worktree_registration,
@@ -53,6 +55,13 @@ def _json(value):
 def _identity(path):
     info = Path(path).lstat()
     return [info.st_dev, info.st_ino]
+
+
+class SourceBaselineView(TypedDict):
+    source_head: str
+    files: dict[str, bytes | None]
+    file_hashes: dict[str, str | None]
+    changed_files: list[str]
 
 
 class WorkspaceManager(DeliveryMixin):
@@ -377,13 +386,57 @@ class WorkspaceManager(DeliveryMixin):
             self.guard.write(relative, data, overwrite=False)
         return {"path": str(path), "sha256": digest, "size": len(data)}
 
+    @staticmethod
+    def _baseline_path(repository: Repository, path: str) -> str:
+        # Host-only preset admission does not expand model Repository access.
+        return path if path == "CMakeUserPresets.json" else repository.normalize_plan_path(path)
+
+    def source_baseline_view(self, task_id: str, paths: Iterable[str] = ()) -> SourceBaselineView:
+        """Read source identity and selectable final working bytes without staging it."""
+        with self._operation(task_id) as state:
+            git = self._git(state, main=True)
+            repo = Repository(Path(state["repository_path"]), "")
+            selected = sorted({self._baseline_path(repo, path) for path in paths})
+            source = Guard(state["repository_path"])
+            head = self._head(git)
+            files, total = {}, 0
+            for path in selected:
+                data = source.read(path, max_bytes=16_777_216) if source.path(path, missing=True).exists() else None
+                total += len(data) if data is not None else 0
+                if total > 16_777_216:
+                    raise ForgePilotError("workspace_limit", "Selected baseline exceeds the 16 MiB source preview limit")
+                files[path] = data
+            dirty = set(git.run(["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"]).stdout.decode("utf-8").split("\0"))
+            dirty.update(git.run(["ls-files", "--others", "--exclude-standard", "-z"]).stdout.decode("utf-8").split("\0"))
+            # This common local preset is the only ignored-file exception. Its
+            # bytes are never included unless the user selects and confirms it.
+            user_presets = "CMakeUserPresets.json"
+            if (source.path(user_presets, missing=True).is_file()
+                    and git.run(["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", user_presets]).stdout):
+                source.read(user_presets, max_bytes=16_777_216)
+                dirty.add(user_presets)
+            visible = []
+            for path in sorted(dirty - {""}):
+                if path != user_presets and any(excluded(part) for part in path.replace("\\", "/").split("/")):
+                    continue
+                try:
+                    visible.append(self._baseline_path(repo, path))
+                except ForgePilotError as exc:
+                    if exc.code not in {"repository_path", "repository_boundary"}:
+                        raise
+            if self._head(git) != head:
+                raise ForgePilotError("baseline_changed", "Source HEAD changed; preview again")
+            return {"source_head": head, "files": files, "changed_files": visible,
+                    "file_hashes": {path: sha256(data).hexdigest() if data is not None else None
+                                    for path, data in files.items()}}
+
     def prepare_baseline(self, task_id, paths):
         with self._operation(task_id) as state:
             self._assert_expected(state, self._snapshot(state))
             if state["branch"] is not None or state.get("intent") or state["status"] != "active":
                 raise ForgePilotError("baseline_state", "Select the baseline before approving the execution plan")
             repo = Repository(Path(state["repository_path"]), "")
-            selected = sorted({repo.normalize_plan_path(p) for p in paths})
+            selected = sorted({self._baseline_path(repo, path) for path in paths})
             if not selected or len(selected) > 1000:
                 raise ForgePilotError("baseline_paths", "Select between 1 and 1000 safe files")
             git = self._git(state, main=True)
@@ -400,7 +453,11 @@ class WorkspaceManager(DeliveryMixin):
             env = {"GIT_INDEX_FILE": str(index)}
             try:
                 git.run(["read-tree", head], env=env)
-                git.run(["add", "--all", "--", *selected], env=env)
+                regular = [path for path in selected if path != "CMakeUserPresets.json"]
+                if regular:
+                    git.run(["add", "--all", "--", *regular], env=env)
+                if "CMakeUserPresets.json" in selected:
+                    git.run(["add", "--force", "--all", "--", "CMakeUserPresets.json"], env=env)
                 patch = git.run(["diff", "--cached", "--binary", "--full-index", "--no-ext-diff",
                                  "--no-textconv", "--no-color", head, "--", *selected], env=env).stdout
             finally:
@@ -415,7 +472,8 @@ class WorkspaceManager(DeliveryMixin):
             metadata_artifact = self._artifact(state, "baseline.json", _json(metadata))
             state["baseline"] = metadata | {"metadata": metadata_artifact, "applied": False}
             self._save(state)
-            return artifact | {"metadata": metadata_artifact, "paths": selected}
+            return artifact | {"metadata": metadata_artifact, "paths": selected,
+                               "source_head": head, "file_hashes": before, "patch_text": patch.decode("utf-8", errors="replace")}
 
     def apply_baseline(self, task_id, artifact_sha256, *, approved, expected):
         if approved is not True:
@@ -467,6 +525,36 @@ class WorkspaceManager(DeliveryMixin):
             state.pop("intent", None)
             self._save(state)
             return self._snapshot(state)
+
+    def freeze_source_baseline(self, task_id: str, artifact_sha256: str, *,
+                               approved: bool, expected: WorkspaceSnapshot) -> WorkspaceSnapshot:
+        """Commit confirmed source bytes before Graph creation, without plan approval."""
+        if approved is not True:
+            raise ForgePilotError("workspace_approval", "Source baseline confirmation is required")
+        with self._operation(task_id) as state:
+            self._assert_expected(state, expected)
+            baseline = state.get("baseline")
+            if (state["branch"] is not None or state.get("intent") or state.get("checkpoints")
+                    or not baseline or not baseline["applied"] or baseline["patch"]["sha256"] != artifact_sha256):
+                raise ForgePilotError("baseline_state", "Only a confirmed pre-analysis baseline can be frozen")
+            git = self._git(state)
+            tree = git.run(["write-tree"]).stdout.decode().strip()
+            commit = self._commit(git, tree, expected.head_commit, "forgepilot(source): confirmed source baseline")
+            self._verify_commit(state, commit, expected.file_hashes,
+                                message="forgepilot(source): confirmed source baseline")
+            state["intent"] = {"operation": "source_baseline", "before_head": expected.head_commit,
+                               "commit": commit, "files": dict(expected.file_hashes)}
+            self._save(state)
+            git.run(["update-ref", "--no-deref", "HEAD", commit, expected.head_commit])
+            after = self._snapshot(state)
+            if after.head_commit != commit or dict(after.file_hashes) != dict(expected.file_hashes):
+                raise ForgePilotError("baseline_integrity", "Source baseline changed while freezing")
+            state["source_base_ref"] = state["base_ref"]
+            state["base_ref"] = commit
+            self._set_expected(state, after)
+            state.pop("intent")
+            self._save(state)
+            return after
 
     @staticmethod
     def _message(kind, repair_round=None):

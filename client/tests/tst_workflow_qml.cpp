@@ -94,6 +94,14 @@ struct Fixture {
                 Source::json(request, {{"items", items}, {"total", items.size()}, {"next_cursor", QJsonValue::Null}});
             } else if (request.path.startsWith("/api/v1/")) {
                 Source::json(request, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
+            } else if (request.path == "/api/v2/missions/preview" && request.method == "POST") {
+                const auto paths = request.body.value("baseline_paths").toArray();
+                Source::json(request, {{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
+                    {"source_head", QString(40, 'a')}, {"baseline_paths", paths}, {"changed_files", QJsonArray{"main.cpp"}},
+                    {"patch", paths.isEmpty() ? "" : "--- a/main.cpp\n+++ b/main.cpp\n@@ -1 +1 @@\n-old\n+selected\n"},
+                    {"build", QJsonObject{{"source", "default"}, {"note", "受控构建目录"}}}});
+            } else if (request.path.startsWith("/api/v2/missions/previews/") && request.method == "DELETE") {
+                Source::json(request, {{"discarded", true}});
             } else if (request.path == "/api/v2/missions" && request.method == "POST") {
                 creates.append(request.body);
                 mission["request"] = request.body.value("request");
@@ -318,7 +326,7 @@ private slots:
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
-    void legacyWorkModeCreatesMission()
+    void legacyWorkModePreviewsBaselineBeforeCreatingMission()
     {
         Fixture fixture;
         fixture.intercept = [](const Request &request) {
@@ -332,6 +340,12 @@ private slots:
         Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         ui.conversations.selectConversation(A); QTRY_VERIFY(!ui.conversations.loading());
         ui.conversations.setMode("task"); ui.conversations.sendMessage("旧入口的新代码任务");
+        QCOMPARE(fixture.creates.size(), 0);
+        QTRY_COMPARE(ui.find("missionRepositoryInput")->property("text").toString(), QString("D:/fixture/repository"));
+        QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.find("missionBaselineSummary")->property("text").toString().contains(QString(40, 'a')));
+        QVERIFY(ui.click(ui.find("missionCreateButton")));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QTRY_COMPARE(ui.missions.taskId(), MissionId);
         QTRY_VERIFY(ui.missions.synchronized());
@@ -340,7 +354,7 @@ private slots:
         QCOMPARE(fixture.creates.first().value("repository_path").toString(), QString("D:/fixture/repository"));
         QCOMPARE(fixture.creates.first().value("request").toString(), QString("旧入口的新代码任务"));
         for(const auto &request:fixture.source.requests)
-            if(request.method == "POST") QCOMPARE(request.path, QByteArray("/api/v2/missions"));
+            if(request.method == "POST") QVERIFY(request.path == "/api/v2/missions" || request.path == "/api/v2/missions/preview");
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void convertedChatDraftCreatesMissionWithoutHistory()
@@ -356,6 +370,7 @@ private slots:
         QCOMPARE(fixture.creates.size(), 0);
         auto *repository=ui.find("missionRepositoryInput"); QVERIFY(repository);
         repository->setProperty("text", "D:/fixture/repository");
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
         QVERIFY(ui.click(ui.find("missionCreateButton")));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QCOMPARE(fixture.creates.first().value("request").toString(), QString("选定的任务文本"));
@@ -375,6 +390,8 @@ private slots:
         QVERIFY(request->setProperty("text", "修复窗口关闭后后台任务仍运行"));
         QVERIFY(repository->setProperty("text", "D:/fixture/repository"));
         auto *create = ui.find("missionCreateButton"); QVERIFY(create);
+        QVERIFY(!create->isEnabled());
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
         QTRY_VERIFY(create->isEnabled());
         QVERIFY(ui.click(create));
         QTRY_COMPARE(ui.missions.taskId(), MissionId);
@@ -389,6 +406,43 @@ private slots:
         QVERIFY(ui.click("workflowDemandToggle"));
         QTRY_VERIFY(page->property("demandCollapsed").toBool());
         QCOMPARE(fixture.creates.size(), 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void selectedFilesRequirePatchPreviewAndFreshConfirmation()
+    {
+        Fixture fixture; Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.find("missionRequestInput")->setProperty("text", "使用选定的源码改动");
+        ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/repository");
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
+        auto *file=ui.find("missionBaselineFile"); QVERIFY(file);
+        QVERIFY(ui.click(file)); QVERIFY(!ui.missions.creationReady());
+        QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.find("missionBaselinePatch")->property("text").toString().contains("+selected"));
+        auto *confirmation=ui.find("missionBaselineConfirmation"); QVERIFY(confirmation);
+        QVERIFY(!confirmation->property("checked").toBool()); QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click(confirmation)); QVERIFY(ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click(ui.find("missionUsePresets")));
+        QVERIFY(!ui.missions.creationReady()); QVERIFY(!confirmation->property("checked").toBool());
+        ui.find("missionConfigurePreset")->setProperty("text", "unsupported");
+        fixture.intercept=[](const Request &request) {
+            if(request.path != "/api/v2/missions/preview" || !request.body.contains("configure_preset")) return false;
+            Source::json(request, {{"error", QJsonObject{{"code", "preset_fields"},
+                {"message", "test preset output.outputLogFile 不支持迁移到受控构建目录"}, {"details", QJsonArray{}}, {"task_id", QJsonValue::Null}}}}, 422);
+            return true;
+        };
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(!ui.missions.creationError().isEmpty());
+        QVERIFY(ui.missions.creationError().contains("output.outputLogFile")); QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+        QCOMPARE(fixture.creates.size(), 0);
+        QVERIFY(ui.click(ui.find("missionUsePresets")));
+        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(!confirmation->property("checked").toBool()); QVERIFY(ui.click(confirmation));
+        QVERIFY(ui.click(ui.find("missionCreateButton"))); QTRY_COMPARE(fixture.creates.size(), 1);
+        QCOMPARE(fixture.creates.first().value("baseline_paths").toArray(), QJsonArray{"main.cpp"});
+        QCOMPARE(fixture.creates.first().value("baseline_confirmed").toBool(), true);
+        QCOMPARE(fixture.creates.first().value("preview_token").toString(), QString(64, 'c'));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void clickedNodeStaysSelectedWhenProgressAdvances()

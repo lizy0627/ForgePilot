@@ -343,6 +343,11 @@ bool MissionProtocol::validEvent(const QJsonObject &o, const QString &event, con
         && (!d.contains("artifact_ids") || strings(d.value("artifact_ids")));
 }
 bool MissionProtocol::validResponse(const QString &op, const QString &id, const QJsonObject &o) {
+    if (op == "mission.discard_preview") return o.value("discarded").isBool() && o.value("discarded").toBool();
+    if (op == "mission.preview") return validHash(o.value("preview_token"))
+        && text(o.value("base_commit")) && text(o.value("source_head"))
+        && strings(o.value("baseline_paths")) && strings(o.value("changed_files"))
+        && o.value("patch").isString() && o.value("build").isObject();
     if (op == "mission.list") return validMissionPage(o);
     if (op == "mission.resume" || op == "mission.delivery") {
         if (!o.value("mission").isObject() || !validMission(o.value("mission").toObject())
@@ -362,11 +367,25 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
     if (op == "mission.list") return only(o, {"before", "repository_path", "status"})
         && o.value("before").isString() && o.value("repository_path").isString()
         && o.value("status").isString() && (o.value("status").toString().isEmpty() || validState(o.value("status").toString()));
-    if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile"})
+    if (op == "mission.discard_preview") return only(o, {"preview_token"}) && validHash(o.value("preview_token"));
+    if (op == "mission.preview") return only(o, {"repository_path", "base_ref", "baseline_paths", "configure_preset", "build_preset", "test_preset"})
+        && text(o.value("repository_path")) && (!o.contains("base_ref") || text(o.value("base_ref")))
+        && (!o.contains("baseline_paths") || strings(o.value("baseline_paths")))
+        && (!o.contains("configure_preset") || text(o.value("configure_preset")))
+        && (!o.contains("build_preset") || text(o.value("build_preset")))
+        && (!o.contains("test_preset") || text(o.value("test_preset")));
+    if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
+            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed"})
         && text(o.value("repository_path")) && text(o.value("request"))
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
         && (!o.contains("orchestration_mode") || o.value("orchestration_mode").toString() == "multi_agent")
-        && (!o.contains("base_ref") || text(o.value("base_ref"))) && (!o.contains("toolchain_profile") || text(o.value("toolchain_profile")));
+        && (!o.contains("base_ref") || text(o.value("base_ref"))) && (!o.contains("toolchain_profile") || text(o.value("toolchain_profile")))
+        && (!o.contains("baseline_paths") || strings(o.value("baseline_paths")))
+        && (!o.contains("preview_token") || validHash(o.value("preview_token")))
+        && (!o.contains("baseline_confirmed") || o.value("baseline_confirmed").isBool())
+        && (!o.contains("configure_preset") || text(o.value("configure_preset")))
+        && (!o.contains("build_preset") || text(o.value("build_preset")))
+        && (!o.contains("test_preset") || text(o.value("test_preset")));
     if (op == "mission.get" || op == "mission.graph" || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
     if (op == "mission.artifact") return only(o, {"artifact_id"}) && validId(o.value("artifact_id").toString());
     if (!validRevision(o.value("expected_revision"))) return false;
@@ -404,6 +423,8 @@ QString MissionProtocol::errorMessage(const QString &code, int status) {
     if (code == "unknown_mission" || code == "unknown_graph" || status == 404) return "任务或产物不存在，请检查任务标识并刷新状态。";
     if (status == 403) return "操作被权限或安全策略拒绝，请检查审批和允许范围。";
     if (code == "recovery_required" || code == "recovery_stale") return "任务需要恢复确认，请先刷新并检查恢复预览。";
+    if (code == "mission_frozen_config_missing") return "该历史任务缺少冻结的源码基线或构建配置，无法安全恢复。请重新创建任务并审批执行方案；历史记录仍可查看。";
+    if (code == "build_selection_changed") return "冻结的预设文件、构建配置或工具身份已变化，当前任务无法继续执行或恢复。请重新创建任务并审批执行方案；历史记录仍可查看。";
     if (code == "graph_definition") return "任务冻结流程已变化，请重新创建任务并审批执行方案；历史记录仍可查看。";
     if (status == 409) return "任务状态已变化，当前操作无法执行，请刷新后检查。";
     if (status == 429 || code == "task_capacity") return "后端繁忙，请稍后刷新。";

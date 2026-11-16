@@ -19,6 +19,7 @@ ApplicationWindow {
     property bool agentMode: false
     property string conversionRequest: ""
     property string conversionSource: ""
+    property string conversionRepository: ""
     property string previousConversationMode: "chat"
     property bool previousHistoryReadOnly: false
     readonly property bool workMode: conversations.mode === "task"
@@ -46,7 +47,11 @@ ApplicationWindow {
             if (window.missions) {
                 window.agentMode = true
                 window.conversations.mode = "chat"
-                window.missions.createMission({request: prompt, repository_path: repositoryPath, task_type: "auto"})
+                window.missions.invalidateCreationPreview(true)
+                window.conversionRequest = ""
+                window.conversionRepository = repositoryPath
+                window.conversionSource = "来自旧工作入口；仅使用当前输入，请确认任务基线。"
+                window.conversionRequest = prompt
             }
         }
         function onSelectionChanged() { window.detailsExpanded = false }
@@ -167,6 +172,8 @@ ApplicationWindow {
                     Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
                     onOpenWorkDetails: { window.conversations.showActiveTask(); window.detailsExpanded = true }
                     onConvertToAgentTask: function(selectedText, sourceLabel) {
+                        if (window.missions) window.missions.invalidateCreationPreview(true)
+                        window.conversionRepository = ""
                         window.conversionRequest = selectedText
                         window.conversionSource = sourceLabel + "；仅发送所选文本，需另行指定仓库。"
                         window.agentMode = true
@@ -232,6 +239,7 @@ ApplicationWindow {
                 mission: window.missions
                 conversionRequest: window.conversionRequest
                 conversionSource: window.conversionSource
+                conversionRepository: window.conversionRepository
             }
         }
     }

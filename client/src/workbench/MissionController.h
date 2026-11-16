@@ -21,6 +21,10 @@ class MissionController : public QObject {
     Q_PROPERTY(qint64 revision READ revision NOTIFY missionChanged)
     Q_PROPERTY(QVariantMap snapshot READ snapshot NOTIFY missionChanged)
     Q_PROPERTY(QVariantMap recovery READ recovery NOTIFY missionChanged)
+    Q_PROPERTY(QVariantMap creationPreview READ creationPreview NOTIFY creationChanged)
+    Q_PROPERTY(bool previewLoading READ previewLoading NOTIFY creationChanged)
+    Q_PROPERTY(bool creationReady READ creationReady NOTIFY creationChanged)
+    Q_PROPERTY(QString creationError READ creationError NOTIFY creationChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY availabilityChanged)
     Q_PROPERTY(bool synchronized READ synchronized NOTIFY availabilityChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
@@ -50,6 +54,10 @@ public:
     qint64 revision() const { return m_snapshot.value("current_revision").toInteger(); }
     QVariantMap snapshot() const { return m_snapshot.toVariantMap(); }
     QVariantMap recovery() const { return m_recovery.toVariantMap(); }
+    QVariantMap creationPreview() const { return m_creationPreview.toVariantMap(); }
+    bool previewLoading() const { return m_previewRequest != 0; }
+    bool creationReady() const { return m_creationReady; }
+    QString creationError() const { return m_creationError; }
     bool busy() const { return m_mutation || m_approval.busy() || m_delivery.busy(); }
     bool synchronized() const { return m_synchronized; }
     QString error() const { return m_error; }
@@ -72,6 +80,8 @@ public:
     ApprovalController *approval() { return &m_approval; }
     DeliveryController *delivery() { return &m_delivery; }
     Q_INVOKABLE void createMission(const QVariantMap &request);
+    Q_INVOKABLE void previewCreation(const QVariantMap &request);
+    Q_INVOKABLE void invalidateCreationPreview(bool forget = false);
     Q_INVOKABLE void refreshMissions();
     Q_INVOKABLE void loadMoreMissions();
     Q_INVOKABLE void selectMission(const QString &taskId);
@@ -86,6 +96,7 @@ public:
 signals:
     void baseUrlChanged();
     void historyChanged();
+    void creationChanged();
     void missionChanged();
     void availabilityChanged();
     void errorChanged();
@@ -109,6 +120,7 @@ private:
     std::function<bool()> continuation();
     AgentApiClient m_api;
     AgentApiClient m_historyApi;
+    AgentApiClient m_creationApi;
     MissionSnapshotLoader m_loader;
     SseClient m_sse;
     MissionListModel m_missions;
@@ -120,7 +132,10 @@ private:
     ApprovalController m_approval;
     DeliveryController m_delivery;
     QHash<quint64, RequestKind> m_requests;
-    QJsonObject m_snapshot, m_recovery;
+    QJsonObject m_snapshot, m_recovery, m_creationPreview;
+    QString m_creationError;
+    quint64 m_previewRequest = 0;
+    bool m_creationReady = false;
     QString m_task, m_error;
     quint64 m_mutation = 0, m_artifactRequest = 0;
     quint64 m_generation = 0;

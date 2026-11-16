@@ -11,6 +11,29 @@ Rectangle {
     required property var mission
     property string seedRequest: ""
     property string selectedContext: ""
+    property string seedRepository: ""
+    property var baselinePaths: []
+    function baselineRequest() {
+        var result = {repository_path: repositoryInput.text.trim(), base_ref: "HEAD", baseline_paths: baselinePaths}
+        if (presetSelection.checked) {
+            if (configurePreset.text.trim()) result.configure_preset = configurePreset.text.trim()
+            if (buildPreset.text.trim()) result.build_preset = buildPreset.text.trim()
+            if (testPreset.text.trim()) result.test_preset = testPreset.text.trim()
+        }
+        return result
+    }
+    function submitMission() {
+        var result = baselineRequest()
+        result.request = requestInput.text.trim()
+        result.task_type = ["auto", "bug_fix", "feature"][kind.currentIndex]
+        result.preview_token = root.mission.creationPreview.preview_token
+        result.baseline_confirmed = baselineConfirmation.checked
+        root.mission.createMission(result)
+    }
+    Connections {
+        target: root.mission
+        function onCreationChanged() { if (baselineConfirmation && !root.mission.creationReady) baselineConfirmation.checked = false }
+    }
     color: Theme.sidebar
     implicitWidth: 244
     Component.onCompleted: { if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions() }
@@ -21,13 +44,18 @@ Rectangle {
         Label { text: "任务中心"; font.pixelSize: 17; font.weight: Font.DemiBold }
         Label { text: root.selectedContext || "创建任务仅使用下方文本与仓库路径。"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 11 }
         TextArea { id: requestInput; objectName: "missionRequestInput"; Layout.fillWidth: true; Layout.preferredHeight: 94; wrapMode: TextEdit.Wrap; placeholderText: "描述 Agent 任务"; textFormat: TextEdit.PlainText }
-        TextField { id: repositoryInput; objectName: "missionRepositoryInput"; Layout.fillWidth: true; placeholderText: "本地仓库绝对路径"; text: "" }
+        TextField {
+            id: repositoryInput; objectName: "missionRepositoryInput"; Layout.fillWidth: true
+            placeholderText: "本地仓库绝对路径"; text: root.seedRepository
+            onTextChanged: { root.baselinePaths = []; root.mission.invalidateCreationPreview(true) }
+        }
         Controls.ActionButton { text: "选择仓库…"; Layout.fillWidth: true; onClicked: folder.open() }
         ComboBox { id: kind; Layout.fillWidth: true; model: ["自动判断", "修复缺陷", "实现功能"]; Accessible.name: "任务类型" }
         Controls.ActionButton {
             objectName: "missionCreateButton"; text: root.mission.busy ? "创建中…" : "创建 Agent 任务"; highlighted: true; Layout.fillWidth: true
-            enabled: !root.mission.busy && !!requestInput.text.trim() && !!repositoryInput.text.trim()
-            onClicked: root.mission.createMission({request: requestInput.text.trim(), repository_path: repositoryInput.text.trim(), task_type: ["auto","bug_fix","feature"][kind.currentIndex]})
+            enabled: !root.mission.busy && root.mission.creationReady && !!requestInput.text.trim()
+                && !!repositoryInput.text.trim() && (!root.baselinePaths.length || baselineConfirmation.checked)
+            onClicked: root.submitMission()
         }
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         Label { text: "打开任务 ID"; color: Theme.secondary }
@@ -89,6 +117,88 @@ Rectangle {
                 }
             }
             ScrollBar.vertical: Controls.AppScrollBar {}
+        }
+        Label {
+            objectName: "missionBaselineSummary"; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
+            color: Theme.secondary
+            text: root.mission.creationReady
+                ? "实际基线：HEAD " + root.mission.creationPreview.base_commit + (root.baselinePaths.length ? " + " + root.baselinePaths.length + " 个选定文件" : "（不纳入未提交改动）")
+                : "默认基线：HEAD。请先预览实际提交、文件选择和构建配置。"
+        }
+        CheckBox {
+            id: presetSelection; objectName: "missionUsePresets"; text: "选择 CMake presets"
+            onToggled: root.mission.invalidateCreationPreview()
+        }
+        TextField {
+            id: configurePreset; objectName: "missionConfigurePreset"; Layout.fillWidth: true; visible: presetSelection.checked
+            placeholderText: "configure preset 名称"; onTextChanged: root.mission.invalidateCreationPreview()
+        }
+        TextField {
+            id: buildPreset; objectName: "missionBuildPreset"; Layout.fillWidth: true; visible: presetSelection.checked
+            placeholderText: "build preset 名称"; onTextChanged: root.mission.invalidateCreationPreview()
+        }
+        TextField {
+            id: testPreset; objectName: "missionTestPreset"; Layout.fillWidth: true; visible: presetSelection.checked
+            placeholderText: "test preset 名称"; onTextChanged: root.mission.invalidateCreationPreview()
+        }
+        Controls.ActionButton {
+            objectName: "missionPreviewButton"; text: root.mission.previewLoading ? "预览中…" : "预览任务基线与构建配置"
+            Layout.fillWidth: true; enabled: !root.mission.busy && !root.mission.previewLoading && !!repositoryInput.text.trim()
+            onClicked: root.mission.previewCreation(root.baselineRequest())
+        }
+        Label {
+            visible: !!root.mission.creationError; objectName: "missionCreationError"
+            text: root.mission.creationError; color: Theme.danger; textFormat: Text.PlainText
+            Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+        }
+        Label {
+            visible: (root.mission.creationPreview.changed_files || []).length > 0
+            text: "可选未提交文件（默认均不纳入）"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap
+        }
+        Repeater {
+            model: root.mission.creationPreview.changed_files || []
+            delegate: CheckBox {
+                id: baselineFile; objectName: "missionBaselineFile"; required property string modelData
+                Layout.fillWidth: true; text: modelData; checked: root.baselinePaths.indexOf(modelData) >= 0
+                contentItem: Label {
+                    text: baselineFile.text; textFormat: Text.PlainText; color: Theme.text
+                    wrapMode: Text.WrapAnywhere; leftPadding: baselineFile.indicator.width + baselineFile.spacing
+                }
+                onToggled: {
+                    var paths = root.baselinePaths.slice()
+                    if (checked) paths.push(modelData)
+                    else paths = paths.filter(function(path) { return path !== modelData })
+                    root.baselinePaths = paths; root.mission.invalidateCreationPreview()
+                }
+            }
+        }
+        Label {
+            visible: root.baselinePaths.length > 0 && !root.mission.creationReady
+            text: "文件选择已变化，请重新预览补丁。"; color: Theme.warning; Layout.fillWidth: true; wrapMode: Text.Wrap
+        }
+        Controls.LongText {
+            objectName: "missionBaselinePatch"; visible: root.mission.creationReady && root.baselinePaths.length > 0
+            Layout.fillWidth: true; title: "纳入任务的补丁"; text: root.mission.creationPreview.patch || ""
+            maximumHeight: 180
+        }
+        Label {
+            visible: presetSelection.checked; Layout.fillWidth: true; color: Theme.secondary; wrapMode: Text.WrapAnywhere
+            text: "预设原 binaryDir 会替换为任务受控构建目录；预览会检查其余受支持字段的语义。"
+            textFormat: Text.PlainText
+        }
+        Controls.LongText {
+            objectName: "missionBuildSelection"; visible: root.mission.creationReady
+            Layout.fillWidth: true; title: "冻结的构建配置"; text: JSON.stringify(root.mission.creationPreview.build || {}, null, 2)
+            maximumHeight: 180
+        }
+        CheckBox {
+            id: baselineConfirmation; objectName: "missionBaselineConfirmation"; text: "确认将上述补丁纳入任务基线"
+            Layout.fillWidth: true; Layout.minimumWidth: 0
+            visible: root.baselinePaths.length > 0; enabled: root.mission.creationReady
+            contentItem: Label {
+                text: baselineConfirmation.text; textFormat: Text.PlainText; color: Theme.text
+                wrapMode: Text.WrapAnywhere; leftPadding: baselineConfirmation.indicator.width + baselineConfirmation.spacing
+            }
         }
         Controls.ActionButton {
             objectName: "missionHistoryLoadMore"; text: root.mission.historyLoading ? "读取中…" : "加载更多"

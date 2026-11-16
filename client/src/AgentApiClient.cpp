@@ -106,6 +106,8 @@ quint64 AgentApiClient::send(const QString &operation, const QString &id, const 
 }
 
 quint64 AgentApiClient::createMission(const QJsonObject &body) { return sendMission("mission.create", {}, body); }
+quint64 AgentApiClient::previewMission(const QJsonObject &body) { return sendMission("mission.preview", {}, body); }
+quint64 AgentApiClient::discardMissionPreview(const QString &token) { return sendMission("mission.discard_preview", {}, {{"preview_token", token}}); }
 quint64 AgentApiClient::listMissions(const QString &before, const QString &repositoryPath, const QString &status) {
     return sendMission("mission.list", {}, {{"before", before}, {"repository_path", repositoryPath}, {"status", status}});
 }
@@ -137,13 +139,14 @@ quint64 AgentApiClient::rejectRequest(const QString &op, const QString &id, cons
     return serial;
 }
 quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body) {
-    if (op != "mission.create" && op != "mission.list" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
+    if (op != "mission.create" && op != "mission.preview" && op != "mission.discard_preview" && op != "mission.list" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
     if (!MissionProtocol::validRequest(op, body)) return rejectRequest(op, id, "invalid_request");
     const auto serial = ++m_next;
     QString path = id.isEmpty() ? QString{} : '/' + id;
     const auto action = op.mid(8);
     const bool readOnly = QSet<QString>{"get", "list", "graph", "artifacts", "artifact", "diff", "validation"}.contains(action);
-    if (action == "approve") path += "/approvals";
+    if (action == "discard_preview") path += "/previews/" + body.value("preview_token").toString();
+    else if (action == "approve") path += "/approvals";
     else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();
     else if (action != "create" && action != "get" && action != "list") path += '/' + action;
     auto url = MissionProtocol::endpoint(m_base, path);
@@ -153,8 +156,9 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
             if (!body.value(key).toString().isEmpty()) query.addQueryItem(key, body.value(key).toString());
         url.setQuery(query);
     }
-    auto *reply = JsonHttp::send(m_network, this, readOnly ? "GET" : "POST", url,
-        readOnly ? QJsonObject{} : body, 64 * 1024 * 1024,
+    const QByteArray method = action == "discard_preview" ? "DELETE" : readOnly ? "GET" : "POST";
+    auto *reply = JsonHttp::send(m_network, this, method, url,
+        readOnly || action == "discard_preview" ? QJsonObject{} : body, 64 * 1024 * 1024,
         [=, this](QNetworkReply *completed, const JsonHttp::Response &response) {
             if (!m_pending.remove(completed)) return;
             m_requests.remove(serial);
@@ -169,7 +173,13 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
             else if (response.invalidJson || !MissionProtocol::validResponse(op, id, response.body)
                 || ((action == "create" || action == "approve" || action == "retry" || action == "resume") && status != 202)
                 || (action == "artifact" && response.body.value("artifact_id") != body.value("artifact_id"))) code = "invalid_response";
-            if (!code.isEmpty()) emit requestError(serial, op, id, status, code, MissionProtocol::errorMessage(code, status));
+            if (!code.isEmpty()) {
+                const bool creationDetail = (action == "preview" || action == "create")
+                    && MissionProtocol::validError(response.body, id);
+                emit requestError(serial, op, id, status, code, creationDetail
+                    ? response.body.value("error").toObject().value("message").toString()
+                    : MissionProtocol::errorMessage(code, status));
+            }
             else emit responseReceived(serial, op, id, response.body);
         }, readOnly, true); // Mutations are never replayed by Qt after a dropped connection.
     m_pending.insert(reply);
