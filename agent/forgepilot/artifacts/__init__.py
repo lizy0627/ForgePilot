@@ -2,11 +2,12 @@
 from .canonical import canonical_json_bytes, content_sha256
 from .models import *
 from .store import (
-    ArtifactNotFoundError, ArtifactRelation, ArtifactStore, DuplicateArtifactError,
+    ArtifactIntegrityError, ArtifactNotFoundError, ArtifactRelation, ArtifactStorageError,
+    ArtifactStore, DuplicateArtifactError,
     InMemoryArtifactStore, validate_relationships,
 )
 from .sqlite_store import (
-    ArtifactIntegrityError, ArtifactStorageError, INLINE_LIMIT_BYTES,
+    INLINE_LIMIT_BYTES,
     SqliteArtifactStore, default_artifact_root,
 )
 from .validation import (

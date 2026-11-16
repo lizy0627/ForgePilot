@@ -10,7 +10,7 @@ import json
 import sqlite3
 
 from ..artifacts.canonical import content_sha256
-from ..artifacts.sqlite_store import ArtifactStorageError
+from ..artifacts.store import ArtifactStorageError
 from ..errors import ForgePilotError
 from .models import NodeResult, NodeStatus, idempotency_key
 from .store import GraphStore, _now

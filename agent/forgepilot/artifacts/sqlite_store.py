@@ -13,21 +13,14 @@ from ..repository import is_link, opened_path
 from .canonical import canonical_json_bytes
 from .models import ArtifactContent, ArtifactEnvelope, ArtifactEnvelopeBase, DeliveryBundle
 from .store import (
-    ArtifactNotFoundError, ArtifactRelation, DuplicateArtifactError, validate_relationships,
+    ArtifactIntegrityError, ArtifactNotFoundError, ArtifactRelation, ArtifactStorageError,
+    DuplicateArtifactError, validate_relationships,
 )
 from .validation import ArtifactProtocolError, ArtifactRelationshipError, create_artifact, validate_artifact
 
 
 INLINE_LIMIT_BYTES = 256 * 1024
 MAX_EXTERNAL_BYTES = 1024 * 1024 * 1024
-
-
-class ArtifactIntegrityError(ArtifactProtocolError):
-    pass
-
-
-class ArtifactStorageError(ArtifactProtocolError):
-    pass
 
 
 def default_artifact_root() -> Path:

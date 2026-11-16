@@ -27,6 +27,10 @@ $env:ALL_PROXY = 'http://127.0.0.1:9'
 $env:NO_PROXY = '127.0.0.1,localhost,::1'
 
 $fastTests = @(
+    'tests/test_layering_boundaries.py',
+    'tests/test_client_layering.py',
+    'tests/test_release_boundaries.py',
+    'tests/test_conversations_boundaries.py',
     'tests/test_graph_orchestration.py',
     'tests/test_graph_fanout.py',
     'tests/test_artifact_protocol.py',

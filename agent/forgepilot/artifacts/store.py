@@ -9,7 +9,15 @@ from .models import (
     ArtifactContent, ArtifactEnvelope, ArtifactEnvelopeBase, ChangeSet, DeliveryBundle,
     ExecutionPlan, ReviewReport, TaskSpec, ValidationReport,
 )
-from .validation import ArtifactRelationshipError, create_artifact, validate_artifact, validate_plan_coverage, validate_review_coverage
+from .validation import ArtifactProtocolError, ArtifactRelationshipError, create_artifact, validate_artifact, validate_plan_coverage, validate_review_coverage
+
+
+class ArtifactIntegrityError(ArtifactProtocolError):
+    pass
+
+
+class ArtifactStorageError(ArtifactProtocolError):
+    pass
 
 
 class ArtifactNotFoundError(KeyError):

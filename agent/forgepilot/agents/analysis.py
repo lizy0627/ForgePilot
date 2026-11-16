@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import Field
 
 from ..artifacts.models import ArtifactModel, DataPolicy, EvidenceBundle, ExecutionPlan, RepositorySpec, TaskSpec
-from ..artifacts.sqlite_store import ArtifactStorageError
+from ..artifacts.store import ArtifactStorageError
 from ..artifacts.validation import create_artifact
 from ..errors import ForgePilotError
 from ..mission_observability import model_call, tool_call, validate_tool

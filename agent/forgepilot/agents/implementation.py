@@ -18,7 +18,7 @@ from typing import Literal
 
 from ..artifacts.canonical import content_sha256
 from ..artifacts.models import ArtifactModel, TaskSpec, ExecutionPlan, EvidenceBundle
-from ..artifacts.sqlite_store import ArtifactStorageError
+from ..artifacts.store import ArtifactStorageError
 from ..artifacts.validation import create_artifact, validate_plan_coverage
 from ..delivery_store import DeliveryRepository
 from ..errors import ForgePilotError

@@ -61,6 +61,7 @@ foreach ($name in @('pyproject.toml', 'uv.lock', '.python-version')) {
     Copy-File (Join-Path $root "agent\$name") "agent\$name"
 }
 Copy-PythonTree (Join-Path $root 'agent\forgepilot') 'agent\forgepilot'
+Copy-File (Join-Path $root 'agent\forgepilot\protocol_examples.v1.json') 'agent\forgepilot\protocol_examples.v1.json'
 
 foreach ($name in @(
     'Desktop.cmd', 'Desktop.ps1', 'desktop_launcher.py', 'Setup-Agent.cmd',

@@ -10,7 +10,7 @@ from threading import Barrier, BrokenBarrierError
 from typing import Callable, Iterable
 
 from ..artifacts.store import ArtifactNotFoundError
-from ..artifacts.sqlite_store import ArtifactStorageError
+from ..artifacts.store import ArtifactStorageError
 from ..errors import ForgePilotError
 from .graph import ValidatedGraph, validate_graph
 from .execution import ExecutionCoordinator, coordinator_for_storage
