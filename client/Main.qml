@@ -237,6 +237,7 @@ ApplicationWindow {
         sourceComponent: Component {
             Workbench.WorkflowPage {
                 mission: window.missions
+                mcp: window.mcp; rag: window.rag
                 conversionRequest: window.conversionRequest
                 conversionSource: window.conversionSource
                 conversionRepository: window.conversionRepository

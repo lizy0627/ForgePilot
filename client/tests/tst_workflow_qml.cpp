@@ -1,6 +1,8 @@
 #include "ClientUi.h"
 #include "ConversationController.h"
 #include "TaskController.h"
+#include "McpController.h"
+#include "RagController.h"
 #include "workbench/MissionController.h"
 #include "HttpFixture.h"
 #include <QFile>
@@ -18,6 +20,7 @@
 
 namespace {
 const QString MissionId = "10000000-0000-4000-a000-000000000001";
+const QString McpId = "20000000-0000-4000-a000-000000000001";
 const QString Validation0 = "10000000-0000-4000-a000-000000000005";
 const QString Validation1 = "10000000-0000-4000-a000-000000000015";
 
@@ -92,6 +95,19 @@ struct Fixture {
             if (request.method == "GET" && request.path.startsWith("/api/v2/missions?")) {
                 const QJsonArray items = creates.isEmpty() ? QJsonArray{} : QJsonArray{mission};
                 Source::json(request, {{"items", items}, {"total", items.size()}, {"next_cursor", QJsonValue::Null}});
+            } else if (request.path == "/api/v1/mcp/servers") {
+                Source::json(request, {{"disabled", false}, {"items", QJsonArray{
+                    QJsonObject{{"server_id", McpId}, {"name", "本地资料"}, {"revision", 1}, {"enabled", true}, {"selected_tool_count", 1}},
+                    QJsonObject{{"server_id", Validation0}, {"name", "仅聊天"}, {"revision", 1}, {"enabled", true}, {"selected_tool_count", 1}},
+                    QJsonObject{{"server_id", Validation1}, {"name", "缺少只读声明"}, {"revision", 1}, {"enabled", true}, {"selected_tool_count", 1}}}}});
+            } else if (request.path.startsWith("/api/v1/mcp/servers/")) {
+                const auto serverId = QString::fromUtf8(request.path.mid(QByteArray("/api/v1/mcp/servers/").size()));
+                const bool task = serverId != Validation0;
+                Source::json(request, {{"server_id", serverId}, {"name", serverId == McpId ? "本地资料" : "其他服务"},
+                    {"revision", 1}, {"enabled", true}, {"effect", "read"}, {"modes", task ? QJsonArray{"task"} : QJsonArray{"chat"}},
+                    {"selected_tools", QJsonArray{"lookup"}}, {"tools", QJsonArray{
+                        QJsonObject{{"name", "lookup"}, {"compatible", true}, {"annotations", QJsonObject{{"readOnlyHint", serverId != Validation1}, {"destructiveHint", false}}}},
+                        QJsonObject{{"name", "write"}, {"compatible", false}, {"annotations", QJsonObject{{"readOnlyHint", false}}}}}}});
             } else if (request.path.startsWith("/api/v1/")) {
                 Source::json(request, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
             } else if (request.path == "/api/v2/missions/preview" && request.method == "POST") {
@@ -106,6 +122,15 @@ struct Fixture {
                 creates.append(request.body);
                 mission["request"] = request.body.value("request");
                 mission["repository_path"] = request.body.value("repository_path");
+                mission["use_rag"] = request.body.value("use_rag").toBool();
+                mission["mcp_server_ids"] = request.body.value("mcp_server_ids").toArray();
+                const bool selected = !mission["mcp_server_ids"].toArray().isEmpty();
+                mission["tool_context"] = QJsonObject{
+                    {"rag", QJsonObject{{"requested", mission["use_rag"]}, {"enabled", mission["use_rag"]}, {"used", mission["use_rag"]},
+                        {"fallback_reasons", mission["use_rag"].toBool() ? QJsonArray{"vector_unavailable"} : QJsonArray{}}}},
+                    {"clangd", QJsonObject{{"enabled", false}, {"used", false}, {"fallback_reasons", QJsonArray{"clangd_unavailable"}}}},
+                    {"mcp", QJsonObject{{"server_ids", mission["mcp_server_ids"]}, {"used", selected}, {"fallback_reasons", QJsonArray{}},
+                        {"servers", selected ? QJsonArray{QJsonObject{{"server_id", McpId}, {"name", "本地资料"}, {"tools", QJsonArray{"lookup"}}}} : QJsonArray{}}}}};
                 Source::json(request, mission, 202);
             } else if (request.path.endsWith("/events")) {
                 streams.append(request);
@@ -215,6 +240,8 @@ struct Ui {
     TaskController tasks;
     ConversationController conversations{&tasks};
     MissionController missions;
+    McpController mcp{&tasks};
+    RagController rag;
     QQmlApplicationEngine engine;
     QQuickWindow *window = nullptr;
     QStringList warnings;
@@ -227,6 +254,7 @@ struct Ui {
         });
         engine.setInitialProperties({{"controller", QVariant::fromValue(&tasks)},
             {"conversations", QVariant::fromValue(&conversations)}, {"missions", QVariant::fromValue(&missions)},
+            {"mcp", QVariant::fromValue(&mcp)}, {"rag", QVariant::fromValue(&rag)},
             {"width", width}, {"height", height}});
     }
     bool load()
@@ -262,7 +290,8 @@ struct Ui {
     bool click(QQuickItem *item) const
     {
         if (!item || !item->isVisible() || !item->isEnabled()) return false;
-        reveal(item); window->update(); QTest::qWait(20);
+        // Let newly published sections finish layout before measuring the scroll range.
+        window->update(); QTest::qWait(20); reveal(item); window->update(); QTest::qWait(20);
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
             item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
         return true;
@@ -325,6 +354,111 @@ private slots:
         for (const auto &name : {"msyh.ttc", "msyhbd.ttc", "segoeui.ttf", "seguisym.ttf", "seguiemj.ttf"})
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
+    }
+    void missionMcpChoicesRequireExplicitReadOnlyAnnotation()
+    {
+        Fixture fixture; Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton")); QTRY_VERIFY(!ui.mcp.missionLoading());
+        QCOMPARE(ui.mcp.missionChoices().size(), 1);
+        QVERIFY(ui.find("missionMcpChoice", "serverId", McpId));
+        QVERIFY(!ui.find("missionMcpChoice", "serverId", Validation0));
+        // compatible=true and effect=read cannot substitute for the tool annotation.
+        QVERIFY(!ui.find("missionMcpChoice", "serverId", Validation1));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void mcpSelectionRefreshFailureRemovesStaleGrant()
+    {
+        Fixture fixture; Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n'))); QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QTRY_VERIFY(!ui.mcp.missionLoading());
+        auto *choice = ui.find("missionMcpChoice", "serverId", McpId); QVERIFY(choice); QVERIFY(ui.click(choice));
+        fixture.intercept = [](const Request &request) {
+            if (request.path != "/api/v1/mcp/servers") return false;
+            Source::json(request, {{"error", QJsonObject{{"code", "mcp_unavailable"}, {"message", "fixture unavailable"}}}}, 503);
+            return true;
+        };
+        QVERIFY(ui.click("missionMcpRefresh")); QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(!ui.mcp.missionError().isEmpty()); QCOMPARE(ui.mcp.missionChoices().size(), 0);
+        QVERIFY(ui.find("missionMcpAvailability")->property("text").toString().contains("服务暂不可用"));
+        auto *ragChoice = ui.find("missionUseRag"); QVERIFY(ragChoice); QVERIFY(ragChoice->property("checked").toBool());
+        QVERIFY(ui.click(ragChoice)); QVERIFY(!ragChoice->property("checked").toBool());
+        QVERIFY(ui.rag.useForTasks()); // A per-task choice does not rewrite the global default.
+        ui.find("missionRequestInput")->setProperty("text", "Continue with repository tools");
+        ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/repository");
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton")); QTRY_COMPARE(fixture.creates.size(), 1);
+        QVERIFY(fixture.creates.first().value("mcp_server_ids").toArray().isEmpty());
+        QVERIFY(!fixture.creates.first().value("use_rag").toBool());
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.find("missionToolContext")->property("text").toString().contains("MCP：未选择"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void missionToolsFromMainUsesFrozenSelection()
+    {
+        Fixture fixture; Ui ui(fixture);
+        const auto backend = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_URL");
+        const auto serverId = backend.isEmpty() ? McpId : qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_MCP_ID");
+        const auto repository = backend.isEmpty() ? QString("D:/fixture/repository") : qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_REPOSITORY");
+        const auto restoredTask = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_TASK_ID");
+        const auto toolName = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_TOOL_NAME", "lookup");
+        if (!backend.isEmpty()) {
+            QVERIFY(!serverId.isEmpty()); QVERIFY(!repository.isEmpty());
+            ui.tasks.setBaseUrl(QUrl(backend)); ui.missions.setBaseUrl(QUrl(backend));
+        }
+        ui.rag.setUseForTasks(false);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(!ui.mcp.missionLoading(), 15000);
+        QVERIFY2(ui.mcp.missionError().isEmpty(), qPrintable(ui.mcp.missionError()));
+        if (restoredTask.isEmpty()) {
+            if (backend.isEmpty()) QCOMPARE(ui.mcp.missionChoices().size(), 1);
+            auto *choice = ui.find("missionMcpChoice", "serverId", serverId); QVERIFY(choice);
+            QVERIFY(choice->property("text").toString().contains(toolName));
+            QVERIFY(!choice->property("checked").toBool()); QVERIFY(ui.click(choice));
+            auto *rag = ui.find("missionUseRag"); QVERIFY(rag); QVERIFY(!rag->property("checked").toBool()); QVERIFY(ui.click(rag));
+            QVERIFY(!ui.rag.useForTasks());
+            ui.find("missionRequestInput")->setProperty("text", "Inspect selected local tools and current source");
+            ui.find("missionRepositoryInput")->setProperty("text", repository);
+            QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY_WITH_TIMEOUT(ui.missions.creationReady(), 20000);
+            QVERIFY(ui.click("missionCreateButton")); QTRY_VERIFY_WITH_TIMEOUT(!ui.missions.taskId().isEmpty(), 20000);
+            if (backend.isEmpty()) {
+                QCOMPARE(fixture.creates.size(), 1);
+                QCOMPARE(fixture.creates.first().value("mcp_server_ids").toArray(), QJsonArray{serverId});
+                QVERIFY(fixture.creates.first().value("use_rag").toBool());
+            }
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(!ui.missions.historyLoading(), 15000);
+            auto *row = ui.find("missionTaskRow", "taskId", restoredTask); QVERIFY(row); QVERIFY(ui.click(row));
+        }
+        const bool expectedMcpUsed = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_EXPECT_MCP_USED", "1") == "1";
+        QTRY_VERIFY_WITH_TIMEOUT(ui.missions.snapshot().value("tool_context").toMap().value("mcp").toMap().value("used").toBool() == expectedMcpUsed
+            && ui.missions.synchronized(), 30000);
+        if (qEnvironmentVariableIsSet("FORGEPILOT_MISSION_TOOLS_EXPECT_RAG_USED"))
+            QTRY_COMPARE_WITH_TIMEOUT(ui.missions.snapshot().value("tool_context").toMap().value("rag").toMap().value("used").toBool(),
+                qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_EXPECT_RAG_USED") == "1", 30000);
+        const auto snapshot = QJsonObject::fromVariantMap(ui.missions.snapshot());
+        QVERIFY(snapshot.value("use_rag").toBool()); QCOMPARE(snapshot.value("mcp_server_ids").toArray(), QJsonArray{serverId});
+        QVERIFY(snapshot.value("tool_context").toObject().value("rag").toObject().value("requested").toBool());
+        auto *context = ui.find("missionToolContext"); QVERIFY(context); QVERIFY(context->isVisible());
+        QTRY_VERIFY(context->property("text").toString().contains(toolName));
+        if (backend.isEmpty()) {
+            QVERIFY(context->property("text").toString().contains("vector_unavailable"));
+            QVERIFY(context->property("text").toString().contains("clangd_unavailable"));
+            ui.rag.setUseForTasks(false);
+            QVERIFY(ui.missions.snapshot().value("use_rag").toBool());
+            ui.missions.clearSelection(); ui.missions.selectMission(MissionId);
+            QTRY_VERIFY(ui.missions.synchronized());
+            QVERIFY(ui.missions.snapshot().value("use_rag").toBool());
+        }
+        const auto expectedFallback = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_EXPECTED_FALLBACK");
+        if (!expectedFallback.isEmpty()) QTRY_VERIFY(context->property("text").toString().contains(expectedFallback));
+        const auto output = qEnvironmentVariable("FORGEPILOT_MISSION_TOOLS_OUTPUT");
+        if (!output.isEmpty()) {
+            QVERIFY(QDir().mkpath(output)); QFile evidence(output + "/mission-tools-qt-snapshot.json");
+            QVERIFY(evidence.open(QIODevice::WriteOnly)); evidence.write(QJsonDocument(QJsonObject::fromVariantMap(ui.missions.snapshot())).toJson());
+            ui.window->update(); QTest::qWait(80); QVERIFY(ui.window->grabWindow().save(output + "/mission-tools-main.png"));
+        }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void legacyWorkModePreviewsBaselineBeforeCreatingMission()
     {

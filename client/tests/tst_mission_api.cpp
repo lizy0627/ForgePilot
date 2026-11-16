@@ -45,6 +45,29 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void missionToolSelectionIsValidatedAndSent() {
+        const QJsonObject request{{"repository_path", "D:/fixture"}, {"request", "Use selected tools"},
+            {"mcp_server_ids", QJsonArray{B}}, {"use_rag", true}};
+        QVERIFY(MissionProtocol::validRequest("mission.create", request));
+        auto body = request; body["mcp_server_ids"] = QJsonArray{B, B}; QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        body = request; body["mcp_server_ids"] = QJsonArray{"invalid"}; QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        body = request; body["mcp_server_ids"] = B; QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        body = request; body["use_rag"] = "true"; QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        body = request; body["mcp_server_ids"] = QJsonArray{A, B, "10000000-0000-4000-a000-000000000003", "10000000-0000-4000-a000-000000000004", "10000000-0000-4000-a000-000000000005"};
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        Source source; source.handle = [](const Request &r) { Source::json(r, mission(), 202); };
+        AgentApiClient api; api.setBaseUrl(source.url()); QSignalSpy errors(&api, &AgentApiClient::requestError), responses(&api, &AgentApiClient::responseReceived);
+        api.createMission(body); QTRY_COMPARE(errors.size(), 1); QCOMPARE(source.requests.size(), 0);
+        api.createMission(request); QTRY_COMPARE(responses.size(), 1); QCOMPARE(source.requests.first().body, request);
+        const QJsonObject state{{"enabled", true}, {"used", false}, {"fallback_reasons", QJsonArray{}}};
+        auto rag = state; rag["requested"] = true;
+        const QJsonObject context{{"rag", rag}, {"clangd", state}, {"mcp", QJsonObject{{"used", false},
+            {"fallback_reasons", QJsonArray{}}, {"server_ids", QJsonArray{B}},
+            {"servers", QJsonArray{QJsonObject{{"server_id", B}, {"name", "Fixture"}, {"tools", QJsonArray{"lookup"}}}}}}}};
+        auto response = mission(); response["tool_context"] = context; QVERIFY(MissionProtocol::validMission(response));
+        auto malformed = context; rag["used"] = "true"; malformed["rag"] = rag;
+        response["tool_context"] = malformed; QVERIFY(!MissionProtocol::validMission(response));
+    }
     void creationPreviewShowsConcretePresetFailureAndSupportsDisposal() {
         const QJsonObject preview{{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
             {"source_head", QString(40, 'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{"main.cpp"}},

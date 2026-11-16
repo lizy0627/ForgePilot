@@ -28,6 +28,7 @@ class OpenAICompatibleClient:
     _TOOL_CALL_LIMIT = 8
     _ARGUMENTS_LIMIT = 16_384
     supports_stream_diagnostics = True
+    supports_output_token_limit = True
 
     def __init__(self, base_url: str, api_key: str, model: str, *,
                  timeout: float = 60.0,
@@ -76,10 +77,20 @@ class OpenAICompatibleClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def chat(self, messages: list[dict], tools: list[ToolSpec] | None = None) -> ChatReply:
+    def _output_limit(self, requested):
+        if requested is None:
+            return self.max_output_tokens
+        if (type(requested) is not int or not 1 <= requested <= 65_536
+                or self.max_output_tokens is not None and requested > self.max_output_tokens):
+            raise ForgePilotError("llm_config", "Request output limit must not exceed the configured limit")
+        return requested
+
+    async def chat(self, messages: list[dict], tools: list[ToolSpec] | None = None, *,
+                   max_output_tokens: int | None = None) -> ChatReply:
         payload = {"model": self.model, "messages": messages, "stream": False}
-        if self.max_output_tokens is not None:
-            payload["max_tokens"] = self.max_output_tokens
+        output_limit = self._output_limit(max_output_tokens)
+        if output_limit is not None:
+            payload["max_tokens"] = output_limit
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if tools:
@@ -140,13 +151,15 @@ class OpenAICompatibleClient:
     async def stream_chat(self, messages: list[dict],
                           tools: list[ToolSpec] | None = None, *,
                           diagnostics: StreamMetrics | None = None,
-                          model_started: float | None = None) -> AsyncIterator[ChatStreamEvent]:
+                          model_started: float | None = None,
+                          max_output_tokens: int | None = None) -> AsyncIterator[ChatStreamEvent]:
         """Yield validated, provider-neutral deltas from a Chat Completions SSE stream."""
         payload = {"model": self.model, "messages": messages, "stream": True}
         if self.stream_include_usage:
             payload["stream_options"] = {"include_usage": True}
-        if self.max_output_tokens is not None:
-            payload["max_tokens"] = self.max_output_tokens
+        output_limit = self._output_limit(max_output_tokens)
+        if output_limit is not None:
+            payload["max_tokens"] = output_limit
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if tools:

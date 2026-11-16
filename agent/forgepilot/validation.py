@@ -145,6 +145,31 @@ class ValidationService:
             self.workspace._assert_expected(state, current)
             return current
 
+    def compilation_directory(self, task_id):
+        """Expose only the build of a successfully captured execution baseline.
+
+        This read-only grant survives restart and starts no configure/build.
+        Before approval/capture, CodeIntelligence uses existing worktree metadata.
+        """
+        from .compile_database import TrustedCompilationDirectory
+
+        record, root, build = self._paths(task_id)
+        path = task_id + "/integrity.json"
+        if not _exists(self.guard.path(path, missing=True)):
+            return None
+        try:
+            state = json.loads(self.guard.read(path, max_bytes=16_777_216))
+            selection = self._build_selection(task_id, record, root)
+            if (state["version"] != 1 or state["workspace_id"] != record["workspace_id"]
+                    or state["base_ref"] != record["base_ref"]
+                    or state["snapshot"]["ctest_inventory_source"] != "ctest"
+                    or state.get("build_selection_sha256") != (
+                        content_sha256(selection.to_dict()) if selection is not None else None)):
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise ForgePilotError("compile_database_stale", "Approved compilation database belongs to another task baseline") from None
+        return TrustedCompilationDirectory(root, Guard(build))
+
     def bind_build_selection(self, task_id: str, selection: MissionBuildSelection) -> None:
         """Bind once after source-baseline confirmation; restoring never changes frozen options."""
         if not isinstance(selection, MissionBuildSelection):

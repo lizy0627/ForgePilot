@@ -529,6 +529,45 @@
             "title": "Base Ref",
             "type": "string"
           },
+          "baseline_confirmed": {
+            "default": false,
+            "title": "Baseline Confirmed",
+            "type": "boolean"
+          },
+          "baseline_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "title": "Baseline Paths",
+            "type": "array"
+          },
+          "build_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Preset"
+          },
+          "configure_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configure Preset"
+          },
           "language": {
             "default": "zh-CN",
             "maxLength": 12,
@@ -550,6 +589,18 @@
             "default": "multi_agent",
             "title": "Orchestration Mode",
             "type": "string"
+          },
+          "preview_token": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Token"
           },
           "repository_path": {
             "maxLength": 4096,
@@ -573,12 +624,30 @@
             "title": "Task Type",
             "type": "string"
           },
+          "test_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Preset"
+          },
           "toolchain_profile": {
             "default": "auto",
             "maxLength": 128,
             "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
             "title": "Toolchain Profile",
             "type": "string"
+          },
+          "use_rag": {
+            "default": false,
+            "title": "Use Rag",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2650,6 +2719,39 @@
         "title": "MissionNode",
         "type": "object"
       },
+      "MissionPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MissionSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "next_cursor"
+        ],
+        "title": "MissionPage",
+        "type": "object"
+      },
       "MissionRecoveryResponse": {
         "properties": {
           "mission": {
@@ -2680,6 +2782,18 @@
           "base_ref": {
             "title": "Base Ref",
             "type": "string"
+          },
+          "build_selection": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Selection"
           },
           "created_at": {
             "title": "Created At",
@@ -2719,6 +2833,13 @@
             ],
             "title": "Last Event Id"
           },
+          "mcp_server_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mcp Server Ids",
+            "type": "array"
+          },
           "orchestration_mode": {
             "title": "Orchestration Mode",
             "type": "string"
@@ -2745,6 +2866,18 @@
               }
             ]
           },
+          "source_baseline": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Baseline"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -2757,6 +2890,11 @@
             "title": "Task Type",
             "type": "string"
           },
+          "tool_context": {
+            "additionalProperties": true,
+            "title": "Tool Context",
+            "type": "object"
+          },
           "toolchain_profile": {
             "title": "Toolchain Profile",
             "type": "string"
@@ -2764,6 +2902,11 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "use_rag": {
+            "default": false,
+            "title": "Use Rag",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2896,6 +3039,127 @@
         "title": "MissionReview",
         "type": "object"
       },
+      "MissionSourcePreview": {
+        "properties": {
+          "base_commit": {
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "baseline_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Baseline Paths",
+            "type": "array"
+          },
+          "build": {
+            "additionalProperties": true,
+            "title": "Build",
+            "type": "object"
+          },
+          "changed_files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Files",
+            "type": "array"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          },
+          "preview_token": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Preview Token",
+            "type": "string"
+          },
+          "source_head": {
+            "title": "Source Head",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preview_token",
+          "base_commit",
+          "source_head",
+          "baseline_paths",
+          "changed_files",
+          "patch",
+          "build"
+        ],
+        "title": "MissionSourcePreview",
+        "type": "object"
+      },
+      "MissionSummary": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_revision": {
+            "title": "Current Revision",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "orchestration_mode": {
+            "title": "Orchestration Mode",
+            "type": "string"
+          },
+          "recovery_required": {
+            "title": "Recovery Required",
+            "type": "boolean"
+          },
+          "repository_path": {
+            "title": "Repository Path",
+            "type": "string"
+          },
+          "request": {
+            "title": "Request",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          },
+          "task_type": {
+            "title": "Task Type",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "status",
+          "current_revision",
+          "created_at",
+          "updated_at",
+          "finished_at",
+          "repository_path",
+          "request",
+          "task_type",
+          "orchestration_mode",
+          "recovery_required"
+        ],
+        "title": "MissionSummary",
+        "type": "object"
+      },
       "MissionValidation": {
         "properties": {
           "items": {
@@ -2931,6 +3195,22 @@
         "title": "MissionValidation",
         "type": "object"
       },
+      "NodeStatus": {
+        "enum": [
+          "pending",
+          "ready",
+          "running",
+          "awaiting_human",
+          "succeeded",
+          "failed",
+          "interrupted",
+          "retryable",
+          "skipped",
+          "cancelled"
+        ],
+        "title": "NodeStatus",
+        "type": "string"
+      },
       "PlanFeedback": {
         "additionalProperties": false,
         "properties": {
@@ -2951,6 +3231,76 @@
           "feedback"
         ],
         "title": "PlanFeedback",
+        "type": "object"
+      },
+      "PreviewMission": {
+        "additionalProperties": false,
+        "properties": {
+          "base_ref": {
+            "default": "HEAD",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Base Ref",
+            "type": "string"
+          },
+          "baseline_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "title": "Baseline Paths",
+            "type": "array"
+          },
+          "build_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Preset"
+          },
+          "configure_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configure Preset"
+          },
+          "repository_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Repository Path",
+            "type": "string"
+          },
+          "test_preset": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Preset"
+          }
+        },
+        "required": [
+          "repository_path"
+        ],
+        "title": "PreviewMission",
         "type": "object"
       },
       "RagIndexDeleted": {
@@ -8776,6 +9126,188 @@
       }
     },
     "/api/v2/missions": {
+      "get": {
+        "operationId": "list_missions_api_v2_missions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_path",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repository Path"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NodeStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Missions"
+      },
       "post": {
         "operationId": "create_mission_api_v2_missions_post",
         "requestBody": {
@@ -8901,6 +9433,262 @@
           }
         },
         "summary": "Create Mission"
+      }
+    },
+    "/api/v2/missions/preview": {
+      "post": {
+        "operationId": "preview_mission_api_v2_missions_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewMission"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionSourcePreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview Mission"
+      }
+    },
+    "/api/v2/missions/previews/{token}": {
+      "delete": {
+        "operationId": "discard_mission_preview_api_v2_missions_previews__token__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Discard Mission Preview"
       }
     },
     "/api/v2/missions/{task_id}": {

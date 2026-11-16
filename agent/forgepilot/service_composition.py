@@ -41,6 +41,7 @@ class ServerResources:
     def mission_dependencies(
         self, events: SqliteEventStore, *,
         mcp_connection_factory: Callable[[MCPConfig | MCPHttpConfig], MCPClient | MCPHttpClient],
+        rag_manager=None, intelligence_config=None,
     ) -> MissionDependencies:
         config = self.development()
         # Retain the old task-route validation after trusted tool configuration,
@@ -51,6 +52,7 @@ class ServerResources:
             rg_executable=config.rg_executable, git_executable=config.git_executable,
             build_config=config.build_config, redactor=self.redactor,
             mcp_connection_factory=mcp_connection_factory,
+            rag_manager=rag_manager, intelligence_config=intelligence_config,
         )
 
 

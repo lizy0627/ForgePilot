@@ -142,7 +142,8 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                 from .mission_factory import build_mission_workflow
                 app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
                     resources.mission_dependencies(events,
-                        mcp_connection_factory=app.state.task_host.mcp_service.connection_factory),
+                        mcp_connection_factory=app.state.task_host.mcp_service.connection_factory,
+                        rag_manager=rag_manager, intelligence_config=code_intelligence_from_args(args)),
                     oracle_source=args.mission_oracle,
                     cloud_model_allowed=args.mission_allow_cloud_model,
                     mcp_snapshots=mcp_snapshots)

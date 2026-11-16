@@ -312,6 +312,14 @@ class AnalysisService:
                     except TimeoutError:
                         raise ForgePilotError("llm_budget", "Agent time budget exhausted during tools") from None
                     if not result.success:
+                        code = result.error.split(":", 1)[0] if result.error else "tool_error"
+                        if call.function.name.startswith("mcp_") and code in {
+                                "mcp_unavailable", "mcp_timeout", "mcp_disconnected", "mcp_transient",
+                                "mcp_session_expired", "mcp_capacity", "mcp_transport"}:
+                            messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps({
+                                "error_code": code, "available": False,
+                                "next_step": "Use the task repository read/search tools for this optional source."})})
+                            continue
                         raise ForgePilotError("analysis_tool_failed", "Read-only analysis tool failed")
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result.output})
         content = STAGES[stage][1].model_validate_json(response.message.content)
@@ -347,6 +355,11 @@ class AnalysisService:
                 raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud model route")
 
     def _retrieval_for(self, policy):
+        from ..rag.mission import MissionRetrievalService
+        if isinstance(self.retrieval, MissionRetrievalService):
+            if self.retrieval.data_policy != policy:
+                raise ForgePilotError("policy_denied", "Retrieval differs from frozen task data policy")
+            return self.retrieval
         if policy.cloud_model_allowed or self.retrieval is None:
             return self.retrieval
         from ..rag.retrieval import RetrievalService

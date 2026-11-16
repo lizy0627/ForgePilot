@@ -69,6 +69,7 @@ class CreateMission(MissionRequest):
     toolchain_profile: str = Field(default="auto", pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", max_length=128)
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
     mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
+    use_rag: bool = False
     baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
     preview_token: MissionHash | None = None
     baseline_confirmed: bool = False
@@ -192,6 +193,9 @@ class MissionResponse(BaseModel):
     recovery_required: bool
     source_baseline: dict[str, Any] | None = None
     build_selection: dict[str, Any] | None = None
+    use_rag: bool = False
+    mcp_server_ids: list[str] = Field(default_factory=list)
+    tool_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class MissionNode(BaseModel):

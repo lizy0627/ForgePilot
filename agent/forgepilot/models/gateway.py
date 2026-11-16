@@ -299,9 +299,13 @@ class GatewayClient:
         while True:
             if tools and not profile.supports_tool_calling or stream and not profile.supports_streaming:
                 raise ForgePilotError("llm_config", "Model lacks a required request capability")
+            provider = self.gateway._provider(profile)
+            bounded_output = getattr(provider, "supports_output_token_limit", False) is True
             reserved = (input_reservation(messages, tools), profile.max_output_tokens)
             if self.budget is not None:
-                reserved = self.budget.reserve(*reserved)
+                reserve = self.budget.reserve_request if bounded_output else self.budget.reserve
+                reserved = reserve(*reserved)
+            output_options = {"max_output_tokens": reserved[1]} if bounded_output else {}
             started = monotonic()
             reply = None
             assembled = _StreamReply()
@@ -315,9 +319,8 @@ class GatewayClient:
                 if self.budget is not None:
                     timeout = min(timeout, self.budget.remaining_seconds())
                 async with asyncio.timeout(timeout):
-                    provider = self.gateway._provider(profile)
                     if stream:
-                        kwargs = {"tools": deepcopy(tools)}
+                        kwargs = {"tools": deepcopy(tools), **output_options}
                         if getattr(provider, "supports_stream_diagnostics", False):
                             kwargs.update(diagnostics=diagnostics, model_started=model_started)
                         iterator = provider.stream_chat(deepcopy(messages), **kwargs)
@@ -334,7 +337,7 @@ class GatewayClient:
                             await iterator.aclose()
                         reply = assembled.reply()
                     else:
-                        reply = await provider.chat(deepcopy(messages), tools=deepcopy(tools))
+                        reply = await provider.chat(deepcopy(messages), tools=deepcopy(tools), **output_options)
                     reply = _validate_reply(reply, tools, validator)
             except asyncio.CancelledError:
                 status = "cancelled"

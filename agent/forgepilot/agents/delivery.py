@@ -72,6 +72,9 @@ class DeliveryWorkflow(ImplementationService):
             gate = replace(gate, settings={**_plain_json(gate.settings),
                 "source_baseline_hash": content_sha256(self.mission_source_baseline),
                 "build_selection_hash": content_sha256(self.mission_build_selection)})
+        if getattr(self, "mission_tool_selection", None) is not None:
+            gate = replace(gate, settings={**_plain_json(gate.settings),
+                "tool_selection_hash": content_sha256(self.mission_tool_selection)})
         baseline = NodeDefinition("baseline_capture", NodeType.DETERMINISTIC, "baseline_capture.v1",
             dependencies=("execution_approval",), settings={"recovery_role": "deterministic"})
         implementer = replace(implementer, dependencies=("execution_approval", "baseline_capture"),
@@ -101,7 +104,8 @@ class DeliveryWorkflow(ImplementationService):
         nodes.append(NodeDefinition("delivery_bundle", NodeType.DELIVERY, "delivery_bundle.v1",
             dependencies=("execution_approval", *reviews), settings={"recovery_role": "deterministic"}))
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
-        version = 3 if getattr(self, "mission_source_baseline", None) is not None else 2
+        version = (4 if getattr(self, "mission_tool_selection", None) is not None else
+                   3 if getattr(self, "mission_source_baseline", None) is not None else 2)
         return GraphDefinition(f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
@@ -119,9 +123,9 @@ class DeliveryWorkflow(ImplementationService):
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
                 "(请重新创建任务并审批执行方案)")
-        if graph.graph_id in {"validated-delivery.v2", "validated-delivery.v3"}:
+        if graph.graph_id in {"validated-delivery.v2", "validated-delivery.v3", "validated-delivery.v4"}:
             expected = self.graph()
-        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery-locked.v2"}:
+        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None

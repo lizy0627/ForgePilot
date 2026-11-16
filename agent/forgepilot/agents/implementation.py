@@ -406,8 +406,14 @@ class ImplementationService:
         budget = self._budgets[key]
         # The factory is host-owned and receives the task Worktree, never a main
         # checkout. Cloud-disabled tasks do not invoke an unknown RAG adapter.
-        retrieval = (self.retrieval_factory(repository) if self.retrieval_factory
-                     and spec.content.data_policy.cloud_model_allowed else None)
+        retrieval = None
+        if self.retrieval_factory and (spec.content.data_policy.cloud_model_allowed
+                                     or getattr(self, "mission_tool_selection", None) is not None):
+            retrieval = self.retrieval_factory(repository)
+            if not spec.content.data_policy.cloud_model_allowed:
+                from ..rag.mission import MissionRetrievalService
+                if not isinstance(retrieval, MissionRetrievalService) or retrieval.data_policy != spec.content.data_policy:
+                    raise ForgePilotError("policy_denied", "Retrieval differs from frozen task data policy")
         controlled = ImplementationTools(repository, spec, plan,
             capabilities=definition.capabilities, approved_test_paths=approved_tests,
             retrieval=retrieval, redactor=self.gateway.redactor,

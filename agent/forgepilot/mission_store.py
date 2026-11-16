@@ -430,6 +430,22 @@ class MissionRepository:
                 raise ForgePilotError("unknown_mission", "Mission does not exist")
             return json.loads(row[0])
 
+    def tool_context(self, task_id, metadata):
+        """Read durable capability observations without starting services or tools."""
+        context = {key: dict(value) for key, value in metadata.get("tool_context", {}).items()}
+        with self.events._lock:
+            for component in ("rag", "clangd", "mcp"):
+                row = self.events._db.execute("SELECT payload_json FROM graph_events WHERE task_id=? "
+                    "AND event_type='task.tools_updated' AND json_extract(payload_json,'$.component')=? "
+                    "ORDER BY sequence DESC LIMIT 1", (task_id, component)).fetchone()
+                if row:
+                    context.setdefault(component, {}).update(json.loads(row[0])["status"])
+                    context[component]["used"] = bool(self.events._db.execute(
+                        "SELECT 1 FROM graph_events WHERE task_id=? AND event_type='task.tools_updated' "
+                        "AND json_extract(payload_json,'$.component')=? "
+                        "AND json_extract(payload_json,'$.status.used')=1 LIMIT 1", (task_id, component)).fetchone())
+        return context
+
     def list_page(self, limit: int = 20, before: str | None = None, *,
                   repository_path: str | None = None, status: str | None = None) -> dict[str, Any]:
         """Read admitted Missions in immutable creation order, without resuming them."""

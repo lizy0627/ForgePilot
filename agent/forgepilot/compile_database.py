@@ -11,15 +11,42 @@ from .build_process import build_environment
 from .errors import ForgePilotError
 from .presets import Presets, safe_build_path
 from .repository import is_link, opened_path
+from .path_identity import path_within, same_path
+from .workspace_safety import Guard
 
 MAX_DATABASE_BYTES = 4_194_304
 MAX_ENTRIES = 10_000
 CPP_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++", ".c", ".h", ".hh", ".hpp", ".hxx"}
 
 
-def metadata(repository, directory, name):
+@dataclass(frozen=True)
+class TrustedCompilationDirectory:
+    """Host grant for one approved Validator build, never a request/model path."""
+
+    source_root: Path
+    guard: Guard
+
+    @property
+    def path(self) -> Path:
+        return self.guard.check()
+
+
+def metadata(repository, directory, name, *, trusted=None):
     repository._path(".")
     directory = Path(directory)
+    if trusted is not None:
+        if not same_path(repository.root, trusted.source_root) or not same_path(directory, trusted.path):
+            raise ForgePilotError("compile_database_boundary", "Compilation database grant belongs to another task")
+        try:
+            (directory / name).lstat()
+            path = trusted.guard.path(name)
+            if path.stat().st_nlink != 1:
+                raise ForgePilotError("compile_database_boundary", "Build metadata contains a hard link")
+            return trusted.guard.read(name, max_bytes=MAX_DATABASE_BYTES).decode("utf-8-sig")
+        except FileNotFoundError:
+            raise ForgePilotError("compile_database_missing", "No existing compilation database in this task build") from None
+        except UnicodeError:
+            raise ForgePilotError("compile_database_invalid", "Cannot decode build metadata") from None
     if directory != repository.root:
         directory = safe_build_path(repository.root, str(directory))
     path = directory / name
@@ -108,15 +135,50 @@ class CompilationDatabase:
     generator: str | None
 
 
+def _trusted_command_paths(entry, args, cwd, source, trusted):
+    """CMake command inputs stay on this source; outputs stay on its build."""
+    def absolute(value):
+        path = Path(value)
+        return Path(os.path.abspath(path if path.is_absolute() else cwd / path))
+
+    if "output" in entry and not isinstance(entry["output"], str):
+        raise ForgePilotError("compile_database_invalid", "Invalid compilation output path")
+    outputs = [entry["output"]] if "output" in entry else []
+    for index, value in enumerate(args[1:], 1):
+        lower = value.casefold()
+        if lower in {"-c", "/c"} and index + 1 < len(args):
+            if not same_path(absolute(args[index + 1]), source):
+                raise ForgePilotError("compile_database_stale", "Compilation command belongs to another source file")
+        if value in {"-o", "-MF", "-MJ", "--output"}:
+            if index + 1 >= len(args):
+                raise ForgePilotError("compile_database_invalid", "Compilation output path is missing")
+            outputs.append(args[index + 1])
+        elif lower.startswith(("/fo", "/fd", "/fa", "/fe")):
+            output = value[3:]
+            if not output and index + 1 < len(args):
+                output = args[index + 1]
+            outputs.append(output)
+        elif value.startswith("--output="):
+            outputs.append(value.split("=", 1)[1])
+        elif value.startswith(("-o", "-MF", "-MJ")):
+            outputs.append(value[2:] if value.startswith("-o") else value[3:])
+    for output in outputs:
+        path = absolute(output)
+        if not output or not path_within(path, trusted.path):
+            raise ForgePilotError("compile_database_boundary", "Compilation output belongs to another build directory")
+        trusted.guard.path(path.relative_to(trusted.path).as_posix(), missing=True)
+
+
 def load_database(repository, directory):
-    directory = Path(directory)
+    trusted = directory if isinstance(directory, TrustedCompilationDirectory) else None
+    directory = trusted.path if trusted is not None else Path(directory)
     if not directory.is_absolute():
         directory = repository.root / directory
-    if directory != repository.root:
+    if trusted is None and directory != repository.root:
         directory = safe_build_path(repository.root, str(directory))
     cache = {}
-    if (directory / "CMakeCache.txt").exists() or (directory / "CMakeCache.txt").is_symlink():
-        for line in metadata(repository, directory, "CMakeCache.txt").splitlines():
+    if trusted is not None or (directory / "CMakeCache.txt").exists() or (directory / "CMakeCache.txt").is_symlink():
+        for line in metadata(repository, directory, "CMakeCache.txt", trusted=trusted).splitlines():
             if not line.startswith(("#", "//")) and ":" in line and "=" in line:
                 key, value = line.split("=", 1)
                 cache[key.split(":", 1)[0]] = value
@@ -127,7 +189,7 @@ def load_database(repository, directory):
         if generator and "Ninja" not in generator and "Makefiles" not in generator:
             raise ForgePilotError("compile_database_generator", "This generator does not export compile_commands.json; use an explicitly configured separate Ninja analysis directory")
     try:
-        raw = json.loads(metadata(repository, directory, "compile_commands.json"))
+        raw = json.loads(metadata(repository, directory, "compile_commands.json", trusted=trusted))
         if not isinstance(raw, list) or not raw or len(raw) > MAX_ENTRIES:
             raise ValueError()
         entries, files, omitted = [], [], 0
@@ -137,7 +199,11 @@ def load_database(repository, directory):
             cwd = Path(entry["directory"])
             if not cwd.is_absolute():
                 raise ValueError()
-            if cwd != repository.root:
+            if trusted is not None and not same_path(cwd, repository.root):
+                if not path_within(cwd, directory):
+                    raise ForgePilotError("compile_database_boundary", "Compilation command belongs to another build directory")
+                trusted.guard.path(cwd.relative_to(directory).as_posix() if cwd != directory else ".")
+            elif cwd != repository.root:
                 safe_build_path(repository.root, str(cwd))
             path = Path(entry["file"])
             if not path.is_absolute():
@@ -154,6 +220,8 @@ def load_database(repository, directory):
                 omitted += 1
                 continue
             args = checked_arguments(entry)
+            if trusted is not None:
+                _trusted_command_paths(entry, args, cwd, path, trusted)
             if relative not in files:
                 files.append(relative)
                 entries.append({"directory": str(cwd), "file": str(path), "arguments": args})
@@ -167,6 +235,8 @@ def load_database(repository, directory):
 
 
 def locate_database(repository, *, configured=None, selected=None):
+    if isinstance(selected, TrustedCompilationDirectory):
+        return load_database(repository, selected)
     if configured:
         return load_database(repository, configured)
     if selected:

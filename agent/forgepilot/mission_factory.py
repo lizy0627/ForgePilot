@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from .errors import ForgePilotError
 
 if TYPE_CHECKING:
+    from .code_intelligence import CodeIntelligenceConfig
+    from .rag.integration import RagManager
     from .agents.delivery import DeliveryWorkflow
     from .mcp import MCPClient
     from .mcp_config import MCPConfig, MCPHttpConfig
@@ -30,6 +32,8 @@ class MissionDependencies:
     build_config: BuildConfig | None
     redactor: Redactor
     mcp_connection_factory: Callable[[MCPConfig | MCPHttpConfig], MCPClient | MCPHttpClient]
+    rag_manager: RagManager | None = None
+    intelligence_config: CodeIntelligenceConfig | None = None
 
 
 def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=None, cloud_model_allowed=False,
@@ -92,6 +96,8 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
     workflow = DeliveryWorkflow(events, workspace, gateway, validator=validator,
                                 rg_executable=dependencies.rg_executable,
                                 analysis_kwargs=analysis_kwargs)
+    workflow.mission_rag_manager = dependencies.rag_manager
+    workflow.mission_intelligence_config = dependencies.intelligence_config
     workflow.mission_mcp_manager = mcp_manager
     workflow.mission_build_config = config
     workflow.mission_data_policy = DataPolicy(cloud_model_allowed=cloud_model_allowed,

@@ -137,10 +137,28 @@ class ModelBudget:
         return remaining
 
     def reserve(self, input_tokens: int, output_tokens: int) -> tuple[int, int]:
+        return self._reserve(input_tokens, output_tokens, cap_output=False)
+
+    def reserve_request(self, input_tokens: int, output_tokens: int) -> tuple[int, int]:
+        """Reserve a request whose provider enforces the returned output cap.
+
+        The configured response limit must fit the whole node budget. Later
+        requests may use its remaining output allowance, atomically with all
+        other reservations on this budget.
+        """
+        return self._reserve(input_tokens, output_tokens, cap_output=True)
+
+    def _reserve(self, input_tokens: int, output_tokens: int, *, cap_output: bool) -> tuple[int, int]:
         if any(type(v) is not int or v < 0 for v in (input_tokens, output_tokens)):
             raise ValueError("Invalid budget reservation")
         with self._lock:
             self.remaining_seconds()
+            if cap_output:
+                if output_tokens > self.max_output_tokens:
+                    raise ForgePilotError("llm_budget", "Configured response limit exceeds the node token budget")
+                output_tokens = min(output_tokens, self.max_output_tokens - self.output_tokens)
+                if output_tokens <= 0:
+                    raise ForgePilotError("llm_budget", "Agent output token budget exhausted")
             if (self.model_calls >= self.max_model_calls
                     or self.input_tokens + input_tokens > self.max_input_tokens
                     or self.output_tokens + output_tokens > self.max_output_tokens):

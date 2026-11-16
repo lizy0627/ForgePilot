@@ -71,11 +71,27 @@ def identifier(text, line, column):
 
 
 class CodeIntelligence:
-    def __init__(self, repository, config=None, *, selected_directory=lambda: None, client_factory=LspClient):
+    def __init__(self, repository, config=None, *, selected_directory=lambda: None, client_factory=LspClient,
+                 on_status=None):
         self.repository = repository
         self.config = config or CodeIntelligenceConfig()
         self.selected_directory = selected_directory
         self.client_factory = client_factory
+        self.on_status = on_status
+
+    def availability(self):
+        """Inspect local metadata/tools without starting clangd or a build."""
+        try:
+            locate_database(self.repository, configured=self.config.compile_commands_dir,
+                            selected=self.selected_directory())
+            try:
+                executable(self.config.clangd, "clangd")
+            except ForgePilotError:
+                raise ForgePilotError("clangd_unavailable", "clangd executable is unavailable") from None
+        except (ForgePilotError, OSError) as exc:
+            reason = exc.code if isinstance(exc, ForgePilotError) else "clangd_unavailable"
+            return {"enabled": True, "used": False, "fallback_reasons": [reason]}
+        return {"enabled": True, "used": False, "fallback_reasons": []}
 
     async def query(self, operation, *, path, line, column, max_results=50, include_declaration=False):
         file = self.repository._path(path)
@@ -108,6 +124,9 @@ class CodeIntelligence:
             result["truncated"] = True
             if "output_limit" not in result["limits"]:
                 result["limits"].append("output_limit")
+        if self.on_status is not None:
+            self.on_status({"enabled": True, "used": result["semantic"],
+                            "fallback_reasons": [result["fallback_reason"]] if result.get("fallback_reason") else []})
         return json.dumps(result, ensure_ascii=False)
 
     async def _semantic(self, operation, file, text, cursor, max_results, include_declaration):
@@ -159,7 +178,10 @@ class CodeIntelligence:
                 if any(client.diagnostics.values()):
                     raise ForgePilotError("clangd_diagnostics", "Parse errors prevent reliable semantic inspection")
                 result = self._locations(response, snapshots, max_results)
-                result.update(source="clangd", semantic=True, compilation_database=database.path.relative_to(self.repository.root).as_posix(),
+                database_label = (database.path.relative_to(self.repository.root).as_posix()
+                                  if database.path.is_relative_to(self.repository.root)
+                                  else "<approved-task-build>/compile_commands.json")
+                result.update(source="clangd", semantic=True, compilation_database=database_label,
                     generator=database.generator, synchronized_files=list(snapshots), synchronized_file_count=len(snapshots), omitted_translation_units=omitted,
                     diagnostics_have_errors=any(client.diagnostics.values()), complete=False,
                     limitations=["Bounded dynamic index of synchronized translation units and included headers; not exhaustive project/template references.",

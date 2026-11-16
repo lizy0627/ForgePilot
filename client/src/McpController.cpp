@@ -63,6 +63,10 @@ const QMap<QString,QString> &errorMessages()
 McpController::McpController(TaskController *tasks) : QObject(tasks), m_tasks(tasks)
 {
     connect(tasks, &TaskController::baseUrlChanged, this, [this] {
+        ++m_missionGeneration;
+        const auto replies = m_missionReplies; m_missionReplies.clear();
+        for (auto *reply : replies) reply->abort();
+        m_missionChoices.clear(); m_missionLoading = false; m_missionError.clear(); emit missionChoicesChanged();
         const bool reopen = m_open;
         m_pending.reset(); m_resolving=false; m_state="editing";
         close();
@@ -102,6 +106,69 @@ void McpController::abort(bool editor)
     auto &replies=editor?m_editorReplies:m_pageReplies;
     const auto copy=replies; replies.clear();
     for(auto *reply:copy) reply->abort();
+}
+void McpController::missionRequest(const QString &path, std::function<void(const Response &)> callback)
+{
+    const auto generation = m_missionGeneration;
+    const QUrl url(m_tasks->baseUrl().toString().remove(QRegularExpression("/$")) + "/api/v1/mcp" + path);
+    auto *reply = JsonHttp::send(m_network, this, "GET", url, {}, 512 * 1024,
+        [=, this](QNetworkReply *reply, const Response &response) {
+            m_missionReplies.remove(reply);
+            if (generation == m_missionGeneration) callback(response);
+        });
+    m_missionReplies.insert(reply);
+}
+void McpController::refreshMissionChoices()
+{
+    ++m_missionGeneration;
+    const auto replies = m_missionReplies; m_missionReplies.clear();
+    for (auto *reply : replies) reply->abort();
+    m_missionChoices.clear(); m_missionError.clear(); m_missionLoading = true;
+    emit missionChoicesChanged();
+    missionRequest("/servers", [this](const Response &response) {
+        if (!ok(response) || !response.body.value("items").isArray() || !response.body.value("disabled").isBool()) {
+            m_missionLoading = false; m_missionError = failure(response); emit missionChoicesChanged(); return;
+        }
+        if (response.body.value("disabled").toBool()) {
+            m_missionLoading = false; m_missionError = "后端已禁用 MCP；本次任务仍可使用文件检索。";
+            emit missionChoicesChanged(); return;
+        }
+        QJsonArray servers;
+        for (const auto &value : response.body.value("items").toArray()) {
+            const auto server = value.toObject();
+            if (Protocol::validTaskId(server.value("server_id").toString()) && server.value("enabled").toBool()
+                && server.value("selected_tool_count").toInt() > 0) servers.append(server);
+        }
+        m_missionPending = servers.size();
+        if (!m_missionPending) { m_missionLoading = false; emit missionChoicesChanged(); return; }
+        for (const auto &value : servers) {
+            const auto server = value.toObject();
+            missionRequest("/servers/" + server.value("server_id").toString(), [this, server](const Response &detail) {
+                if (!ok(detail)) m_missionError = failure(detail);
+                else {
+                    const auto body = detail.body;
+                    const auto selected = body.value("selected_tools").toArray();
+                    QSet<QString> compatible;
+                    for (const auto &tool : body.value("tools").toArray()) {
+                        const auto entry = tool.toObject();
+                        const auto annotations = entry.value("annotations").toObject();
+                        if (entry.value("compatible") == QJsonValue(true) && annotations.value("readOnlyHint") == QJsonValue(true)
+                            && (!annotations.contains("destructiveHint") || annotations.value("destructiveHint") == QJsonValue(false)))
+                            compatible.insert(entry.value("name").toString());
+                    }
+                    QStringList names;
+                    for (const auto &tool : selected) if (tool.isString() && compatible.contains(tool.toString())) names.append(tool.toString());
+                    if (body.value("server_id") == server.value("server_id") && body.value("revision") == server.value("revision")
+                        && body.value("enabled").toBool() && body.value("effect") == "read"
+                        && body.value("modes").toArray().contains("task") && !names.isEmpty() && names.size() == selected.size())
+                        m_missionChoices.append(QVariantMap{{"server_id", body.value("server_id").toString()},
+                            {"name", body.value("name").toString()}, {"tools", names}});
+                }
+                if (!--m_missionPending) m_missionLoading = false;
+                emit missionChoicesChanged();
+            });
+        }
+    });
 }
 void McpController::open() { if(m_open) return; m_open=true; refresh(); }
 void McpController::close()

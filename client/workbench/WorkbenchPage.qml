@@ -9,6 +9,8 @@ Item {
     id: root
     objectName: "agentWorkbenchPage"
     required property var mission
+    property var mcp: null
+    property var rag: null
     property string conversionRequest: ""
     property string conversionSource: ""
     property string conversionRepository: ""
@@ -35,7 +37,8 @@ Item {
     property string currentTaskId: ""
     RowLayout {
         anchors.fill: parent; spacing: 0
-        TaskCenter { mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository; Layout.preferredWidth: 244; Layout.fillHeight: true }
+        TaskCenter { mission: root.mission
+            mcp: root.mcp; rag: root.rag; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository; Layout.preferredWidth: 244; Layout.fillHeight: true }
         ScrollView {
             id: centerScroll; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             ScrollBar.vertical: Controls.AppScrollBar {}

@@ -79,6 +79,9 @@ async def tool_call(events, context, registry, name, arguments):
         if isinstance(observed_arguments, dict) and isinstance(observed_arguments.get("path"), str):
             data["path"] = observed_arguments["path"][:4096]
         _emit(events, context, "tool.completed", data)
+        if name.startswith("mcp_"):
+            _emit(events, context, "task.tools_updated", {"component": "mcp", "status": {
+                "used": result.success, "fallback_reasons": [] if result.success else [error_code or "mcp_unavailable"]}})
         if not result.success and data["error_code"] in {
                 "policy_denied", "path_escape", "file_denied", "scope_approval_required", "test_approval_required"}:
             events.missions.record_security_event(

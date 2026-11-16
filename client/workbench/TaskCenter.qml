@@ -9,6 +9,10 @@ import "WorkbenchUi.js" as W
 Rectangle {
     id: root
     required property var mission
+    property var mcp: null
+    property var rag: null
+    property bool ragRequested: rag ? rag.useForTasks : false
+    property var selectedMcpIds: []
     property string seedRequest: ""
     property string selectedContext: ""
     property string seedRepository: ""
@@ -28,19 +32,33 @@ Rectangle {
         result.task_type = ["auto", "bug_fix", "feature"][kind.currentIndex]
         result.preview_token = root.mission.creationPreview.preview_token
         result.baseline_confirmed = baselineConfirmation.checked
+        result.mcp_server_ids = root.selectedMcpIds
+        result.use_rag = useRag.checked
         root.mission.createMission(result)
     }
     Connections {
         target: root.mission
         function onCreationChanged() { if (baselineConfirmation && !root.mission.creationReady) baselineConfirmation.checked = false }
     }
+    Connections {
+        target: root.mcp
+        function onMissionChoicesChanged() { if (root.mcp.missionLoading || !root.mcp.missionChoices.length) root.selectedMcpIds = [] }
+    }
     color: Theme.sidebar
     implicitWidth: 244
-    Component.onCompleted: { if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions() }
+    Component.onCompleted: {
+        if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions()
+        if (mcp) mcp.refreshMissionChoices()
+    }
     onSeedRequestChanged: { if (seedRequest) requestInput.text = seedRequest }
     FolderDialog { id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog; onAccepted: repositoryInput.text = root.mission.localPath(selectedFolder) }
-    ColumnLayout {
-        anchors.fill: parent; anchors.margins: 12; spacing: 10
+    Controls.AppScrollView {
+        id: sidebarScroll; objectName: "missionTaskCenterScroll"
+        anchors.fill: parent; clip: true; contentWidth: availableWidth
+        contentHeight: sidebarLayout.implicitHeight + 24
+        ColumnLayout {
+        id: sidebarLayout; x: 12; y: 12
+        width: Math.max(0, sidebarScroll.availableWidth - 24); spacing: 10
         Label { text: "任务中心"; font.pixelSize: 17; font.weight: Font.DemiBold }
         Label { text: root.selectedContext || "创建任务仅使用下方文本与仓库路径。"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 11 }
         TextArea { id: requestInput; objectName: "missionRequestInput"; Layout.fillWidth: true; Layout.preferredHeight: 94; wrapMode: TextEdit.Wrap; placeholderText: "描述 Agent 任务"; textFormat: TextEdit.PlainText }
@@ -101,7 +119,8 @@ Rectangle {
                 : root.mission.historyError ? "读取失败，请刷新重试。" : "暂无符合条件的任务。"
         }
         ListView {
-            id: taskList; objectName: "missionTaskList"; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+            id: taskList; objectName: "missionTaskList"; Layout.fillWidth: true; clip: true
+            Layout.preferredHeight: Math.min(260, Math.max(100, contentHeight + 8))
             model: root.mission.missions; spacing: 5
             delegate: Controls.ActionButton {
                 required property var record
@@ -117,6 +136,53 @@ Rectangle {
                 }
             }
             ScrollBar.vertical: Controls.AppScrollBar {}
+        }
+        CheckBox {
+            id: useRag; objectName: "missionUseRag"; text: "本次任务使用代码索引（RAG）"
+            Layout.fillWidth: true; checked: root.ragRequested
+            onToggled: root.ragRequested = checked
+        }
+        Label {
+            text: "代码索引仅提供候选，任务会复核当前源码；不可用时退回文件检索。"
+            color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
+            font.pixelSize: 12
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "本次 MCP 只读工具"; color: Theme.secondary; Layout.fillWidth: true }
+            Controls.ActionButton {
+                objectName: "missionMcpRefresh"; text: "刷新"; flat: true
+                enabled: !!root.mcp && !root.mcp.missionLoading
+                onClicked: root.mcp.refreshMissionChoices()
+            }
+        }
+        Label {
+            objectName: "missionMcpAvailability"; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
+            text: !root.mcp ? "MCP 控制器不可用，仍可使用文件检索。"
+                : root.mcp.missionLoading ? "正在读取已保存的工具配置…"
+                : root.mcp.missionError || (!root.mcp.missionChoices.length ? "没有已配置的兼容任务只读工具。" : "仅本次勾选的服务可被 Analyst 使用，最多 4 个。")
+            color: root.mcp && root.mcp.missionError ? Theme.warning : Theme.secondary
+            font.pixelSize: 12
+        }
+        Repeater {
+            model: root.mcp ? root.mcp.missionChoices : []
+            delegate: CheckBox {
+                id: mcpChoice; objectName: "missionMcpChoice"; required property var modelData
+                property string serverId: modelData.server_id
+                Layout.fillWidth: true; text: modelData.name + " · " + modelData.tools.join("、")
+                checked: root.selectedMcpIds.indexOf(serverId) >= 0
+                enabled: !root.mcp.missionLoading && (checked || root.selectedMcpIds.length < 4)
+                contentItem: Label {
+                    text: mcpChoice.text; textFormat: Text.PlainText; color: Theme.text
+                    wrapMode: Text.WrapAnywhere; leftPadding: mcpChoice.indicator.width + mcpChoice.spacing
+                }
+                onToggled: {
+                    var ids = root.selectedMcpIds.slice()
+                    if (checked) ids.push(serverId)
+                    else ids = ids.filter(function(id) { return id !== mcpChoice.serverId })
+                    root.selectedMcpIds = ids
+                }
+            }
         }
         Label {
             objectName: "missionBaselineSummary"; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
@@ -206,5 +272,6 @@ Rectangle {
             Layout.fillWidth: true; onClicked: root.mission.loadMoreMissions()
         }
         Label { text: "打开历史只查看状态；中断任务需确认恢复计划后才能继续。"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 10; color: Theme.muted }
+        }
     }
 }

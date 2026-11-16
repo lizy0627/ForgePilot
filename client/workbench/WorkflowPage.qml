@@ -10,6 +10,8 @@ Item {
     id: root
     objectName: "workflowPage"
     required property var mission
+    property var mcp: null
+    property var rag: null
     property string conversionRequest: ""
     property string conversionSource: ""
     property string conversionRepository: ""
@@ -32,6 +34,28 @@ Item {
     }
     readonly property bool needsAttention: hasTask && (mission.status === "awaiting_human" || mission.status === "interrupted"
         || mission.status === "failed" || mission.snapshot.recovery_required || nodeRecords.some(function(n) { return ["retryable", "interrupted", "failed"].indexOf(n.status) >= 0 }))
+    function fallbackText(reasons) {
+        var labels = {embedding_unavailable: "Embedding 未配置或不可用", embedding_failed: "Embedding 查询失败",
+            embedding_policy_denied: "任务未授权 Embedding 数据外发", vector_unavailable: "向量检索不可用",
+            index_missing: "主仓尚未建立索引", index_stale: "索引已过期，已退回当前源码检索",
+            stale_candidates: "索引候选与任务源码不一致", clangd_unavailable: "clangd 不可用",
+            compile_database_missing: "缺少归属正确的编译数据库", compilation_database_missing: "缺少归属正确的编译数据库",
+            mcp_unavailable: "选定 MCP 服务不可用", mcp_disconnected: "选定 MCP 服务已断开", mcp_timeout: "MCP 调用超时"}
+        return reasons.map(function(reason) { return labels[reason] ? labels[reason] + "（" + reason + "）" : reason }).join("、")
+    }
+    function toolSummary() {
+        var context = root.mission.snapshot.tool_context
+        if (!context) return "此历史任务未记录工具选择。"
+        var ragState = context.rag || {}, clangdState = context.clangd || {}, mcpState = context.mcp || {}
+        var parts = ["RAG：" + (!ragState.requested ? "未请求" : ragState.used ? "已使用" : ragState.enabled ? "已请求，尚未使用" : "已请求，当前不可用")]
+        if ((ragState.fallback_reasons || []).length) parts.push("RAG 降级：" + fallbackText(ragState.fallback_reasons))
+        parts.push("clangd：" + (clangdState.used ? "已使用" : (clangdState.fallback_reasons || []).length ? "文本检索" : clangdState.enabled ? "已启用，尚未使用" : "文本检索"))
+        if ((clangdState.fallback_reasons || []).length) parts.push("clangd 降级：" + fallbackText(clangdState.fallback_reasons))
+        var servers = mcpState.servers || []
+        parts.push("MCP：" + (!servers.length ? "未选择" : (mcpState.used ? "已调用 " : "已选 ") + servers.map(function(server) { return server.name + " [" + (server.tools || []).join("、") + "]" }).join("；")))
+        if ((mcpState.fallback_reasons || []).length) parts.push("MCP 降级：" + fallbackText(mcpState.fallback_reasons))
+        return parts.join("\n")
+    }
     function refreshView() {
         if (currentTaskId !== mission.taskId) {
             currentTaskId = mission.taskId
@@ -129,6 +153,17 @@ Item {
                     textFormat: Text.PlainText; color: Theme.secondary
                     font.pixelSize: Theme.fontSizeSm; wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
                 }
+                Label {
+                    id: toolPreview; objectName: "missionToolContext"; visible: root.hasTask; Layout.fillWidth: true
+                    text: root.toolSummary(); textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                    maximumLineCount: 6; elide: Text.ElideRight
+                    color: Theme.secondary; font.pixelSize: Theme.fontSizeSm
+                }
+                Controls.LongText {
+                    objectName: "missionToolContextFull"; visible: root.hasTask && toolPreview.truncated
+                    Layout.fillWidth: true; title: "本次检索与 MCP 工具"; text: toolPreview.text
+                    monospace: false; maximumHeight: 150
+                }
             }
         }
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
@@ -153,7 +188,7 @@ Item {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: 0
             TaskCenter {
                 id: taskCenter
-                mission: root.mission; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository
+                mission: root.mission; mcp: root.mcp; rag: root.rag; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository
                 visible: !root.demandCollapsed
                 Layout.preferredWidth: root.hasTask ? 300 : Math.min(420, root.width * 0.48)
                 Layout.fillWidth: !root.hasTask && root.compactLayout

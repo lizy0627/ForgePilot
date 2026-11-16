@@ -169,13 +169,20 @@ class _Candidate:
 
 
 @dataclass(frozen=True, slots=True)
-class _SourceOutcome:
+class RetrievalSourceOutcome:
+    """Result contract for a bounded literal, vector, or semantic source."""
+
     source: Literal["literal", "vector", "clangd"]
     status: Literal["available", "unavailable", "failed", "not_applicable"]
     candidates: tuple[_Candidate, ...] = ()
     reason: str | None = None
     stale_count: int = 0
     stale_paths: tuple[str, ...] = ()
+
+
+# Existing retrieval internals keep their original name; adapters use the
+# explicit public result contract above.
+_SourceOutcome = RetrievalSourceOutcome
 
 
 class RetrievalService:
@@ -383,6 +390,8 @@ class RetrievalService:
                     continue
                 content = self._line_content(snapshot[0], chunk.start_line, chunk.end_line)
                 if content is None:
+                    stale_count += 1
+                    stale_paths.append(chunk.path)
                     continue
                 rank = len(candidates) + 1
                 candidates.append(_Candidate(

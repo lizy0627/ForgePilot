@@ -20,6 +20,38 @@ bool strings(const QJsonValue &v) {
     for (const auto &item : v.toArray()) if (!text(item)) return false;
     return true;
 }
+bool serverIds(const QJsonValue &value) {
+    if (!value.isArray() || value.toArray().size() > 4) return false;
+    QSet<QString> ids;
+    for (const auto &entry : value.toArray()) {
+        if (!entry.isString() || !MissionProtocol::validId(entry.toString()) || ids.contains(entry.toString())) return false;
+        ids.insert(entry.toString());
+    }
+    return true;
+}
+bool toolContext(const QJsonValue &value) {
+    if (!value.isObject()) return false;
+    const auto context = value.toObject();
+    for (const auto &name : {"rag", "clangd", "mcp"}) {
+        if (!context.value(name).isObject()) return false;
+        const auto state = context.value(name).toObject();
+        if (!state.value("used").isBool() || !strings(state.value("fallback_reasons"))) return false;
+        if (QString(name) != "mcp" && !state.value("enabled").isBool()) return false;
+        if (QString(name) == "rag" && !state.value("requested").isBool()) return false;
+    }
+    const auto mcp = context.value("mcp").toObject();
+    if (!serverIds(mcp.value("server_ids")) || !mcp.value("servers").isArray()) return false;
+    QSet<QString> seen;
+    for (const auto &value : mcp.value("servers").toArray()) {
+        if (!value.isObject()) return false;
+        const auto server = value.toObject();
+        const auto id = server.value("server_id").toString();
+        if (!mcp.value("server_ids").toArray().contains(id) || seen.contains(id)
+            || !text(server.value("name")) || !strings(server.value("tools"))) return false;
+        seen.insert(id);
+    }
+    return seen.size() == mcp.value("server_ids").toArray().size();
+}
 bool objects(const QJsonValue &v) {
     if (!v.isArray()) return false;
     for (const auto &item : v.toArray()) if (!item.isObject()) return false;
@@ -257,6 +289,8 @@ bool MissionProtocol::validMission(const QJsonObject &o) {
         || !o.value("recovery_required").isBool() || !review(o.value("review"), id, o.value("current_revision").toInteger())) return false;
     for (const auto &key : {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile"})
         if (!text(o.value(key))) return false;
+    if (!optional(o, "use_rag", [](const QJsonValue &v) { return v.isBool(); })
+        || !optional(o, "mcp_server_ids", serverIds) || !optional(o, "tool_context", toolContext)) return false;
     return o.value("last_event_id").isNull() || (o.value("last_event_id").isString() && Protocol::sequence(o.value("last_event_id").toString(), id) > 0);
 }
 bool MissionProtocol::validMissionPage(const QJsonObject &o) {
@@ -375,8 +409,10 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
     if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
-            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed"})
+            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag"})
         && text(o.value("repository_path")) && text(o.value("request"))
+        && (!o.contains("mcp_server_ids") || serverIds(o.value("mcp_server_ids")))
+        && (!o.contains("use_rag") || o.value("use_rag").isBool())
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
         && (!o.contains("orchestration_mode") || o.value("orchestration_mode").toString() == "multi_agent")
         && (!o.contains("base_ref") || text(o.value("base_ref"))) && (!o.contains("toolchain_profile") || text(o.value("toolchain_profile")))

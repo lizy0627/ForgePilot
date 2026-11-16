@@ -113,19 +113,21 @@ class MissionHost:
             if mcp_server_ids is None:
                 metadata = self._metadata(task_id)
                 if (metadata.get("source_baseline") is None and self.graphs.snapshot(task_id).graph_id in {
-                        "task-analysis-delivery.v2", "task-analysis-delivery.v3",
-                        "validated-delivery.v2", "validated-delivery.v3"}):
+                        "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",
+                        "validated-delivery.v2", "validated-delivery.v3", "validated-delivery.v4"}):
                     raise ForgePilotError("mission_frozen_config_missing",
                         "This historical task has no frozen source/build selection; it remains readable, but must be recreated before execution or recovery")
+                if self.graphs.snapshot(task_id).graph_version >= 4 and metadata.get("tool_selection") is None:
+                    raise ForgePilotError("mission_frozen_config_missing", "Frozen Mission tool selection is missing")
                 mcp_server_ids = metadata.get("mcp_server_ids", ())
                 expected_revisions = metadata.get("mcp_server_revisions")
                 if mcp_server_ids and expected_revisions is None:
                     raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection cannot be restored")
             else:
                 expected_revisions = None
+            snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
             if self.factory is None:
                 from .mission_factory import build_mission_workflow
-                snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
                 if self.dependencies is None:
                     raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
                 workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots)
@@ -136,11 +138,11 @@ class MissionHost:
                         signature(self.factory).bind(self.store, mcp_snapshots=())
                     except (TypeError, ValueError):
                         raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
-                    snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
                     workflow = self.factory(self.store, mcp_snapshots=snapshots)
                     workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
                 else:
                     workflow = self.factory(self.store)
+            workflow.mission_mcp_snapshots = snapshots
             if restoring and metadata.get("source_baseline") is not None:
                 from .presets import MissionBuildSelection
                 config = self._build_config(metadata)
@@ -152,6 +154,13 @@ class MissionHost:
                 workflow.mission_build_selection = metadata["build_selection"]
                 if hasattr(workflow.validator, "bind_build_selection"):
                     workflow.validator.bind_build_selection(task_id, MissionBuildSelection.from_dict(metadata["build_selection"]))
+            if restoring and metadata.get("tool_selection") is not None:
+                from .mission_tools import MissionToolSelection, bind_mission_tools
+                selection = MissionToolSelection.from_dict(metadata["tool_selection"])
+                if ([s["server_id"] for s in selection.mcp_servers] != list(mcp_server_ids)
+                        or selection.use_rag != metadata.get("use_rag", False)):
+                    raise ForgePilotError("mission_frozen_config_missing", "Mission tool selection changed")
+                bind_mission_tools(workflow, task_id, selection)
             self._services[task_id] = workflow
         return self._services[task_id]
 
@@ -190,6 +199,8 @@ class MissionHost:
         result.update(review=review, last_event_id=f"{task_id}:{sequence}" if sequence else None,
                       recovery_required=bool(run["recovery_required"]))
         result.update(source_baseline=metadata.get("source_baseline"), build_selection=metadata.get("build_selection"))
+        result.update(use_rag=metadata.get("use_rag", False), mcp_server_ids=metadata.get("mcp_server_ids", []),
+                      tool_context=self.store.missions.tool_context(task_id, metadata))
         return safe_event_data(self.store.redactor, result)
 
     def observability(self, task_id):
@@ -479,6 +490,14 @@ class MissionHost:
                     workflow.validator.bind_build_selection(task_id, selection)
                 fields = {**fields, "source_baseline": workflow.mission_source_baseline,
                           "build_selection": selection.to_dict(), "frozen_build_config": asdict(config)}
+            from .mission_tools import MissionToolSelection, bind_mission_tools
+            selected_servers = tuple({"server_id": item.server_id, "name": item.config.name,
+                "tools": list(item.config.selected_tools)} for item in workflow.mission_mcp_snapshots)
+            tools = MissionToolSelection(fields.get("use_rag", False),
+                getattr(workflow, "mission_data_policy", DataPolicy()), selected_servers)
+            tool_context = bind_mission_tools(workflow, task_id, tools)
+            fields = {**fields, "use_rag": tools.use_rag, "tool_selection": tools.to_dict(),
+                      "tool_context": tool_context}
             request_text = self.store.redactor.text(fields["request"])
             if fields["task_type"] != "auto" and locked_task_spec is None:
                 request_text += "\nRequested task type: " + fields["task_type"]

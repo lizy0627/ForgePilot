@@ -267,7 +267,7 @@ async def test_real_analysis_uses_frozen_head_or_confirmed_working_bytes(tmp_pat
                 waiting = await poll(client, path, {"awaiting_human", "failed", "retryable"})
                 assert waiting["status"] == "awaiting_human", (await client.get(path + "/graph")).json()
                 graph = (await client.get(path + "/graph")).json()
-                assert graph["graph_id"] == "task-analysis-delivery.v3"
+                assert graph["graph_id"] == "task-analysis-delivery.v4"
                 assert next(node for node in graph["nodes"] if node["node_id"] == "baseline_capture")["status"] == "pending"
                 artifacts = (await client.get(path + "/artifacts")).json()["items"]
                 spec = next(item["content"] for item in artifacts if item["artifact_type"] == "TaskSpec")

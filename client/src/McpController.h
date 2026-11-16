@@ -12,6 +12,9 @@ class TaskController;
 // for the editor lifetime. Page and editor generations independently fence replies.
 class McpController : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QVariantList missionChoices READ missionChoices NOTIFY missionChoicesChanged)
+    Q_PROPERTY(bool missionLoading READ missionLoading NOTIFY missionChoicesChanged)
+    Q_PROPERTY(QString missionError READ missionError NOTIFY missionChoicesChanged)
     Q_PROPERTY(QVariantList items READ items NOTIFY changed)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
@@ -35,6 +38,10 @@ class McpController : public QObject {
     Q_PROPERTY(QVariantMap credentialState READ credentialState NOTIFY editorChanged)
 public:
     explicit McpController(TaskController *tasks);
+    QVariantList missionChoices() const { return m_missionChoices; }
+    bool missionLoading() const { return m_missionLoading; }
+    QString missionError() const { return m_missionError; }
+    Q_INVOKABLE void refreshMissionChoices();
     QVariantList items() const { return m_items; }
     bool loading() const { return m_loading; }
     bool busy() const { return m_busy; }
@@ -78,12 +85,14 @@ public:
     Q_INVOKABLE QString defaultDirectory(const QString &command) const;
     Q_INVOKABLE QString toolReason(const QString &reason) const;
 signals:
+    void missionChoicesChanged();
     void changed();
     void editorChanged();
     void clearSensitiveInputs();
     void saved();
 private:
     using Response = JsonHttp::Response;
+    void missionRequest(const QString &path, std::function<void(const Response &)> callback);
     void request(bool editor, const QByteArray &method, const QString &path,
                  const QJsonObject &body, std::function<void(const Response &)> callback);
     void abort(bool editor);
@@ -103,6 +112,12 @@ private:
     quint64 m_generation = 0, m_editorGeneration = 0;
     bool m_open = false, m_loading = false, m_busy = false, m_disabled = true;
     bool m_editorOpen = false, m_editorLoading = false, m_uncertain = false, m_recoveryConflict = false;
+    QVariantList m_missionChoices;
+    QSet<QNetworkReply *> m_missionReplies;
+    quint64 m_missionGeneration = 0;
+    int m_missionPending = 0;
+    bool m_missionLoading = false;
+    QString m_missionError;
     QVariantList m_items;
     QJsonObject m_preset, m_draft, m_original, m_secrets;
     QJsonArray m_tools;
