@@ -13,6 +13,7 @@ from ..artifacts.store import ArtifactNotFoundError
 from ..artifacts.sqlite_store import ArtifactStorageError
 from ..errors import ForgePilotError
 from .graph import ValidatedGraph, validate_graph
+from .execution import ExecutionCoordinator, coordinator_for_storage
 from .models import (
     FailureKind, GraphDefinition, GraphEvent, GraphSnapshot, NodeMetrics, NodeResult,
     NodeState, NodeStatus, NodeType, PolicyAction, idempotency_key,
@@ -29,18 +30,23 @@ class _WriterNotCompleted(Exception):
 
 
 class GraphRunner:
-    """Runs two trusted Analysts concurrently; every other node is exclusive."""
+    """Runs two trusted Analysts concurrently; every other node is exclusive.
+
+    Explicit coordinators must be shared by every runner for the same storage.
+    Use coordinator_for_storage(event_store) when mixing with legacy callers.
+    """
 
     def __init__(self, event_store, handlers: HandlerRegistry, *,
                  artifact_store=None, policy: FailurePolicy | None = None,
-                 workspace_backend=None) -> None:
+                 workspace_backend=None, coordinator: ExecutionCoordinator | None = None) -> None:
         self.store = GraphStore(event_store)
+        self.coordinator = coordinator if coordinator is not None else coordinator_for_storage(event_store)
         self.handlers = handlers
         self.artifacts = artifact_store or event_store.artifacts
         self.policy = policy or DefaultFailurePolicy()
         self.recovery = RecoveryManager(event_store, artifacts=self.artifacts,
                                         workspace_backend=workspace_backend or getattr(event_store, "workspace_backend", None),
-                                        policy_hash=self.policy.definition_hash)
+                                        policy_hash=self.policy.definition_hash, coordinator=self.coordinator)
         self.checkpoints = self.recovery.checkpoints
 
     def run(self, task_id: str, graph: GraphDefinition, *,
@@ -113,15 +119,14 @@ class GraphRunner:
                                     and validated.nodes[item].agent_id != validated.nodes[ready].agent_id), None)
                     if sibling is not None:
                         batch.append(sibling)
-                existing = self.store.begin_execution(task_id)
-                if existing is not None:
-                    return existing
+                if not self.coordinator.begin_execution(task_id):
+                    return self.store.snapshot(task_id)
                 acquired = False
                 try:
                     while not acquired:
                         if self.store.is_cancelled(task_id, ready):
                             return self.store.snapshot(task_id)
-                        acquired = self.store.acquire_execution_slot(timeout=0.05)
+                        acquired = self.coordinator.acquire_execution_slot(timeout=0.05)
                     if len(batch) == 1:
                         self._execute(task_id, validated, by_id[ready], initial_inputs,
                                       expected_revision=snapshot.revision)
@@ -135,8 +140,8 @@ class GraphRunner:
                                 future.result()
                 finally:
                     if acquired:
-                        self.store.release_execution_slot()
-                    self.store.end_execution(task_id)
+                        self.coordinator.release_execution_slot()
+                    self.coordinator.end_execution(task_id)
                 continue
 
             snapshot = self.store.snapshot(task_id)
@@ -223,12 +228,12 @@ class GraphRunner:
         # Approval can create a Git checkpoint; recovery can inspect Git,
         # restore files, or finish a commit. Acquire execution before SQLite,
         # matching run(), and never block an event loop needed by live Analysts.
-        if not self.store.acquire_execution_slot(blocking=False):
+        if not self.coordinator.acquire_execution_slot(blocking=False):
             raise ForgePilotError("graph_active", "A live node batch must stop before approval or recovery")
         try:
             yield
         finally:
-            self.store.release_execution_slot()
+            self.coordinator.release_execution_slot()
 
     def events(self, task_id: str, *, after_sequence: int = 0) -> tuple[GraphEvent, ...]:
         return self.store.graph_events(task_id, after_sequence=after_sequence)

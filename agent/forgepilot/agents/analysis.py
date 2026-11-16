@@ -24,6 +24,7 @@ from ..orchestration.analysis_review import AnalysisReviewStore
 from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics, NodeResult, NodeStatus, NodeType, FailureKind, _plain_json
 from ..orchestration.node_handlers import HandlerRegistry, NodeExecutionError
 from ..orchestration.runner import GraphRunner
+from ..orchestration.execution import coordinator_for_storage
 from .registry import AgentRegistry
 from .prompts import get_prompt
 from .contracts import output_schema, validate_task_spec, validate_evidence_bundle, validate_execution_plan
@@ -66,7 +67,8 @@ class AnalysisService:
         handlers = {stage: self._agent_handler for stage in STAGES}
         handlers["locked_task_spec"] = self._locked_task_spec
         handlers.update(join_evidence=self._join, execution_approval=self._gate)
-        self.runner = GraphRunner(event_store, HandlerRegistry(handlers), policy=policy)
+        self.runner = GraphRunner(event_store, HandlerRegistry(handlers), policy=policy,
+                                  coordinator=coordinator_for_storage(event_store))
         self._loop = None
         self._budgets = {}
         self._receipts = {}

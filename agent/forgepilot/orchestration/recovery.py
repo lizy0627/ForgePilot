@@ -14,6 +14,7 @@ from typing import Mapping
 from ..artifacts.models import ChangeSet, ExecutionPlan
 from ..errors import ForgePilotError
 from .checkpoint import CheckpointStore
+from .execution import ExecutionCoordinator, coordinator_for_storage
 from .models import GraphDefinition, NodeDefinition, NodeResult, NodeStatus, NodeType, idempotency_key
 from .store import GraphStore
 from .workspace import UnavailableWorkspaceBackend, WorkspaceSnapshot
@@ -89,9 +90,11 @@ class RecoveryPlan:
 
 
 class RecoveryManager:
-    def __init__(self, event_store, *, artifacts=None, workspace_backend=None, policy_hash: str):
+    def __init__(self, event_store, *, artifacts=None, workspace_backend=None, policy_hash: str,
+                 coordinator: ExecutionCoordinator | None = None):
         self.events = event_store
         self.store = GraphStore(event_store)
+        self.coordinator = coordinator if coordinator is not None else coordinator_for_storage(event_store)
         self.checkpoints = CheckpointStore(event_store)
         self.artifacts = artifacts or event_store.artifacts
         self.workspace = workspace_backend or UnavailableWorkspaceBackend()
@@ -469,7 +472,7 @@ class RecoveryManager:
 
     def prepare(self, task_id, graph):
         with self.store.recovery_boundary():
-            self.store.assert_recovery_idle(task_id)
+            self.coordinator.assert_recovery_idle(task_id)
             return self._prepare(task_id, graph)
 
     def _prepare(self, task_id, graph):

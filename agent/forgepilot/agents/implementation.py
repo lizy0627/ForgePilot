@@ -29,6 +29,7 @@ from ..orchestration.graph import validate_graph
 from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics, NodeResult, NodeStatus, NodeType, FailureKind
 from ..orchestration.node_handlers import HandlerRegistry
 from ..orchestration.runner import GraphRunner
+from ..orchestration.execution import coordinator_for_storage
 from ..repository import Repository
 from ..workspace_manager import WorkspaceManager
 from .analysis_tools import validate_evidence
@@ -75,7 +76,7 @@ class ImplementationService:
         self.reviews = AnalysisReviewStore(events)
         self.runner = GraphRunner(events, HandlerRegistry({
             "execution_approval": self._gate, "implementer.v1": self._handler,
-        }), workspace_backend=workspace_manager)
+        }), workspace_backend=workspace_manager, coordinator=coordinator_for_storage(events))
         # Optional composition is declared before graph creation, never appended
         # to an already-approved graph with a different definition hash.
         from .analysis import STAGES
