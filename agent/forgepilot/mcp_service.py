@@ -214,6 +214,11 @@ class MCPService:
                 "checked_at": _stamp(), "connection": config.connection.model_dump(mode="json"),
                 "default_selected_tools": defaults})
         except TimeoutError:
+            from .mcp_http import MCPHttpClient
+            # Authentication may already be confirmed while its owner drains.
+            if (isinstance(client, MCPHttpClient) and client.failure is not None
+                    and client.failure.code == "mcp_auth"):
+                raise ForgePilotError("mcp_auth", redactor.text(client.failure.message)[:512]) from None
             raise ForgePilotError("mcp_timeout", "MCP connection check timed out") from None
         except ForgePilotError as exc:
             raise ForgePilotError(exc.code, redactor.text(exc.message)[:512]) from None

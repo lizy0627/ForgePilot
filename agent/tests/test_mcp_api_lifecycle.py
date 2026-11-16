@@ -59,6 +59,12 @@ async def test_real_http_two_editors_one_revision_and_capacity_is_shared(peers, 
     with serving(tmp_path, configure=gate.configure) as (url, app, store):
         async with httpx.AsyncClient(base_url=url, timeout=10) as client:
             record = await saved(client, peer)
+            initial_connections = len(app.state.mcp_clients)
+            assert all(connection.owner.done() and connection.transport.closed
+                       for connection in app.state.mcp_clients)
+            # Client close can finish before this loop records its DELETE.
+            # Observe old-session cleanup before forbidding any new non-GET.
+            await eventually(lambda: sum(r["http"] == "DELETE" for r in peer.records) == initial_connections)
             endpoint = PREFIX + "/servers/" + record["server_id"]
             gate.enabled = True
             tasks = [asyncio.create_task(client.put(endpoint, json={**candidate(peer, name=name),
