@@ -176,19 +176,30 @@ def test_resource_composition_builds_one_gateway_and_redacts_launch_secrets(tmp_
         asyncio.run(resources.gateway.aclose())
 
 
-@pytest.mark.parametrize("missing_role,expected", [("analysis", "llm_config"), (None, "build_config")])
-def test_role_validation_precedes_preset_rejection_and_workspace_allocation(
-        tmp_path, git_exe, rg_exe, missing_role, expected):
+@pytest.mark.parametrize("missing_role,expected", [("analysis", "llm_config"), (None, None)])
+def test_role_validation_precedes_workspace_allocation_and_preset_resolution(
+        tmp_path, monkeypatch, git_exe, rg_exe, missing_role, expected):
+    def before_preview(*args, **kwargs):
+        pytest.fail("Mission composition must defer preset resolution and commands until source preview")
+
+    monkeypatch.setattr("forgepilot.presets.Presets.resolve_mission", before_preview)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", before_preview)
     gateway = gateway_for(CountingProvider(), omit=missing_role)
     config = development(rg_exe, git_exe, configure_preset="trusted-preset")
     resources = ServerResources(gateway=gateway, redactor=gateway.redactor, development=lambda: config)
     store = SqliteEventStore(tmp_path / "invalid.sqlite3")
     try:
         deps = resources.mission_dependencies(store, mcp_connection_factory=unavailable)
-        with pytest.raises(ForgePilotError) as caught:
-            build_mission_workflow(deps)
-        assert caught.value.code == expected
-        assert not (store.artifacts.root / "mission-workspaces").exists()
+        if expected is not None:
+            with pytest.raises(ForgePilotError) as caught:
+                build_mission_workflow(deps)
+            assert caught.value.code == expected
+            assert not (store.artifacts.root / "mission-workspaces").exists()
+        else:
+            workflow = build_mission_workflow(deps)
+            assert workflow.mission_build_config is config.build_config
+            assert not list((workflow.workspace.root / "worktrees").iterdir())
+            assert not list((workflow.workspace.root / "tasks").iterdir())
         assert not gateway._providers
     finally:
         asyncio.run(gateway.aclose())
