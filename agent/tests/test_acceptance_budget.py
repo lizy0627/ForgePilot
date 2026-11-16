@@ -12,6 +12,52 @@ from acceptance_budget import BudgetTransport, RequestBudget
 from forgepilot.errors import ForgePilotError
 
 
+@pytest.mark.asyncio
+async def test_paid_entry_rejects_another_directory_before_credentials_or_ledger(tmp_path, monkeypatch):
+    import run_product_acceptance as acceptance
+
+    campaign, alternate = tmp_path / "campaign", tmp_path / "another"
+    monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", campaign)
+    def forbidden_configuration():
+        pytest.fail("Rejected paid entry must not load credentials or configuration")
+    monkeypatch.setattr(acceptance, "saved_configuration", forbidden_configuration)
+    with pytest.raises(ValueError, match="existing stage-six campaign"):
+        await acceptance.execute(alternate)
+    monkeypatch.setattr(sys, "argv", ["acceptance", "--execute", "--output", str(alternate)])
+    with pytest.raises(SystemExit) as error:
+        acceptance.main()
+    assert error.value.code == 2
+    assert not campaign.exists() and not alternate.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held,stop_reason", [(True, "unknown_usage_campaign_hold"),
+                                               (False, "shared_budget_exhausted")])
+async def test_held_entry_preserves_failure_summary_without_loading_credentials(tmp_path, monkeypatch, held, stop_reason):
+    import run_product_acceptance as acceptance
+
+    monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", tmp_path)
+    original = (json.dumps({"stop_reason": stop_reason, "incident": "original failure",
+                            "runs": [{"run": "bug-negative-clamp-r1", "status": "failed"}]}) + "\n").encode()
+    (tmp_path / "summary.json").write_bytes(original)
+    ledger = RequestBudget(tmp_path / "budget.sqlite3")
+    ledger.reserve(100, "original")
+    with ledger.transaction():
+        ledger.db.execute("UPDATE campaign SET held=?", (int(held),))
+    before = ledger.snapshot()
+    ledger.close()
+    def forbidden_configuration():
+        pytest.fail("Held campaign must stop before configuration, credentials or network")
+    monkeypatch.setattr(acceptance, "saved_configuration", forbidden_configuration)
+    await acceptance.execute(tmp_path)
+    assert (tmp_path / "summary.json").read_bytes() == original
+    reopened = RequestBudget(tmp_path / "budget.sqlite3")
+    try:
+        assert reopened.snapshot() == before
+    finally:
+        reopened.close()
+
+
 def test_concurrent_reservations_and_crash_reopen_keep_shared_cap(tmp_path):
     path = tmp_path / "budget.sqlite3"
     ledger = RequestBudget(path, 100)

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
+PAID_CAMPAIGN = ROOT / "build-test" / "product-readiness-stage6" / "real-acceptance"
 sys.path.insert(0, str(ROOT / "agent"))
 
 import httpx
@@ -300,25 +301,35 @@ async def run_sample(task, repeat, configuration, key, ledger, output):
 
 
 async def execute(output):
+    if output.resolve() != PAID_CAMPAIGN.resolve():
+        raise ValueError("Paid acceptance must use the existing stage-six campaign directory")
+    previous = json.loads((output / "summary.json").read_text(encoding="utf-8")) if (output / "summary.json").exists() else None
+    ledger = RequestBudget(PAID_CAMPAIGN / "budget.sqlite3")
+    if ledger.snapshot()["held"] or previous and previous.get("stop_reason") == "shared_budget_exhausted":
+        ledger.close()
+        print("Shared acceptance budget is held; existing evidence is unchanged.", flush=True)
+        return
+    try:
+        await _execute_available(output, ledger, previous)
+    finally:
+        ledger.close()
+
+
+async def _execute_available(output, ledger, previous):
     config_path, configuration = saved_configuration()
     key = load_saved_key(config_path)
     if not key:
         raise ValueError("Existing model credential unavailable")
     identity = {"model_configuration_sha256": hashlib.sha256(configuration.model_dump_json().encode()).hexdigest(),
                 "launcher_revision": configuration_revision(config_path)}
-    previous = json.loads((output / "summary.json").read_text(encoding="utf-8")) if (output / "summary.json").exists() else None
     if previous and any(previous.get(name) != value for name, value in identity.items()):
         raise ValueError("Acceptance model configuration or credential identity changed; cannot resume")
-    ledger = RequestBudget(output / "budget.sqlite3")
     runs = previous.get("runs", []) if previous else []
     summary = {"planned_runs": 12, "protocol_sha256": hashlib.sha256(json.dumps(plan(), sort_keys=True).encode()).hexdigest(),
                "models": [{"profile": p.profile_id, "model": p.model, "family": p.family} for p in configuration.profiles],
                **identity, "runs": runs}
     try:
         save(output / "summary.json", {**summary, "budget": ledger.snapshot()})
-        if ledger.snapshot()["held"] or previous and previous.get("stop_reason") == "shared_budget_exhausted":
-            summary["stop_reason"] = "shared_budget_held"
-            return
         prior = json.loads((output / "preflight.json").read_text(encoding="utf-8")) if (output / "preflight.json").exists() else None
         ready = prior and all(row["ok"] for row in prior["connections"]) and prior["chat"] == prior["summary"] == "passed"
         if ready or await preflight(config_path, configuration, key, ledger, output):
@@ -344,7 +355,6 @@ async def execute(output):
         summary.update(attempted_runs=attempted, passed_runs=sum(r["status"] == "passed" for r in runs),
                        unattempted_runs=12-attempted, budget=ledger.snapshot())
         save(output / "summary.json", summary)
-        ledger.close()
 
 
 def main():
@@ -353,6 +363,8 @@ def main():
     parser.add_argument("--execute", action="store_true", help="send budgeted real requests using existing configuration")
     parser.add_argument("--resume", action="store_true", help="continue remaining planned runs using the same ledger and evidence")
     args = parser.parse_args()
+    if args.execute and args.output.resolve() != PAID_CAMPAIGN.resolve():
+        parser.error("paid acceptance must use the existing stage-six campaign directory")
     if args.resume:
         if not args.execute or not (args.output / "budget.sqlite3").is_file():
             parser.error("resume requires execute and the existing paid ledger")
