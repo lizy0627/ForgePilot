@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import logging
+import re
 
 import httpx
 from mcp import ClientSession, types
@@ -23,6 +24,7 @@ from .security import Redactor
 from .process import wait_for_cleanup
 
 _private_session = ContextVar("forgepilot_mcp_http_private", default=False)
+_sse_newlines = re.compile(rb"[\r\n]")
 
 
 class _PrivateLogs(logging.Filter):
@@ -89,23 +91,36 @@ class _LimitedStream(httpx.AsyncByteStream):
                 else:
                     # Bound an entire SSE event, including data/comment/id lines.
                     # Handle LF, CRLF and CR, including separators split in chunks.
-                    for byte in chunk:
-                        buffer.append(byte)
-                        size += 1
+                    position = 0
+                    for newline in _sse_newlines.finditer(chunk):
+                        end = newline.end()
+                        length = end - position
+                        size += length
                         if size > MAX_MESSAGE:
                             raise ForgePilotError("mcp_limit", "MCP SSE event exceeds 256 KiB")
+                        buffer.extend(chunk[position:end])
+                        position = end
+                        if length > 1:
+                            line_size += length - 1
+                            previous_cr = False
+                        byte = chunk[newline.start()]
                         if byte == 10 and previous_cr:
                             previous_cr = False
                             continue
-                        if byte in (10, 13):
-                            if line_size == 0:
-                                self._event(bytes(buffer))
-                                buffer.clear()
-                                size = 0
-                            line_size = 0
-                        else:
-                            line_size += 1
+                        if line_size == 0:
+                            self._event(bytes(buffer))
+                            buffer.clear()
+                            size = 0
+                        line_size = 0
                         previous_cr = byte == 13
+                    remaining = len(chunk) - position
+                    if remaining:
+                        size += remaining
+                        if size > MAX_MESSAGE:
+                            raise ForgePilotError("mcp_limit", "MCP SSE event exceeds 256 KiB")
+                        buffer.extend(chunk[position:])
+                        line_size += remaining
+                        previous_cr = False
                 yield chunk
             if not self.sse and buffer:
                 self._message(bytes(buffer))
