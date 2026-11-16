@@ -2,12 +2,15 @@
 #include "MissionProtocol.h"
 #include "Protocol.h"
 #include <QRegularExpression>
-#include <algorithm>
 
-MissionController::MissionController(QObject *parent) : QObject(parent), m_approval(&m_api), m_delivery(&m_api)
+MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
 {
-    m_refreshTimer.setSingleShot(true);
-    connect(&m_refreshTimer, &QTimer::timeout, this, &MissionController::beginRefresh);
+    connect(&m_loader, &MissionSnapshotLoader::snapshotReady, this, &MissionController::commitSnapshot);
+    connect(&m_loader, &MissionSnapshotLoader::loadFailed, this, [this](int status, const QString &code) {
+        const auto current = continuation();
+        setError(MissionProtocol::errorMessage(code, status));
+        if (current()) updateAvailability();
+    });
     connect(&m_api, &AgentApiClient::responseReceived, this,
         [this](quint64 id, const QString &, const QString &task, const QJsonObject &body) { received(id, task, body); });
     connect(&m_api, &AgentApiClient::requestError, this,
@@ -36,7 +39,7 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_appro
         if (event.value("task_id").toString() != m_task) return;
         const auto current = continuation();
         const auto eventRevision = event.value("task_revision").toInteger();
-        m_floor = std::max(m_floor, eventRevision);
+        m_loader.observeRevision(eventRevision);
         m_synchronized = false;
         // HTTP can publish a preview before SSE delivers the event that created it.
         // That same revision is already covered by the preview, not a new conflict.
@@ -49,7 +52,7 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_appro
 }
 MissionController::~MissionController()
 {
-    m_refreshTimer.stop(); m_requests.clear();
+    m_loader.invalidate(); m_requests.clear();
     QObject::disconnect(&m_sse, nullptr, this, nullptr);
     m_api.abortPending(); m_sse.disconnect();
 }
@@ -92,10 +95,10 @@ void MissionController::clearSelection()
 {
     ++m_generation;
     const auto current = continuation();
-    m_refreshTimer.stop(); m_requests.clear(); m_mutation = 0; m_artifactRequest = 0;
-    m_refreshing = false; m_synchronized = false; m_streamSelected = false;
+    m_loader.selectTask({}); m_requests.clear(); m_mutation = 0; m_artifactRequest = 0;
+    m_synchronized = false; m_streamSelected = false;
     m_updatingAvailability = false;
-    m_task.clear(); m_snapshot = {}; m_start = {}; m_recovery = {}; m_floor = 0; m_refreshAttempts = 0;
+    m_task.clear(); m_snapshot = {}; m_recovery = {};
     m_api.abortPending(); m_sse.forgetTask();
     if (!current()) return;
     m_approval.clear();
@@ -124,7 +127,7 @@ void MissionController::selectMission(const QString &taskId)
     clearSelection();
     if (!guard || m_generation != nextGeneration) return;
     const auto current = continuation();
-    m_task = taskId; emit missionChanged();
+    m_task = taskId; m_loader.selectTask(taskId); emit missionChanged();
     if (current()) refresh();
 }
 void MissionController::createMission(const QVariantMap &request)
@@ -154,22 +157,7 @@ void MissionController::scheduleRefresh(int delay)
     const auto current = continuation();
     m_synchronized = false; updateAvailability();
     if (!current()) return;
-    if (!m_refreshing && !m_refreshTimer.isActive()) m_refreshTimer.start(delay);
-}
-void MissionController::beginRefresh()
-{
-    if (m_task.isEmpty() || m_refreshing) return;
-    m_refreshing = true; m_synchronized = false; m_parts = 0;
-    m_start = {}; m_graphSnapshot = {}; m_artifactSnapshot = {}; m_diffSnapshot = {}; m_validationSnapshot = {};
-    track(m_api.getMission(m_task), RequestKind::Start);
-}
-void MissionController::abortRefresh()
-{
-    for (auto it = m_requests.begin(); it != m_requests.end();) {
-        if (it.value() == RequestKind::Mutation || it.value() == RequestKind::Create || it.value() == RequestKind::Artifact) { ++it; continue; }
-        m_api.abortRequest(it.key()); it = m_requests.erase(it);
-    }
-    m_refreshing = false; m_synchronized = false;
+    m_loader.refresh(delay);
 }
 void MissionController::received(quint64 request, const QString &task, const QJsonObject &body)
 {
@@ -178,6 +166,7 @@ void MissionController::received(quint64 request, const QString &task, const QJs
     const auto kind = m_requests.take(request);
     if (kind == RequestKind::Create) {
         m_mutation = 0; m_task = body.value("task_id").toString();
+        m_loader.selectTask(m_task);
         m_missions.upsert(body);
         if (!current()) return;
         emit missionChanged();
@@ -195,47 +184,24 @@ void MissionController::received(quint64 request, const QString &task, const QJs
         if (body.contains("recovery")) m_recovery = body.value("recovery").toObject();
         mutationSnapshot(mission); return;
     }
-    if (kind == RequestKind::Start) {
-        m_start = body;
-        track(m_api.getMissionGraph(m_task), RequestKind::Graph);
-        if (!current()) return;
-        track(m_api.getMissionArtifacts(m_task), RequestKind::Artifacts);
-        if (!current()) return;
-        track(m_api.getMissionDiff(m_task), RequestKind::Diff);
-        if (!current()) return;
-        track(m_api.getMissionValidation(m_task), RequestKind::Validation); return;
-    }
-    if (kind == RequestKind::Fence) {
-        const auto revision = body.value("current_revision").toInteger();
-        if (revision < m_floor || revision != m_start.value("current_revision").toInteger()
-            || revision != m_graphSnapshot.value("current_revision").toInteger()
-            || body.value("last_event_id") != m_start.value("last_event_id")) {
-            abortRefresh();
-            scheduleRefresh(std::min(100 * ++m_refreshAttempts, 2000)); return;
-        }
-        commitSnapshot(body); return;
-    }
-    if (kind == RequestKind::Graph) m_graphSnapshot = body;
-    if (kind == RequestKind::Artifacts) m_artifactSnapshot = body;
-    if (kind == RequestKind::Diff) m_diffSnapshot = body;
-    if (kind == RequestKind::Validation) m_validationSnapshot = body;
-    if (++m_parts == 4) track(m_api.getMission(m_task), RequestKind::Fence);
 }
-void MissionController::commitSnapshot(const QJsonObject &mission)
+void MissionController::commitSnapshot(const MissionSnapshot &snapshot)
 {
+    const auto &mission = snapshot.mission;
+    if (mission.value("task_id").toString() != m_task) return;
     const auto current = continuation();
-    m_snapshot = mission; m_floor = revision();
+    m_snapshot = mission;
     m_graph.setRecoveryRequired(mission.value("recovery_required").toBool());
     if (!current()) return;
-    m_graph.setSnapshot(m_graphSnapshot);
+    m_graph.setSnapshot(snapshot.graph);
     if (!current()) return;
-    m_artifacts.setSnapshot(m_artifactSnapshot);
+    m_artifacts.setSnapshot(snapshot.artifacts);
     if (!current()) return;
-    m_evidence.setSnapshot(m_artifactSnapshot);
+    m_evidence.setSnapshot(snapshot.artifacts);
     if (!current()) return;
-    m_diff.setSnapshot(m_diffSnapshot);
+    m_diff.setSnapshot(snapshot.diff);
     if (!current()) return;
-    m_validation.setSnapshot(m_validationSnapshot);
+    m_validation.setSnapshot(snapshot.validation);
     if (!current()) return;
     m_missions.upsert(mission);
     if (!current()) return;
@@ -244,7 +210,7 @@ void MissionController::commitSnapshot(const QJsonObject &mission)
     m_delivery.setMission(mission);
     if (!current()) return;
     if (m_recovery.value("revision").toInteger() != revision()) m_recovery = {};
-    m_refreshing = false; m_refreshAttempts = 0; m_synchronized = true;
+    m_synchronized = true;
     // A read already in flight can recover the stream before its retry timer fires.
     // Clear only the connection warning; a later business error must remain visible.
     if (m_streamError) setError({});
@@ -262,9 +228,8 @@ void MissionController::commitSnapshot(const QJsonObject &mission)
 void MissionController::mutationSnapshot(const QJsonObject &mission)
 {
     if (mission.value("task_id").toString() != m_task) return;
-    m_floor = std::max(m_floor, mission.value("current_revision").toInteger());
     // Discard the pre-mutation read bundle, even if its final GET arrives late.
-    abortRefresh(); m_refreshTimer.stop(); scheduleRefresh(0);
+    m_loader.invalidate(mission.value("current_revision").toInteger()); scheduleRefresh(0);
 }
 void MissionController::failed(quint64 request, int status, const QString &code)
 {
@@ -278,11 +243,8 @@ void MissionController::failed(quint64 request, int status, const QString &code)
     if (kind == RequestKind::Mutation) {
         m_mutation = 0; m_synchronized = false; m_recovery = {}; m_delivery.invalidatePreview();
         if (!current()) return;
-        abortRefresh(); m_refreshTimer.stop(); scheduleRefresh(0); return;
+        m_loader.invalidate(); scheduleRefresh(0); return;
     }
-    abortRefresh();
-    if (status == 0 || status == 429 || status >= 500) scheduleRefresh(std::min(250 * ++m_refreshAttempts, 5000));
-    if (current()) updateAvailability();
 }
 void MissionController::cancel()
 {

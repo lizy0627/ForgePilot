@@ -36,6 +36,7 @@ target_sources(ForgePilotCommunication PRIVATE
     src/workbench/ValidationModel.h src/workbench/ValidationModel.cpp
     src/workbench/ApprovalController.h src/workbench/ApprovalController.cpp
     src/workbench/DeliveryController.h src/workbench/DeliveryController.cpp
+    src/workbench/MissionSnapshotLoader.h src/workbench/MissionSnapshotLoader.cpp
     src/workbench/MissionController.h src/workbench/MissionController.cpp)
 target_include_directories(ForgePilotCommunication PUBLIC src)
 target_link_libraries(ForgePilotCommunication PUBLIC Qt6::Network Qt6::Concurrent Qt6::Gui)
@@ -81,7 +82,7 @@ if(BUILD_TESTING)
     # Windows debug/CI hosts even when every individual case is healthy.
     set_tests_properties(client_communication PROPERTIES TIMEOUT 120)
     set_target_properties(ForgePilotClientTests PROPERTIES WIN32_EXECUTABLE FALSE)
-    foreach(suite mission_api mission_sse workbench_models mission_controller)
+    foreach(suite mission_api mission_sse workbench_models mission_controller mission_snapshot)
         qt_add_executable(ForgePilot_${suite}_tests tests/tst_${suite}.cpp)
         target_link_libraries(ForgePilot_${suite}_tests PRIVATE ForgePilotCommunication Qt6::Test)
         target_compile_options(ForgePilot_${suite}_tests PRIVATE /utf-8)

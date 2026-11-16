@@ -3,16 +3,16 @@
 #include "SseClient.h"
 #include "ApprovalController.h"
 #include "DeliveryController.h"
+#include "MissionSnapshotLoader.h"
 #include "MissionListModel.h"
 #include "GraphModel.h"
 #include "ArtifactModel.h"
 #include "EvidenceModel.h"
 #include "DiffModel.h"
 #include "ValidationModel.h"
-#include <QTimer>
 #include <functional>
 
-// Coordinates backend projections. It owns no execution, model, Git or file tools.
+// Presents Mission state and operations to QML; read coordination is delegated.
 class MissionController : public QObject {
     Q_OBJECT
     Q_PROPERTY(QUrl baseUrl READ baseUrl WRITE setBaseUrl NOTIFY baseUrlChanged)
@@ -74,14 +74,12 @@ signals:
     void artifactLoaded(const QVariantMap &artifact);
     void eventReceived(const QString &eventId, const QJsonObject &event);
 private:
-    enum class RequestKind { Start, Graph, Artifacts, Diff, Validation, Fence, Mutation, Create, Artifact };
+    enum class RequestKind { Mutation, Create, Artifact };
     void track(quint64 request, RequestKind kind);
     void received(quint64 request, const QString &task, const QJsonObject &body);
     void failed(quint64 request, int status, const QString &code);
     void scheduleRefresh(int delay = 40);
-    void beginRefresh();
-    void abortRefresh();
-    void commitSnapshot(const QJsonObject &mission);
+    void commitSnapshot(const MissionSnapshot &snapshot);
     void mutationSnapshot(const QJsonObject &mission);
     void updateAvailability();
     bool canControl() const;
@@ -89,6 +87,7 @@ private:
     // A synchronous signal may delete the controller or select another mission.
     std::function<bool()> continuation();
     AgentApiClient m_api;
+    MissionSnapshotLoader m_loader;
     SseClient m_sse;
     MissionListModel m_missions;
     GraphModel m_graph;
@@ -98,14 +97,11 @@ private:
     ValidationModel m_validation;
     ApprovalController m_approval;
     DeliveryController m_delivery;
-    QTimer m_refreshTimer;
     QHash<quint64, RequestKind> m_requests;
-    QJsonObject m_snapshot, m_start, m_graphSnapshot, m_artifactSnapshot, m_diffSnapshot, m_validationSnapshot, m_recovery;
+    QJsonObject m_snapshot, m_recovery;
     QString m_task, m_error;
-    qint64 m_floor = 0;
     quint64 m_mutation = 0, m_artifactRequest = 0;
     quint64 m_generation = 0;
-    int m_parts = 0, m_refreshAttempts = 0;
-    bool m_refreshing = false, m_synchronized = false, m_updatingAvailability = false, m_streamSelected = false;
+    bool m_synchronized = false, m_updatingAvailability = false, m_streamSelected = false;
     bool m_streamError = false;
 };

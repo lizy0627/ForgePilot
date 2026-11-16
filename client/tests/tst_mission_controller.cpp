@@ -193,6 +193,37 @@ private slots:
         c.cancel(); c.cancel(); QTRY_COMPARE(c.status(), "cancelled"); QTRY_VERIFY(c.synchronized());
         QTest::qWait(100); QCOMPARE(f.posts("/cancel"), 1); QVERIFY(!c.busy());
     }
+    void mutationDiscardsAnAlreadyPendingSnapshotFence()
+    {
+        Fixture f; MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A);
+        QTRY_VERIFY(c.synchronized());
+        Request mutation, fence; int reads = 0;
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/cancel")) { mutation = r; return true; }
+            if (r.path.endsWith(A.toUtf8()) && ++reads == 2) { fence = r; return true; }
+            return false;
+        };
+        c.cancel(); QTRY_VERIFY(mutation.socket);
+        c.refresh(); QTRY_VERIFY(fence.socket);
+        f.current = mission(A, 9, "cancelled");
+        Source::json(mutation, f.current);
+        QTRY_COMPARE(c.revision(), 9); QTRY_VERIFY(c.synchronized());
+        Source::json(fence, mission()); QTest::qWait(100);
+        QCOMPARE(c.revision(), 9); QCOMPARE(c.graph()->revision(), 9);
+        QCOMPARE(c.status(), "cancelled"); QCOMPARE(f.posts("/cancel"), 1);
+    }
+    void snapshotFailureSignalCanDeleteControllerAndCancelReadRetry()
+    {
+        Fixture f;
+        f.intercept = [](const Request &r) {
+            if (!r.path.endsWith("/graph")) return false;
+            Source::json(r, conflict("mission_internal"), 500); return true;
+        };
+        QPointer<MissionController> c = new MissionController; c->setBaseUrl(f.source.url());
+        connect(c, &MissionController::errorChanged, this, [c] { if (c && !c->error().isEmpty()) delete c.data(); });
+        c->selectMission(A); QTRY_VERIFY(c.isNull());
+        const auto reads = f.reads; QTest::qWait(400); QCOMPARE(f.reads, reads);
+    }
     void deliveryRequiresExplicitCurrentPreviewAndNeverRetriesStaleToken()
     {
         Fixture f; f.current = mission(A, 8, "succeeded"); MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A);

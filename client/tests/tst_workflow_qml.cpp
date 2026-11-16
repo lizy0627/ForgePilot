@@ -272,9 +272,17 @@ struct Ui {
     }
     bool expandStage(const QString &id) const
     {
-        auto *stage = find("workflowStage", "stageId", id);
-        if (!stage) return false;
-        return stage->property("expanded").toBool() || click(find("workflowStageExpand", "stageId", id));
+        QPointer<QQuickItem> stage, button;
+        // Snapshot commit precedes the QML callLater refresh and delegate layout.
+        // Wait for a clickable delegate, then deliver exactly one real click.
+        if (!QTest::qWaitFor([&] {
+            stage = find("workflowStage", "stageId", id);
+            button = find("workflowStageExpand", "stageId", id);
+            return stage && (stage->property("expanded").toBool()
+                || (button && button->isVisible() && button->isEnabled()
+                    && button->width() > 0 && button->height() > 0));
+        }, 5000)) return false;
+        return stage && (stage->property("expanded").toBool() || click(button));
     }
     QStringList visibleArtifactIds() const
     {
@@ -359,6 +367,113 @@ private slots:
         QTRY_VERIFY(ui.missions.synchronized());
         QCOMPARE(page->property("selectedNodeId").toString(), QString("root_cause_analysis"));
         QVERIFY(page->property("selectionPinned").toBool());
+        QVERIFY(ui.click("workflowFollowButton"));
+        QTRY_VERIFY(!page->property("selectionPinned").toBool());
+        QTRY_COMPARE(page->property("selectedNodeId").toString(), QString("validation_1"));
+        fixture.setPhase("running", "reviewer_1", 10);
+        ui.missions.refresh();
+        QTRY_COMPARE(ui.missions.revision(), 10);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_COMPARE(page->property("selectedNodeId").toString(), QString("reviewer_1"));
+        QVERIFY(!page->property("selectionPinned").toBool());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void unrelatedSnapshotUpdatesPreserveReaderPosition_data()
+    {
+        QTest::addColumn<QString>("artifactType");
+        QTest::addColumn<QString>("nodeId");
+        QTest::addColumn<QString>("stageId");
+        QTest::addColumn<QString>("selectorName");
+        QTest::addColumn<QString>("selectionProperty");
+        QTest::addColumn<QString>("outputName");
+        QTest::newRow("selected-file") << QString("ChangeSet") << QString("implementer") << QString("implementation")
+            << QString("workflowFileSelect") << QString("selectedFile") << QString("workflowNodeDiff");
+        QTest::newRow("selected-command") << QString("ValidationReport") << QString("validation_0") << QString("verification")
+            << QString("workflowCommandSelect") << QString("selectedCommand") << QString("workflowNodeCommandOutput");
+    }
+    void unrelatedSnapshotUpdatesPreserveReaderPosition()
+    {
+        QFETCH(QString, artifactType); QFETCH(QString, nodeId); QFETCH(QString, stageId);
+        QFETCH(QString, selectorName); QFETCH(QString, selectionProperty); QFETCH(QString, outputName);
+        Fixture fixture;
+        auto artifacts = fixture.artifacts.value("items").toArray();
+        for (int i = 0; i < artifacts.size(); ++i) {
+            auto artifact = artifacts[i].toObject();
+            if (artifact.value("artifact_type") != artifactType) continue;
+            auto content = artifact.value("content").toObject();
+            const auto entriesKey = artifactType == "ChangeSet" ? "files" : "commands";
+            auto entries = content.value(entriesKey).toArray();
+            auto second = entries.first().toObject();
+            if (artifactType == "ChangeSet") {
+                second["path"] = "src/worker.cpp";
+                second["unified_diff"] = QString("+ reader position fixture\n").repeated(1500);
+            } else {
+                second["command_summary"] = "ctest --output-on-failure";
+                second["output_summary"] = QString("reader position fixture\n").repeated(1500);
+            }
+            entries.append(second); content[entriesKey] = entries;
+            artifact["content"] = content; artifacts[i] = artifact;
+        }
+        fixture.artifacts["items"] = artifacts;
+        fixture.setPhase("running", "reviewer_0");
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_VERIFY(ui.find("workflowStage", "stageId", stageId));
+        QVERIFY(ui.expandStage(stageId));
+        QTRY_VERIFY(ui.find("workflowNode", "nodeId", nodeId));
+        QVERIFY(ui.chooseNode(nodeId));
+        QPointer<QQuickItem> panel = ui.find("workflowArtifactPanel"); QVERIFY(panel);
+        QPointer<QQuickItem> selector = ui.find(selectorName); QVERIFY(selector);
+        QTRY_COMPARE(selector->property("count").toInt(), 2);
+        QVERIFY(ui.click(selector));
+        QTest::keyClick(ui.window, Qt::Key_End);
+        QTest::keyClick(ui.window, Qt::Key_Return);
+        QTRY_COMPARE(panel->property(selectionProperty.toUtf8()).toInt(), 1);
+        QCOMPARE(selector->property("currentIndex").toInt(), 1);
+        QPointer<QQuickItem> output = ui.find(outputName); QVERIFY(output);
+        QVERIFY(ui.click(ui.find("workflowNextOutput", {}, {}, output)));
+        QTRY_COMPARE(output->property("offset").toInt(), output->property("pageSize").toInt());
+        const auto offset = output->property("offset").toInt();
+        auto *scroll = ui.find("workflowDetailsScroll"); QVERIFY(scroll);
+        QPointer<QQuickItem> viewport = qobject_cast<QQuickItem *>(scroll->property("contentItem").value<QObject *>());
+        QVERIFY(viewport);
+        QTRY_VERIFY(viewport->property("contentHeight").toReal() > viewport->height() + 160);
+        QVERIFY(viewport->setProperty("contentY", 160));
+        QTRY_COMPARE(viewport->property("contentY").toReal(), 160.0);
+
+        // Only another node progresses. Repeated coherent snapshots must not
+        // rebuild this pinned reader or reset its chosen entry, page or scroll.
+        auto *page = ui.find("workflowPage"); QVERIFY(page);
+        for (int revision = 9; revision <= 10; ++revision) {
+            const QString activeNode = revision == 9 ? "repair_1" : "validation_1";
+            fixture.setPhase("running", activeNode, revision);
+            ui.missions.refresh();
+            QTRY_COMPARE(ui.missions.revision(), revision);
+            QTRY_VERIFY(ui.missions.synchronized());
+            QTRY_COMPARE(ui.missions.graph()->revision(), revision);
+            const auto viewHasActiveNode = [&] {
+                const auto value = page->property("nodeRecords");
+                const auto records = value.metaType() == QMetaType::fromType<QJSValue>()
+                    ? value.value<QJSValue>().toVariant().toList() : value.toList();
+                for (const auto &record : records) {
+                    const auto node = record.toMap();
+                    if (node.value("nodeId") == activeNode && node.value("status") == "running") return true;
+                }
+                return false;
+            };
+            QTRY_VERIFY(viewHasActiveNode());
+            QVERIFY(panel); QVERIFY(selector); QVERIFY(output); QVERIFY(viewport);
+            QCOMPARE(ui.find("workflowArtifactPanel"), panel.data());
+            QCOMPARE(page->property("selectedNodeId").toString(), nodeId);
+            QVERIFY(page->property("selectionPinned").toBool());
+            QCOMPARE(panel->property(selectionProperty.toUtf8()).toInt(), 1);
+            QCOMPARE(selector->property("currentIndex").toInt(), 1);
+            QCOMPARE(output->property("offset").toInt(), offset);
+            QCOMPARE(viewport->property("contentY").toReal(), 160.0);
+        }
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void completedStagesCanExpandAndCollapse()
@@ -389,6 +504,7 @@ private slots:
         QVERIFY(ui.click("agentWorkbenchModeButton"));
         ui.missions.selectMission(MissionId);
         QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_VERIFY(ui.find("workflowStage", "stageId", "verification"));
         QVERIFY(ui.expandStage("verification"));
         QTRY_VERIFY(ui.find("workflowNode", "nodeId", "validation_0"));
         QVERIFY(ui.chooseNode("validation_0"));
