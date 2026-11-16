@@ -58,6 +58,11 @@ class OpenAICompatibleClient:
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
         self._url = str(url).rstrip("/") + "/chat/completions"
+        # Ark's Doubao 2.1 max_tokens caps only answer text. Node budgets must
+        # bound reasoning too; this documented field covers the entire output.
+        self.output_token_parameter = ("max_completion_tokens"
+            if url.host == "ark.cn-beijing.volces.com" and model.startswith("doubao-seed-2-1-")
+            else "max_tokens")
         self._api_key = api_key
         self.model = model
         self.timeout = timeout
@@ -90,7 +95,7 @@ class OpenAICompatibleClient:
         payload = {"model": self.model, "messages": messages, "stream": False}
         output_limit = self._output_limit(max_output_tokens)
         if output_limit is not None:
-            payload["max_tokens"] = output_limit
+            payload[self.output_token_parameter] = output_limit
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if tools:
@@ -159,7 +164,7 @@ class OpenAICompatibleClient:
             payload["stream_options"] = {"include_usage": True}
         output_limit = self._output_limit(max_output_tokens)
         if output_limit is not None:
-            payload["max_tokens"] = output_limit
+            payload[self.output_token_parameter] = output_limit
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if tools:

@@ -234,15 +234,16 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&window));
         auto find=[&](const char *name) { return panel->findChild<QQuickItem*>(name); };
         const auto output=qEnvironmentVariable("FORGEPILOT_INTEGRATION_OUTPUT");
+        // Clean software scenes still animate, but need not swap a new buffer.
         auto capture=[&](const QString &name) {
             if(output.isEmpty()) return true;
-            QSignalSpy frame(&window,&QQuickWindow::frameSwapped); window.requestUpdate();
+            QSignalSpy frame(&window,&QQuickWindow::afterAnimating); window.update();
             if(frame.isEmpty() && !frame.wait(1000)) return false;
             return window.grabWindow().save(output+'/'+name+".png");
         };
         auto click=[&](const char *name) {
             auto *item=find(name); if(!item || !item->isEnabled() || !item->isVisible()) return false;
-            QSignalSpy frame(&window,&QQuickWindow::frameSwapped); window.requestUpdate();
+            QSignalSpy frame(&window,&QQuickWindow::afterAnimating); window.update();
             if(frame.isEmpty() && !frame.wait(1000)) return false;
             QSignalSpy clicked(item,SIGNAL(clicked()));
             QTest::mouseClick(&window,Qt::LeftButton,Qt::NoModifier,item->mapToScene(QPointF(item->width()/2,item->height()/2)).toPoint());

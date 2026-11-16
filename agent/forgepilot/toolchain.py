@@ -14,10 +14,7 @@ from pathlib import Path, PureWindowsPath
 import re
 import stat
 from string import Formatter
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .presets import MissionBuildSelection
+from typing import Protocol
 
 from .errors import ForgePilotError
 from .path_identity import path_within, same_path
@@ -33,6 +30,37 @@ _PROTECTED_COMPONENTS = {".git", ".oracle", "oracle", "protected-oracle", "prote
 _PLACEHOLDERS = frozenset({"source_dir", "build_dir", "configuration", "jobs", "generator", "architecture",
                            "make_program", "configure_preset", "build_preset", "test_preset", "report_path",
                            "workspace_dir", "target_build_dir"})
+
+
+class MissionCommandSelection(Protocol):
+    """Read-only resolved fields consumed by fixed CMake/CTest commands."""
+
+    @property
+    def source(self) -> str: ...
+    @property
+    def generator(self) -> str | None: ...
+    @property
+    def architecture(self) -> str | None: ...
+    @property
+    def toolset(self) -> str | None: ...
+    @property
+    def configuration(self) -> str: ...
+    @property
+    def cache_variables(self) -> tuple[tuple[str, str | None, str], ...]: ...
+    @property
+    def build_targets(self) -> tuple[str, ...]: ...
+    @property
+    def build_jobs(self) -> int | None: ...
+    @property
+    def build_verbose(self) -> bool: ...
+    @property
+    def build_clean_first(self) -> bool: ...
+    @property
+    def test_jobs(self) -> int | None: ...
+    @property
+    def test_timeout(self) -> float | None: ...
+    @property
+    def test_output_on_failure(self) -> bool: ...
 
 
 def validate_executable(value: str, *, expected: str | None = None) -> Path:
@@ -140,7 +168,7 @@ class ToolchainProfile:
         executable = validate_executable(self.cmake if kind == "cmake" else self.ctest, expected=kind)
         return ResolvedCommand(str(executable), tuple(_expand(arg, values) for arg in args), source)
 
-    def resolve_mission(self, phase: str, values: dict[str, str], selection: MissionBuildSelection) -> ResolvedCommand:
+    def resolve_mission(self, phase: str, values: dict[str, str], selection: MissionCommandSelection) -> ResolvedCommand:
         """Translate the reviewed safe preset subset, never invoke native --preset."""
         if selection.source == "default":
             selected = dict(values, generator=selection.generator or "", architecture=selection.architecture or "",
