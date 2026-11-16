@@ -13,6 +13,7 @@ Rectangle {
     property string selectedContext: ""
     color: Theme.sidebar
     implicitWidth: 244
+    Component.onCompleted: { if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions() }
     onSeedRequestChanged: { if (seedRequest) requestInput.text = seedRequest }
     FolderDialog { id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog; onAccepted: repositoryInput.text = root.mission.localPath(selectedFolder) }
     ColumnLayout {
@@ -34,8 +35,43 @@ Rectangle {
             TextField { id: taskIdInput; objectName: "missionIdInput"; Layout.fillWidth: true; placeholderText: "UUID" }
             Controls.ActionButton { text: "打开"; enabled: !!taskIdInput.text.trim(); onClicked: root.mission.selectMission(taskIdInput.text.trim()) }
         }
-        Label { text: "本次会话的任务"; font.weight: Font.DemiBold; Layout.topMargin: 8 }
-        StateNotice { mission: root.mission; hasData: root.mission.missions.count > 0; emptyText: "暂无任务。"; Layout.fillWidth: true }
+        RowLayout {
+            Layout.fillWidth: true; Layout.topMargin: 8
+            Label { text: "任务历史"; color: Theme.text; font.weight: Font.DemiBold; Layout.fillWidth: true }
+            Controls.ActionButton {
+                objectName: "missionHistoryRefresh"; text: "刷新"
+                enabled: !root.mission.historyLoading; onClicked: root.mission.refreshMissions()
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            TextField {
+                id: repositoryFilterInput; objectName: "missionRepositoryFilter"
+                Layout.fillWidth: true; placeholderText: "按仓库路径筛选（留空为全部）"
+                text: root.mission.repositoryFilter
+                onAccepted: root.mission.repositoryFilter = text
+            }
+            Controls.ActionButton { objectName: "missionApplyRepositoryFilter"; text: "筛选"; onClicked: root.mission.repositoryFilter = repositoryFilterInput.text }
+        }
+        ComboBox {
+            id: statusFilterInput; objectName: "missionStatusFilter"; Layout.fillWidth: true
+            property var values: ["", "pending", "ready", "running", "awaiting_human", "interrupted", "retryable", "succeeded", "failed", "cancelled", "skipped"]
+            model: ["全部状态", "待执行", "已就绪", "执行中", "等待确认", "已中断", "可重试", "已成功", "失败", "已取消", "已跳过"]
+            Accessible.name: "按任务状态筛选"
+            currentIndex: Math.max(0, values.indexOf(root.mission.statusFilter))
+            onActivated: root.mission.statusFilter = values[currentIndex]
+        }
+        Label {
+            objectName: "missionHistoryError"; visible: !!root.mission.historyError
+            text: root.mission.historyError; color: Theme.danger; textFormat: Text.PlainText
+            Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+        }
+        Label {
+            objectName: "missionHistoryStatus"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap
+            text: root.mission.historyLoading ? "正在读取任务历史…"
+                : root.mission.missions.count ? "已显示 " + root.mission.missions.count + " / " + root.mission.historyTotal + " 个任务"
+                : root.mission.historyError ? "读取失败，请刷新重试。" : "暂无符合条件的任务。"
+        }
         ListView {
             id: taskList; objectName: "missionTaskList"; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             model: root.mission.missions; spacing: 5
@@ -54,6 +90,11 @@ Rectangle {
             }
             ScrollBar.vertical: Controls.AppScrollBar {}
         }
-        Label { text: "任务列表仅包含本次会话创建或打开的任务。"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 10; color: Theme.muted }
+        Controls.ActionButton {
+            objectName: "missionHistoryLoadMore"; text: root.mission.historyLoading ? "读取中…" : "加载更多"
+            visible: root.mission.historyHasMore; enabled: !root.mission.historyLoading
+            Layout.fillWidth: true; onClicked: root.mission.loadMoreMissions()
+        }
+        Label { text: "打开历史只查看状态；中断任务需确认恢复计划后才能继续。"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 10; color: Theme.muted }
     }
 }

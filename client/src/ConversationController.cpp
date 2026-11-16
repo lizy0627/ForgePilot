@@ -485,14 +485,18 @@ void ConversationController::clearRepository()
 void ConversationController::sendMessage(const QString &prompt)
 {
     if(busy() || active() || retryPending() || prompt.trimmed().isEmpty()) return;
+    if(m_mode=="task") {
+        if(prompt.size()>8192) { m_error="任务超过 8192 字符上限，请缩短后发送。"; emit changed(); return; }
+        if(repositoryPath().isEmpty()) { m_error="执行任务前必须关联项目。"; emit changed(); return; }
+        m_error.clear();
+        emit codeTaskRequested(prompt.trimmed(),repositoryPath());
+        return;
+    }
     if(prompt.size()>16384) { m_error="问题超过 16384 字符上限，请缩短后发送。"; emit changed(); return; }
-    if(m_mode=="task" && repositoryPath().isEmpty()) { m_error="执行任务前必须关联项目。"; emit changed(); return; }
     if(m_id.isEmpty()) { create(prompt); return; }
     stopAnswerStream(true);
     QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},
-                        {"mode",m_mode},{"prompt",prompt}};
-    if(m_mode=="chat") pending["tool_mode"]=m_toolMode;
-    else pending["use_rag"]=m_useRag;
+                        {"mode","chat"},{"prompt",prompt},{"tool_mode",m_toolMode}};
     m_pending.insert(pendingKey(),pending);
     postPending();
 }

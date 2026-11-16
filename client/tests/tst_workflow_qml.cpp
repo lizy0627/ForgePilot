@@ -89,7 +89,10 @@ struct Fixture {
         setPhase("running", "implementer");
         source.handle = [this](const Request &request) {
             if (intercept && intercept(request)) return;
-            if (request.path.startsWith("/api/v1/")) {
+            if (request.method == "GET" && request.path.startsWith("/api/v2/missions?")) {
+                const QJsonArray items = creates.isEmpty() ? QJsonArray{} : QJsonArray{mission};
+                Source::json(request, {{"items", items}, {"total", items.size()}, {"next_cursor", QJsonValue::Null}});
+            } else if (request.path.startsWith("/api/v1/")) {
                 Source::json(request, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
             } else if (request.path == "/api/v2/missions" && request.method == "POST") {
                 creates.append(request.body);
@@ -314,6 +317,51 @@ private slots:
         for (const auto &name : {"msyh.ttc", "msyhbd.ttc", "segoeui.ttf", "seguisym.ttf", "seguiemj.ttf"})
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
+    }
+    void legacyWorkModeCreatesMission()
+    {
+        Fixture fixture;
+        fixture.intercept = [](const Request &request) {
+            if(request.path == "/api/v1/conversations/" + A.toUtf8()) {
+                Source::json(request, {{"conversation_id", A}, {"title", "旧工作对话"},
+                    {"repository_path", "D:/fixture/repository"}, {"messages", QJsonArray{}}});
+                return true;
+            }
+            return false;
+        };
+        Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        ui.conversations.selectConversation(A); QTRY_VERIFY(!ui.conversations.loading());
+        ui.conversations.setMode("task"); ui.conversations.sendMessage("旧入口的新代码任务");
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        QTRY_COMPARE(ui.missions.taskId(), MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.window->property("agentMode").toBool());
+        QCOMPARE(ui.conversations.mode(), QString("chat"));
+        QCOMPARE(fixture.creates.first().value("repository_path").toString(), QString("D:/fixture/repository"));
+        QCOMPARE(fixture.creates.first().value("request").toString(), QString("旧入口的新代码任务"));
+        for(const auto &request:fixture.source.requests)
+            if(request.method == "POST") QCOMPARE(request.path, QByteArray("/api/v2/missions"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void convertedChatDraftCreatesMissionWithoutHistory()
+    {
+        Fixture fixture; Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        auto *prompt=ui.find("conversationPrompt"); QVERIFY(prompt);
+        prompt->setProperty("text", "选定的任务文本");
+        QTRY_VERIFY(ui.find("convertDraftToAgentTaskButton")->isVisible());
+        QVERIFY(ui.click(ui.find("convertDraftToAgentTaskButton")));
+        auto *input=ui.find("missionRequestInput"); QVERIFY(input);
+        QTRY_COMPARE(input->property("text").toString(), QString("选定的任务文本"));
+        QCOMPARE(fixture.creates.size(), 0);
+        auto *repository=ui.find("missionRepositoryInput"); QVERIFY(repository);
+        repository->setProperty("text", "D:/fixture/repository");
+        QVERIFY(ui.click(ui.find("missionCreateButton")));
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        QCOMPARE(fixture.creates.first().value("request").toString(), QString("选定的任务文本"));
+        QVERIFY(!fixture.creates.first().contains("conversation_id"));
+        QCOMPARE(ui.conversations.mode(), QString("chat"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void createsMissionAndCollapsesDemandWithoutLosingRequest()
     {

@@ -977,6 +977,23 @@ private slots:
         Source::json(posts[1],{{"request_id",posts[1].body.value("request_id")},{"status","completed"}});
         QTRY_VERIFY(!c.retryPending()); QTRY_VERIFY(!c.loading()); QVERIFY(!c.active()); QVERIFY(tasks.taskId().isEmpty());
     }
+    void legacyWorkSubmissionRequestsMissionWithoutPosting() {
+        Source source;
+        source.handle=[&](const Request &r) {
+            if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            else Source::json(r,{{"conversation_id",A},{"title","旧工作对话"},{"messages",QJsonArray{}},{"repository_path","C:/fixture"}});
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        c.selectConversation(A); QTRY_VERIFY(!c.loading());
+        QSignalSpy requested(&c,&ConversationController::codeTaskRequested);
+        c.setMode("task"); c.sendMessage("修改代码");
+        QCOMPARE(requested.size(),1);
+        QCOMPARE(requested[0][0].toString(),QString("修改代码"));
+        QCOMPARE(requested[0][1].toString(),QString("C:/fixture"));
+        QVERIFY(!c.retryPending()); QVERIFY(!c.active()); QVERIFY(tasks.taskId().isEmpty());
+        c.sendMessage(QString(8193,'x')); QCOMPARE(requested.size(),1); QVERIFY(!c.error().isEmpty());
+        for(const auto &request:source.requests) QCOMPARE(request.method,QByteArray("GET"));
+    }
     void conversationLateMutationDoesNotSelectOldTask() {
         Source source; Request pending;
         source.handle=[&](const Request&r) {
@@ -985,8 +1002,8 @@ private slots:
             else Source::json(r,{{"conversation_id",r.path.endsWith(A.toUtf8())?A:B},{"title","对话"},{"messages",QJsonArray{}},{"repository_path","C:/fixture"}});
         };
         TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
-        c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.setMode("task"); c.setUseRag(false); c.sendMessage("修改代码");
-        QTRY_VERIFY(pending.socket); QCOMPARE(pending.body.value("use_rag"),QJsonValue(false));
+        c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.setMode("chat"); c.sendMessage("修改代码前先解释");
+        QTRY_VERIFY(pending.socket); QCOMPARE(pending.body.value("mode"),QJsonValue("chat"));
         c.selectConversation(B); QTRY_VERIFY(!c.loading());
         Source::json(pending,{{"status","running"},{"task_id",A}});
         QTest::qWait(50); QCOMPARE(c.conversationId(),B); QCOMPARE(c.mode(),"chat"); QVERIFY(tasks.taskId().isEmpty()); QVERIFY(!c.active());

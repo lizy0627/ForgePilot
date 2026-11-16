@@ -137,6 +137,12 @@ class MissionHost:
         if operation is not None and not operation.done():
             raise ForgePilotError("task_busy", "Mission operation is still running")
 
+    def list_page(self, limit: int = 20, before: str | None = None, *,
+                  repository_path: str | None = None, status: str | None = None):
+        page = self.store.missions.list_page(limit, before, repository_path=repository_path, status=status)
+        page["items"] = safe_event_data(self.store.redactor, page["items"])
+        return page
+
     def get(self, task_id):
         self._reconcile_delivery(task_id)
         metadata, run, sequence, review = self.store.missions.mission_view(task_id)

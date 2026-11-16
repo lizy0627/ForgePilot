@@ -7,14 +7,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
+import os
 import re
 import sqlite3
 from typing import Any, Mapping
 
 from .artifacts.canonical import canonical_json_bytes
 from .errors import ForgePilotError
+from .history_cursor import decode_cursor, encode_cursor
 from .mission_events import append_mission_event
+from .path_identity import path_key
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -425,6 +429,56 @@ class MissionRepository:
             if row is None:
                 raise ForgePilotError("unknown_mission", "Mission does not exist")
             return json.loads(row[0])
+
+    def list_page(self, limit: int = 20, before: str | None = None, *,
+                  repository_path: str | None = None, status: str | None = None) -> dict[str, Any]:
+        """Read admitted Missions in immutable creation order, without resuming them."""
+        normalized_repository = path_key(repository_path) if repository_path is not None else None
+        filter_hash = sha256(canonical_json_bytes([normalized_repository, status])).hexdigest()
+        boundary = None
+        if before is not None:
+            parts = before.split(".", 2)
+            if len(parts) != 3 or parts[:2] != ["m1", filter_hash]:
+                raise ForgePilotError("invalid_page", "Mission history filters changed; refresh the list")
+            boundary = decode_cursor(parts[2])
+            if boundary is None:
+                raise ForgePilotError("invalid_page", "Mission history cursor is invalid; refresh the list")
+        with self.events._lock:
+            # The admission event is the authority boundary: internal Graph runs
+            # and legacy tasks must never appear as user-created Missions.
+            source = """FROM task_graph_runs g JOIN graph_events e ON e.task_id=g.task_id
+                AND e.sequence=(SELECT MIN(sequence) FROM graph_events
+                    WHERE task_id=g.task_id AND event_type='task.created')"""
+            conditions, params = [], []
+            if repository_path is not None:
+                # A history filter must keep working after a repository moves or
+                # disappears. Normalize spelling, without touching the filesystem.
+                collation = " COLLATE NOCASE" if os.name == "nt" else ""
+                conditions.append("REPLACE(json_extract(e.payload_json,'$.repository_path'),"
+                                  "char(92),'/')" + collation + "=?")
+                params.append(normalized_repository)
+            if status is not None:
+                conditions.append("g.status=?")
+                params.append(status)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            total = self.events._db.execute("SELECT COUNT(*) " + source + where, params).fetchone()[0]
+            if boundary is not None:
+                where += (" AND " if where else " WHERE ") + "(g.created_at,g.task_id)<(?,?)"
+                params.extend(boundary)
+            rows = self.events._db.execute("SELECT g.*,e.payload_json AS metadata_json " + source + where
+                + " ORDER BY g.created_at DESC,g.task_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+            items = []
+            for row in rows[:limit]:
+                metadata = json.loads(row["metadata_json"])
+                item = {key: row[key] for key in ("task_id", "status", "current_revision",
+                    "created_at", "updated_at", "finished_at")}
+                item.update({key: metadata[key] for key in ("repository_path", "request", "task_type",
+                    "orchestration_mode")})
+                item["recovery_required"] = bool(row["recovery_required"])
+                items.append(item)
+            return {"items": items, "total": total,
+                "next_cursor": "m1." + filter_hash + "." + encode_cursor(items[-1]["created_at"], items[-1]["task_id"])
+                    if len(rows) > limit else None}
 
     def is_admitted(self, task_id):
         from .mission_events import is_v2_mission

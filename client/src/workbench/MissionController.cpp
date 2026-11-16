@@ -1,10 +1,35 @@
 #include "MissionController.h"
 #include "MissionProtocol.h"
 #include "Protocol.h"
+#include <QJsonArray>
 #include <QRegularExpression>
 
 MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
 {
+    connect(&m_historyApi, &AgentApiClient::responseReceived, this,
+        [this](quint64 id, const QString &, const QString &, const QJsonObject &body) {
+            if (id != m_historyRequest) return;
+            const auto generation = m_historyGeneration;
+            QPointer<MissionController> guard(this);
+            m_historyRequest = 0; m_historyCursor = body.value("next_cursor").toString();
+            m_historyTotal = body.value("total").toInt(); m_historyLoaded = true; m_historyError.clear();
+            auto items = body.value("items").toArray();
+            QJsonArray currentItems;
+            for (const auto &item : items) {
+                auto summary = item.toObject();
+                if (summary.value("task_id").toString() == m_task && revision() > summary.value("current_revision").toInteger())
+                    summary = m_snapshot;
+                if (m_statusFilter.isEmpty() || summary.value("status").toString() == m_statusFilter) currentItems.append(summary);
+            }
+            m_missions.setPage(currentItems, m_historyAppend);
+            if (guard && generation == m_historyGeneration) emit historyChanged();
+        });
+    connect(&m_historyApi, &AgentApiClient::requestError, this,
+        [this](quint64 id, const QString &, const QString &, int status, const QString &code, const QString &) {
+            if (id != m_historyRequest) return;
+            m_historyRequest = 0; m_historyError = MissionProtocol::errorMessage(code, status);
+            emit historyChanged();
+        });
     connect(&m_loader, &MissionSnapshotLoader::snapshotReady, this, &MissionController::commitSnapshot);
     connect(&m_loader, &MissionSnapshotLoader::loadFailed, this, [this](int status, const QString &code) {
         const auto current = continuation();
@@ -54,7 +79,7 @@ MissionController::~MissionController()
 {
     m_loader.invalidate(); m_requests.clear();
     QObject::disconnect(&m_sse, nullptr, this, nullptr);
-    m_api.abortPending(); m_sse.disconnect();
+    m_api.abortPending(); m_historyApi.abortPending(); m_sse.disconnect();
 }
 std::function<bool()> MissionController::continuation()
 {
@@ -80,16 +105,68 @@ void MissionController::updateAvailability()
 bool MissionController::canControl() const { return m_synchronized && !busy() && !m_task.isEmpty(); }
 void MissionController::setBaseUrl(const QUrl &url)
 {
-    if (url == baseUrl()) return;
+    if (url == baseUrl()) { if (!m_historyLoaded && !historyLoading()) refreshMissions(); return; }
     if (!Protocol::validBaseUrl(url)) { setError("请输入不含凭据的本机 HTTP 后端地址。"); return; }
     QPointer<MissionController> guard(this); const auto nextGeneration = m_generation + 1;
+    ++m_historyGeneration; m_historyRequest = 0; m_historyApi.abortPending();
+    m_historyCursor.clear(); m_historyError.clear(); m_historyTotal = 0; m_historyLoaded = false;
     clearSelection();
     if (!guard || m_generation != nextGeneration) return;
     const auto current = continuation();
     m_missions.clear();
     if (!current()) return;
-    m_api.setBaseUrl(url); m_sse.setBaseUrl(url);
-    if (current()) emit baseUrlChanged();
+    m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_sse.setBaseUrl(url);
+    if (!current()) return;
+    emit baseUrlChanged();
+    if (current()) refreshMissions();
+}
+void MissionController::setRepositoryFilter(const QString &path)
+{
+    const auto filter = path.trimmed();
+    if (filter == m_repositoryFilter) return;
+    m_repositoryFilter = filter;
+    QPointer<MissionController> guard(this);
+    m_missions.clear();
+    if (!guard) return;
+    m_historyLoaded = false; m_historyTotal = 0; refreshMissions();
+}
+void MissionController::setStatusFilter(const QString &status)
+{
+    if (status == m_statusFilter) return;
+    if (!status.isEmpty() && !MissionProtocol::validState(status)) return;
+    m_statusFilter = status;
+    QPointer<MissionController> guard(this);
+    m_missions.clear();
+    if (!guard) return;
+    m_historyLoaded = false; m_historyTotal = 0; refreshMissions();
+}
+void MissionController::refreshMissions()
+{
+    ++m_historyGeneration; m_historyRequest = 0; m_historyApi.abortPending();
+    m_historyCursor.clear(); requestHistory(false);
+}
+void MissionController::loadMoreMissions()
+{
+    if (!historyLoading() && historyHasMore()) requestHistory(true);
+}
+void MissionController::requestHistory(bool append)
+{
+    m_historyAppend = append; m_historyError.clear();
+    m_historyRequest = m_historyApi.listMissions(append ? m_historyCursor : QString{}, m_repositoryFilter, m_statusFilter);
+    emit historyChanged();
+}
+void MissionController::observeMission(const QJsonObject &mission)
+{
+    // Repository identity is immutable and normalized by the server's history filter.
+    // Comparing display paths here would reject aliases such as Windows slash/case variants.
+    if (!m_statusFilter.isEmpty() && mission.value("status").toString() != m_statusFilter) {
+        QPointer<MissionController> guard(this);
+        m_missions.removeMission(mission.value("task_id").toString());
+        if (guard && historyLoading()) refreshMissions();
+        return;
+    }
+    // Detail selection never injects rows into a paginated result or a different filter.
+    m_missions.upsert(mission, false);
 }
 void MissionController::clearSelection()
 {
@@ -167,7 +244,7 @@ void MissionController::received(quint64 request, const QString &task, const QJs
     if (kind == RequestKind::Create) {
         m_mutation = 0; m_task = body.value("task_id").toString();
         m_loader.selectTask(m_task);
-        m_missions.upsert(body);
+        refreshMissions();
         if (!current()) return;
         emit missionChanged();
         if (current()) mutationSnapshot(body);
@@ -203,7 +280,7 @@ void MissionController::commitSnapshot(const MissionSnapshot &snapshot)
     if (!current()) return;
     m_validation.setSnapshot(snapshot.validation);
     if (!current()) return;
-    m_missions.upsert(mission);
+    observeMission(mission);
     if (!current()) return;
     m_approval.setMission(mission);
     if (!current()) return;

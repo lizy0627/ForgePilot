@@ -90,6 +90,11 @@ struct Fixture {
                 Source::json(r, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
                 return;
             }
+            if (r.method == "GET" && r.path.startsWith("/api/v2/missions?")) {
+                Source::json(r, {{"items", QJsonArray{snapshots.value(MissionA), snapshots.value(MissionB)}},
+                    {"total", 2}, {"next_cursor", QJsonValue::Null}});
+                return;
+            }
             const auto parts = r.path.split('/');
             if (parts.size() < 5 || parts[1] != "api" || parts[2] != "v2" || parts[3] != "missions") {
                 Source::json(r, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
@@ -188,6 +193,20 @@ struct Ui {
             return nullptr;
         };
         return visit(root);
+    }
+    void reveal(QQuickItem *item) const
+    {
+        for(auto *parent=item ? item->parentItem() : nullptr; parent; parent=parent->parentItem()) {
+            if(!parent->property("contentY").isValid() || !parent->property("contentHeight").isValid()) continue;
+            const auto top=item->mapToItem(parent,QPointF(0,0)).y();
+            const auto bottom=top+item->height();
+            auto offset=parent->property("contentY").toReal();
+            if(top<0) offset+=top;
+            else if(bottom>parent->height()) offset+=bottom-parent->height();
+            const auto maximum=qMax<qreal>(0,parent->property("contentHeight").toReal()-parent->height());
+            parent->setProperty("contentY",qBound<qreal>(0,offset,maximum));
+            QCoreApplication::processEvents();
+        }
     }
     bool click(const QString &name) const
     {
@@ -500,6 +519,7 @@ private slots:
         QCOMPARE(ui.missions.missions()->count(), 2);
         QVERIFY(ui.find("missionTaskList"));
         auto *first = ui.taskRow(MissionA); QVERIFY(first);
+        ui.reveal(first);
         ui.window->update(); QTest::qWait(30);
         QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier,
             first->mapToScene(QPointF(first->width()/2, first->height()/2)).toPoint());
@@ -507,6 +527,7 @@ private slots:
         QTRY_VERIFY(ui.missions.synchronized());
         QCOMPARE(ui.missions.status(), QString("awaiting_human"));
         auto *second = ui.taskRow(MissionB); QVERIFY(second);
+        ui.reveal(second);
         ui.window->update(); QTest::qWait(30);
         QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier,
             second->mapToScene(QPointF(second->width()/2, second->height()/2)).toPoint());

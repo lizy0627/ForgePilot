@@ -11,6 +11,7 @@ bool validRevision(const QJsonValue &value);
 bool validState(const QString &state);
 bool terminal(const QString &state);
 bool validMission(const QJsonObject &body);
+bool validMissionPage(const QJsonObject &body);
 bool validGraph(const QJsonObject &body);
 bool validArtifact(const QJsonObject &body);
 bool validArtifacts(const QJsonObject &body);

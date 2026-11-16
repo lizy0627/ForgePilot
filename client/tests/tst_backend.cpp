@@ -14,8 +14,35 @@
 #include <algorithm>
 #include <QMetaProperty>
 #include <QNetworkReply>
+#include <QNetworkProxy>
+#include <QUuid>
 #include <QTcpServer>
 #include <functional>
+
+namespace {
+// Exercise persisted v1 conversations explicitly; desktop submissions use Missions.
+bool submitLegacyTask(TaskController &tasks, ConversationController &conversations, const QString &prompt)
+{
+    QNetworkAccessManager network; network.setProxy(QNetworkProxy::NoProxy);
+    auto url=tasks.baseUrl();
+    url.setPath("/api/v1/conversations/"+conversations.conversationId()+"/requests");
+    QNetworkRequest request(url); request.setHeader(QNetworkRequest::ContentTypeHeader,"application/json");
+    QJsonObject body{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {"mode","task"},{"prompt",prompt},{"use_rag",conversations.useRag()}};
+    auto *reply=network.post(request,QJsonDocument(body).toJson(QJsonDocument::Compact));
+    QSignalSpy finished(reply,&QNetworkReply::finished);
+    if(!reply->isFinished() && !finished.wait(15000)) return false;
+    if(reply->error()!=QNetworkReply::NoError || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()!=202) {
+        qWarning()<<"Legacy fixture admission failed"<<reply->readAll(); return false;
+    }
+    const auto admitted=QJsonDocument::fromJson(reply->readAll()).object();
+    const auto task=admitted.value("task_id").toString();
+    if(!task.isEmpty()) tasks.selectTask(task);
+    conversations.refresh();
+    conversations.refreshHistory();
+    return true;
+}
+}
 
 class BackendTest : public QObject {
     Q_OBJECT
@@ -75,7 +102,8 @@ class BackendTest : public QObject {
             QCOMPARE(read(repository+"/main.cpp"),baseline);
             find("conversationPrompt")->setProperty("text",QString("修复 total_price 的金额计算缺陷；保持公开接口、中文注释和用户备注，保护现有测试。"));
             QSignalSpy builds(&controller,&TaskController::buildFinished), tests(&controller,&TaskController::testFinished);
-            QVERIFY(click("sendMessageButton")); QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
+            QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
+            QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
             const auto task=controller.taskId(); QCOMPARE(controller.planVersion(),1); details(0);
             QCOMPARE(read(repository+"/main.cpp"),baseline); QCOMPARE(builds.size(),0); QCOMPARE(tests.size(),0);
             QVERIFY(controller.diffFiles().isEmpty()); QVERIFY(!QFile::exists(repository+"/.forgepilot/build/CMakeCache.txt"));
@@ -444,7 +472,7 @@ private slots:
         if(!output.isEmpty()) QVERIFY(window->grabWindow().save(output+"/input-menu.png"));
         QVERIFY(QMetaObject::invokeMethod(find("conversationPromptMenu"),"close"));
         QSignalSpy builds(&controller,&TaskController::buildFinished), tests(&controller,&TaskController::testFinished);
-        QVERIFY(click("sendMessageButton"));
+        QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
         QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
         QCOMPARE(controller.planVersion(),1);
         QTRY_VERIFY(find("planView"));
@@ -555,7 +583,8 @@ private slots:
         find("resultTabs")->setProperty("currentIndex",0);
         qInfo().noquote()<<"QML completed:"<<completed<<"events="<<count<<"builds="<<builds.size()<<"tests="<<tests.size();
         find("conversationPrompt")->setProperty("text","等待审批后取消");
-        QVERIFY(click("sendMessageButton")); QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
+        QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
         const auto waiting=controller.taskId();
         controller.viewHistoryTask(waiting); QTRY_COMPARE(controller.state(),"waiting_approval");
         QVERIFY(controller.historyReadOnly()); QVERIFY(!find("approveButton")->property("enabled").toBool());
@@ -568,12 +597,14 @@ private slots:
         qInfo().noquote()<<"QML cancelled:"<<controller.taskId()<<controller.snapshot();
         if(!output.isEmpty()) { QTest::qWait(100); QVERIFY(window->grabWindow().save(output+"/cancelled.png")); }
         find("conversationPrompt")->setProperty("text","拒绝本轮方案");
-        QVERIFY(click("sendMessageButton")); QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
+        QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(controller.canApprove(),15000);
         QVERIFY(click("rejectButton")); QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"cancelled",10000);
         QTRY_COMPARE(controller.snapshot().value("outcome").toString(),"rejected");
         QTRY_VERIFY(!conversations.active() && !conversations.busy() && !conversations.loading());
         find("conversationPrompt")->setProperty("text","fixture failure");
-        QVERIFY(click("sendMessageButton")); QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"failed",15000);
+        QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"failed",15000);
         QTRY_VERIFY(!conversations.active() && !conversations.busy() && !conversations.loading());
         QTRY_COMPARE(conversations.messages()->count(),8);
         QVERIFY(conversations.messages()->get(7).value("content").toString().contains("任务失败"));
@@ -592,12 +623,13 @@ private slots:
         QVERIFY(!controller.configureBackend("https://remote.example"));
         QVERIFY(find("errorMessage")->property("text").toString().contains("HTTP"));
         controller.clearError();
-        // Work submitted through the conversation UI still reports repository validation failures.
+        // Legacy conversation fixtures still report repository validation failures.
         conversations.chooseRepository(QUrl::fromLocalFile(repository+"/missing"));
         QTRY_VERIFY(!conversations.busy() && !conversations.loading());
         QVERIFY(click("taskModeButton"));
         find("conversationPrompt")->setProperty("text","开发测试：不存在的仓库");
-        QVERIFY(click("sendMessageButton")); QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"failed",10000);
+        QVERIFY(submitLegacyTask(controller,conversations,find("conversationPrompt")->property("text").toString()));
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"failed",10000);
         QVERIFY(controller.snapshot().value("error").toString().contains("repository"));
         QTRY_VERIFY(!conversations.active() && !conversations.busy() && !conversations.loading());
         QTRY_COMPARE(conversations.messages()->count(),2);

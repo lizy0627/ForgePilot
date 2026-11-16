@@ -259,6 +259,21 @@ bool MissionProtocol::validMission(const QJsonObject &o) {
         if (!text(o.value(key))) return false;
     return o.value("last_event_id").isNull() || (o.value("last_event_id").isString() && Protocol::sequence(o.value("last_event_id").toString(), id) > 0);
 }
+bool MissionProtocol::validMissionPage(const QJsonObject &o) {
+    if (!objects(o.value("items")) || !integer(o.value("total")) || !nullableText(o.value("next_cursor"))) return false;
+    QSet<QString> ids;
+    for (const auto &item : o.value("items").toArray()) {
+        const auto m = item.toObject(); const auto id = m.value("task_id").toString();
+        if (!validId(id) || ids.contains(id) || !validState(m.value("status").toString())
+            || !validRevision(m.value("current_revision")) || !stamp(m.value("created_at")) || !stamp(m.value("updated_at"))
+            || (!m.value("finished_at").isNull() && !stamp(m.value("finished_at")))
+            || !m.value("recovery_required").isBool()) return false;
+        for (const auto &key : {"repository_path", "request", "task_type", "orchestration_mode"})
+            if (!text(m.value(key))) return false;
+        ids.insert(id);
+    }
+    return o.value("total").toInteger() >= ids.size();
+}
 bool MissionProtocol::validGraph(const QJsonObject &o) {
     if (!validId(o.value("task_id").toString()) || !text(o.value("graph_id")) || !integer(o.value("graph_version"), 1)
         || !validHash(o.value("definition_hash")) || !validState(o.value("status").toString())
@@ -328,6 +343,7 @@ bool MissionProtocol::validEvent(const QJsonObject &o, const QString &event, con
         && (!d.contains("artifact_ids") || strings(d.value("artifact_ids")));
 }
 bool MissionProtocol::validResponse(const QString &op, const QString &id, const QJsonObject &o) {
+    if (op == "mission.list") return validMissionPage(o);
     if (op == "mission.resume" || op == "mission.delivery") {
         if (!o.value("mission").isObject() || !validMission(o.value("mission").toObject())
             || o.value("mission").toObject().value("task_id").toString() != id) return false;
@@ -343,6 +359,9 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     return validMission(o);
 }
 bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
+    if (op == "mission.list") return only(o, {"before", "repository_path", "status"})
+        && o.value("before").isString() && o.value("repository_path").isString()
+        && o.value("status").isString() && (o.value("status").toString().isEmpty() || validState(o.value("status").toString()));
     if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile"})
         && text(o.value("repository_path")) && text(o.value("request"))
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))

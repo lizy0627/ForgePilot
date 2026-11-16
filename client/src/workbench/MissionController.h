@@ -26,6 +26,13 @@ class MissionController : public QObject {
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
     Q_PROPERTY(QString connectionState READ connectionState NOTIFY connectionStateChanged)
     Q_PROPERTY(MissionListModel* missions READ missions CONSTANT)
+    Q_PROPERTY(bool historyLoading READ historyLoading NOTIFY historyChanged)
+    Q_PROPERTY(bool historyLoaded READ historyLoaded NOTIFY historyChanged)
+    Q_PROPERTY(bool historyHasMore READ historyHasMore NOTIFY historyChanged)
+    Q_PROPERTY(int historyTotal READ historyTotal NOTIFY historyChanged)
+    Q_PROPERTY(QString historyError READ historyError NOTIFY historyChanged)
+    Q_PROPERTY(QString repositoryFilter READ repositoryFilter WRITE setRepositoryFilter NOTIFY historyChanged)
+    Q_PROPERTY(QString statusFilter READ statusFilter WRITE setStatusFilter NOTIFY historyChanged)
     Q_PROPERTY(GraphModel* graph READ graph CONSTANT)
     Q_PROPERTY(ArtifactModel* artifacts READ artifacts CONSTANT)
     Q_PROPERTY(EvidenceModel* evidence READ evidence CONSTANT)
@@ -48,6 +55,15 @@ public:
     QString error() const { return m_error; }
     QString connectionState() const { return m_sse.connectionState(); }
     MissionListModel *missions() { return &m_missions; }
+    bool historyLoading() const { return m_historyRequest != 0; }
+    bool historyLoaded() const { return m_historyLoaded; }
+    bool historyHasMore() const { return !m_historyCursor.isEmpty(); }
+    int historyTotal() const { return m_historyTotal; }
+    QString historyError() const { return m_historyError; }
+    QString repositoryFilter() const { return m_repositoryFilter; }
+    QString statusFilter() const { return m_statusFilter; }
+    void setRepositoryFilter(const QString &path);
+    void setStatusFilter(const QString &status);
     GraphModel *graph() { return &m_graph; }
     ArtifactModel *artifacts() { return &m_artifacts; }
     EvidenceModel *evidence() { return &m_evidence; }
@@ -56,6 +72,8 @@ public:
     ApprovalController *approval() { return &m_approval; }
     DeliveryController *delivery() { return &m_delivery; }
     Q_INVOKABLE void createMission(const QVariantMap &request);
+    Q_INVOKABLE void refreshMissions();
+    Q_INVOKABLE void loadMoreMissions();
     Q_INVOKABLE void selectMission(const QString &taskId);
     Q_INVOKABLE void clearSelection();
     Q_INVOKABLE void refresh();
@@ -67,6 +85,7 @@ public:
     Q_INVOKABLE QString localPath(const QUrl &folder) const { return folder.toLocalFile(); }
 signals:
     void baseUrlChanged();
+    void historyChanged();
     void missionChanged();
     void availabilityChanged();
     void errorChanged();
@@ -84,9 +103,12 @@ private:
     void updateAvailability();
     bool canControl() const;
     void setError(const QString &message, bool streamError = false);
+    void requestHistory(bool append);
+    void observeMission(const QJsonObject &mission);
     // A synchronous signal may delete the controller or select another mission.
     std::function<bool()> continuation();
     AgentApiClient m_api;
+    AgentApiClient m_historyApi;
     MissionSnapshotLoader m_loader;
     SseClient m_sse;
     MissionListModel m_missions;
@@ -102,6 +124,10 @@ private:
     QString m_task, m_error;
     quint64 m_mutation = 0, m_artifactRequest = 0;
     quint64 m_generation = 0;
+    quint64 m_historyRequest = 0, m_historyGeneration = 0;
+    QString m_historyCursor, m_historyError, m_repositoryFilter, m_statusFilter;
+    int m_historyTotal = 0;
+    bool m_historyAppend = false, m_historyLoaded = false;
     bool m_synchronized = false, m_updatingAvailability = false, m_streamSelected = false;
     bool m_streamError = false;
 };

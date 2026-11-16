@@ -112,6 +112,7 @@ signals:
     void historyChanged();
     void selectionChanged();
     void submitted(const QString &conversationId,const QString &prompt);
+    void codeTaskRequested(const QString &prompt,const QString &repositoryPath);
     void conversationDeleted(const QString &conversationId);
     void mcpToolsChanged();
 private:

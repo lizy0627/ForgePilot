@@ -6,6 +6,7 @@
 #include <QQuickItem>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QtTest>
@@ -55,6 +56,14 @@ private slots:
     }
     void realConversationUi() {
         TaskController tasks; tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
+        // Legacy tasks are historical fixtures; desktop submissions now create Missions.
+        AgentApiClient legacy; QVERIFY(legacy.setBaseUrl(tasks.baseUrl()));
+        auto createLegacyTask=[&](const QString &text) {
+            QSignalSpy replies(&legacy,&AgentApiClient::responseReceived);
+            legacy.createTask(qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY"),text);
+            if(replies.isEmpty() && !replies.wait(15000)) return QString{};
+            return replies.last()[3].toJsonObject().value("task_id").toString();
+        };
         ConversationController c(&tasks);
         QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError>&errors){ for(const auto &error:errors) warnings.append(error.toString()); });
@@ -94,7 +103,9 @@ private slots:
             QTRY_VERIFY(c.active()); QTRY_VERIFY_WITH_TIMEOUT(!c.active(),10000);
             QTRY_VERIFY(!c.loading());
             QVERIFY(c.messages()->get(c.messages()->count()-1).value("content").toString().contains("青松"));
-            tasks.refreshTasks(); QTRY_VERIFY(!tasks.historyLoading()); QCOMPARE(tasks.tasks().size(),3);
+            tasks.refreshTasks(); QTRY_VERIFY(!tasks.historyLoading()); QCOMPARE(tasks.tasks().size(),0);
+            QSignalSpy legacyList(&legacy,&AgentApiClient::responseReceived); legacy.listTasks();
+            QTRY_COMPARE(legacyList.count(),1); QCOMPARE(legacyList.last()[3].toJsonObject().value("total").toInt(),3);
             tasks.viewHistoryTask(qEnvironmentVariable("FORGEPILOT_RESTART_TASK_ID"));
             QTRY_COMPARE(tasks.state(),"completed"); QVERIFY(tasks.historyReadOnly()); QVERIFY(!tasks.canApprove()); QVERIFY(!tasks.canCancel());
             QVERIFY(capture("restart"));
@@ -152,34 +163,38 @@ private slots:
             QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),6,10000); QTRY_VERIFY(!c.active());
             QVERIFY(c.messages()->get(5).value("content").toString().contains("只读文件已检查"));
             QVERIFY(tasks.taskId().isEmpty()); QCOMPARE(tasks.tasks().size(),0); QVERIFY(capture("readonly"));
-            QVERIFY(click("taskModeButton")); QCOMPARE(c.mode(),"task");
-            prompt->setProperty("text","修复 main.cpp 并验证"); QVERIFY(click("sendMessageButton"));
-            QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000); const auto task1=tasks.taskId();
+            const auto task1=createLegacyTask("修复 main.cpp 并验证"); QVERIFY(!task1.isEmpty());
+            tasks.selectTask(task1); window->setProperty("detailsExpanded",true);
+            QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000);
             window->resize(1000,720); prompt->setProperty("text",QString("长草稿 <原文>\n").repeated(1000));
             QTest::qWait(150); auto *approve=qobject_cast<QQuickItem*>(find("approveButton")); QVERIFY(approve);
             QVERIFY(approve->mapToScene(QPointF(approve->width(),approve->height())).y()<window->height());
             QVERIFY(capture("approval-long-draft")); window->resize(1440,960);
             QVERIFY(capture("approval")); QVERIFY(click("approveButton"));
             QTRY_COMPARE_WITH_TIMEOUT(tasks.state(),"completed",60000);
-            QTRY_VERIFY_WITH_TIMEOUT(!c.active(),10000); QTRY_COMPARE(c.messages()->count(),8);
+            QVERIFY(!c.active()); QCOMPARE(c.messages()->count(),6);
             QVERIFY(capture("completed"));
-            prompt->setProperty("text","再次独立执行"); QVERIFY(click("sendMessageButton"));
+            const auto task2=createLegacyTask("再次独立执行"); QVERIFY(!task2.isEmpty()); tasks.selectTask(task2);
             QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000); QVERIFY(task1!=tasks.taskId()); QCOMPARE(tasks.planVersion(),1);
             QVERIFY(click("rejectButton")); QTRY_COMPARE(tasks.state(),"cancelled"); QTRY_VERIFY(!c.active());
-            QTRY_COMPARE(c.messages()->count(),10); QTRY_COMPARE(tasks.tasks().size(),2);
-            QVERIFY(click("chatModeButton")); prompt->setProperty("text","拒绝方案后继续提问"); QVERIFY(click("sendMessageButton"));
-            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),12,10000); QTRY_VERIFY(!c.active());
-            QVERIFY(c.messages()->get(11).value("content").toString().contains("青松")); QCOMPARE(tasks.tasks().size(),2);
-            QVERIFY(click("taskModeButton")); prompt->setProperty("text","启动后停止本轮任务"); QVERIFY(click("sendMessageButton"));
-            QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000); QVERIFY(click("stopTaskButton"));
-            QTRY_COMPARE(tasks.state(),"cancelled"); QTRY_VERIFY(!c.active()); QTRY_COMPARE(c.messages()->count(),14);
-            QVERIFY(click("chatModeButton")); prompt->setProperty("text","停止任务后继续提问"); QVERIFY(click("sendMessageButton"));
-            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),16,10000); QTRY_VERIFY(!c.active());
-            QVERIFY(c.messages()->get(15).value("content").toString().contains("青松")); QTRY_COMPARE(tasks.tasks().size(),3);
+            QCOMPARE(c.messages()->count(),6); QTRY_COMPARE(tasks.tasks().size(),0);
+            window->setProperty("detailsExpanded",false);
+            prompt->setProperty("text","拒绝方案后继续提问"); QVERIFY(click("sendMessageButton"));
+            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),8,10000); QTRY_VERIFY(!c.active());
+            QVERIFY(c.messages()->get(7).value("content").toString().contains("青松")); QCOMPARE(tasks.tasks().size(),0);
+            const auto task3=createLegacyTask("启动后停止本轮任务"); QVERIFY(!task3.isEmpty()); tasks.selectTask(task3);
+            QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000); tasks.cancelTask();
+            QTRY_COMPARE(tasks.state(),"cancelled"); QVERIFY(!c.active()); QCOMPARE(c.messages()->count(),8);
+            window->setProperty("detailsExpanded",false);
+            prompt->setProperty("text","停止任务后继续提问"); QVERIFY(click("sendMessageButton"));
+            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),10,10000); QTRY_VERIFY(!c.active());
+            QVERIFY(c.messages()->get(9).value("content").toString().contains("青松")); QTRY_COMPARE(tasks.tasks().size(),0);
+            QSignalSpy legacyList(&legacy,&AgentApiClient::responseReceived); legacy.listTasks();
+            QTRY_COMPARE(legacyList.count(),1); QCOMPARE(legacyList.last()[3].toJsonObject().value("total").toInt(),3);
             prompt->setProperty("text","fixture chat failure"); QVERIFY(click("sendMessageButton"));
-            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),18,10000);
+            QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),12,10000);
             QTRY_VERIFY_WITH_TIMEOUT(!c.active(),10000);
-            QVERIFY(c.messages()->get(17).value("content").toString().contains("回答未完成")); QVERIFY(capture("failed"));
+            QVERIFY(c.messages()->get(11).value("content").toString().contains("回答未完成")); QVERIFY(capture("failed"));
             window->resize(1000,720); QTRY_COMPARE(window->width(),1000); QTest::qWait(100);
             auto *send=qobject_cast<QQuickItem*>(find("sendMessageButton")); QVERIFY(send);
             QVERIFY(send->mapToScene(QPointF(0,send->height())).y()<window->height());

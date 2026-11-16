@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QtTest>
+#include <QUrlQuery>
 #include "HttpFixture.h"
 
 namespace {
@@ -44,6 +45,25 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void missionHistoryUsesCollectionGetAndValidatesSummaryPages() {
+        auto summary = mission();
+        for (const auto &key : {"review", "last_event_id", "graph_id", "graph_version", "base_ref", "toolchain_profile"}) summary.remove(key);
+        const QJsonObject page{{"items", QJsonArray{summary}}, {"total", 2}, {"next_cursor", "page-two"}};
+        QVERIFY(MissionProtocol::validMissionPage(page));
+        auto bad = page; bad["items"] = QJsonArray{summary, summary}; QVERIFY(!MissionProtocol::validMissionPage(bad));
+        bad = page; bad["total"] = "2"; QVERIFY(!MissionProtocol::validMissionPage(bad));
+        auto malformed = summary; malformed["recovery_required"] = "true";
+        bad = page; bad["items"] = QJsonArray{malformed}; QVERIFY(!MissionProtocol::validMissionPage(bad));
+        Source source; source.handle = [&](const Request &r) { Source::json(r, page); };
+        AgentApiClient api; api.setBaseUrl(source.url()); QSignalSpy responses(&api, &AgentApiClient::responseReceived);
+        api.listMissions("page-two", "D:/项目 with spaces/Example", "interrupted");
+        QTRY_COMPARE(responses.size(), 1); QCOMPARE(source.requests.size(), 1);
+        const auto &request = source.requests.first(); QCOMPARE(request.method, "GET"); QVERIFY(request.body.isEmpty());
+        const auto url = QUrl::fromEncoded(request.path); QCOMPARE(url.path(), "/api/v2/missions");
+        const QUrlQuery query(url); QCOMPARE(query.queryItemValue("limit"), "20");
+        QCOMPARE(query.queryItemValue("before"), "page-two"); QCOMPARE(query.queryItemValue("status"), "interrupted");
+        QCOMPARE(query.queryItemValue("repository_path"), "D:/项目 with spaces/Example");
+    }
     void strictRawJson() {
         QJsonObject o;
         QVERIFY(JsonHttp::parseStrictObject(R"({"text":"汉字","n":8,"items":[{"ok":true}]})", o));

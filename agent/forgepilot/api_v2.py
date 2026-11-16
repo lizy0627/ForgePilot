@@ -1,16 +1,17 @@
 """Bounded HTTP adapter for mission application services and durable SSE."""
-from fastapi import Header, Request
+from fastapi import Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import Headers
 
 from .api_v2_models import (
     CreateMission, MissionApproval, MissionArtifacts, MissionControl, MissionDelivery,
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
-    MissionID, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
+    MissionID, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
     MissionValidation,
 )
 from .errors import ForgePilotError
 from .mcp import decode
+from .orchestration.models import NodeStatus
 
 
 MAX_MISSION_BODY = 65_536
@@ -83,6 +84,18 @@ def register_mission_routes(app, host, streams):
     @app.post(prefix, response_model=MissionResponse, status_code=202, responses=errors)
     async def create_mission(body: CreateMission):
         return await host.create(**body.model_dump())
+
+    @app.get(prefix, response_model=MissionPage, responses=errors)
+    def list_missions(limit: int = Query(default=20, ge=1, le=100),
+                      before: str | None = Query(default=None, min_length=1, max_length=512),
+                      repository_path: str | None = Query(default=None, min_length=1, max_length=4096),
+                      status: NodeStatus | None = Query(default=None)):
+        if repository_path is not None:
+            try:
+                CreateMission.local_absolute_path(repository_path)
+            except ValueError:
+                raise ForgePilotError("invalid_request", "Repository must be a local absolute path") from None
+        return host.list_page(limit, before, repository_path=repository_path, status=status)
 
     @app.get(prefix + "/{task_id}", response_model=MissionResponse, responses=errors)
     def get_mission(task_id: MissionID):

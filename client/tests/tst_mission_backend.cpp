@@ -7,6 +7,27 @@
 class MissionBackendTests : public QObject {
     Q_OBJECT
 private slots:
+    void persistentMissionDiscovery() {
+        QFile evidence(qEnvironmentVariable("FORGEPILOT_INTEGRATION_OUTPUT") + "/mission-qt-snapshot.json");
+        QVERIFY(evidence.open(QIODevice::ReadOnly));
+        const auto previous=QJsonDocument::fromJson(evidence.readAll()).object();
+        MissionController controller;
+        controller.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
+        controller.refreshMissions();
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.historyLoading(),10000);
+        QVERIFY2(controller.historyError().isEmpty(),qPrintable(controller.historyError()));
+        QCOMPARE(controller.missions()->count(),1);
+        QVERIFY(controller.taskId().isEmpty());
+        const auto task=controller.missions()->get(0).value("taskId").toString();
+        QCOMPARE(task,previous.value("task_id").toString());
+        controller.selectMission(task);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.synchronized(),10000);
+        QCOMPARE(controller.status(),QString("succeeded"));
+        QCOMPARE(controller.revision(),previous.value("current_revision").toInteger());
+        QCOMPARE(controller.graph()->rowCount(),3);
+        QCOMPARE(controller.artifacts()->rowCount(),2);
+        QVERIFY(controller.recovery().isEmpty());
+    }
     void productionHttpLifecycle() {
         const auto url = QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL"));
         const auto repository = qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");

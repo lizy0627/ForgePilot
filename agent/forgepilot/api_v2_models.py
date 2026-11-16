@@ -151,6 +151,26 @@ class MissionNode(BaseModel):
     result: dict[str, Any] | None
 
 
+class MissionSummary(BaseModel):
+    task_id: str
+    status: str
+    current_revision: int
+    created_at: str
+    updated_at: str
+    finished_at: str | None
+    repository_path: str
+    request: str
+    task_type: str
+    orchestration_mode: str
+    recovery_required: bool
+
+
+class MissionPage(BaseModel):
+    items: list[MissionSummary]
+    total: int
+    next_cursor: str | None
+
+
 class MissionGraph(BaseModel):
     task_id: str
     graph_id: str

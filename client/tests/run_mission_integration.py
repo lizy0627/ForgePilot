@@ -72,12 +72,25 @@ def run(root, output_root):
                        FORGEPILOT_INTEGRATION_REPOSITORY=str(repository), FORGEPILOT_INTEGRATION_OUTPUT=str(output))
             report = output / "mission-qt-results.txt"
             result = subprocess.run([str(root / "client/build/Release/ForgePilotMissionBackendTests.exe"),
-                                     "-v1", "-o", str(report) + ",txt"], env=env, capture_output=True, timeout=90)
+                                     "productionHttpLifecycle", "-v1", "-o", str(report) + ",txt"], env=env, capture_output=True, timeout=90)
             detail = (report.read_bytes() if report.exists() else b"") + result.stdout + result.stderr
             (output / "mission-qt.log").write_bytes(detail)
             print(detail.decode("utf-8", errors="replace"), flush=True)
             if result.returncode:
                 return result.returncode
+            restart_offset = len(requests)
+            restart_report = output / "mission-restart-results.txt"
+            restarted = subprocess.run([str(root / "client/build/Release/ForgePilotMissionBackendTests.exe"),
+                "persistentMissionDiscovery", "-v1", "-o", str(restart_report) + ",txt"],
+                env=env, capture_output=True, timeout=45)
+            restart_detail = (restart_report.read_bytes() if restart_report.exists() else b"") + restarted.stdout + restarted.stderr
+            (output / "mission-restart.log").write_bytes(restart_detail)
+            print(restart_detail.decode("utf-8", errors="replace"), flush=True)
+            if restarted.returncode:
+                return restarted.returncode
+            discovery_requests = requests[restart_offset:]
+            assert discovery_requests and all(entry["method"] == "GET" for entry in discovery_requests), discovery_requests
+            assert any(entry["path"] == "/api/v2/missions" for entry in discovery_requests), discovery_requests
             with store._lock:
                 missions = [dict(row) for row in store._db.execute("SELECT task_id,status,current_revision FROM task_graph_runs")]
                 approvals = [dict(row) for row in store._db.execute("SELECT task_id,status FROM approvals")]
@@ -90,7 +103,7 @@ def run(root, output_root):
             assert git(git_exe, repository, "rev-parse", "HEAD") == before
             assert not git(git_exe, repository, "status", "--porcelain=v1")
             (output / "mission-backend-evidence.json").write_text(json.dumps(dict(missions=missions, approvals=approvals), indent=2), encoding="utf-8")
-            print("REAL Qt + v2 HTTP + SSE + SQLite + Graph: create, frozen approval, terminal projections, artifacts and real 409 conflicts passed", flush=True)
+            print("REAL Qt + v2 HTTP + SSE + SQLite + Graph: create, frozen approval, terminal projections, artifacts, real 409 conflicts and read-only discovery in a restarted client passed", flush=True)
         finally:
             server.should_exit = True
             thread.join(20)

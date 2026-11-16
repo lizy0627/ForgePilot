@@ -4,8 +4,36 @@
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QQuickItem>
+#include <QJsonDocument>
+#include <QNetworkReply>
+#include <QNetworkProxy>
+#include <QUuid>
 #include <QtTest>
 #include <functional>
+
+namespace {
+bool submitLegacyTask(TaskController &tasks, ConversationController &conversations, const QString &prompt)
+{
+    QNetworkAccessManager network; network.setProxy(QNetworkProxy::NoProxy);
+    auto url=tasks.baseUrl();
+    url.setPath("/api/v1/conversations/"+conversations.conversationId()+"/requests");
+    QNetworkRequest request(url); request.setHeader(QNetworkRequest::ContentTypeHeader,"application/json");
+    QJsonObject body{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {"mode","task"},{"prompt",prompt},{"use_rag",conversations.useRag()}};
+    auto *reply=network.post(request,QJsonDocument(body).toJson(QJsonDocument::Compact));
+    QSignalSpy finished(reply,&QNetworkReply::finished);
+    if(!reply->isFinished() && !finished.wait(15000)) return false;
+    if(reply->error()!=QNetworkReply::NoError || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()!=202) {
+        qWarning()<<"Legacy fixture admission failed"<<reply->readAll(); return false;
+    }
+    const auto admitted=QJsonDocument::fromJson(reply->readAll()).object();
+    const auto task=admitted.value("task_id").toString();
+    if(!task.isEmpty()) tasks.selectTask(task);
+    conversations.refresh();
+    conversations.refreshHistory();
+    return true;
+}
+}
 
 class DeletionBackendTest:public QObject {
     Q_OBJECT
@@ -61,7 +89,8 @@ private slots:
             const auto victim=c.conversationId();
             c.chooseRepository(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY")));
             QTRY_VERIFY(!c.repositoryPath().isEmpty()); QTRY_VERIFY(!c.busy());
-            QVERIFY(click("taskModeButton")); prompt->setProperty("text","修复后删除记录，项目文件保留"); QVERIFY(click("sendMessageButton"));
+            QVERIFY(click("taskModeButton")); prompt->setProperty("text","修复后删除记录，项目文件保留");
+            QVERIFY(submitLegacyTask(tasks,c,prompt->property("text").toString()));
             QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000); QVERIFY(click("approveButton"));
             QTRY_COMPARE_WITH_TIMEOUT(tasks.state(),"completed",60000); QTRY_VERIFY(!c.active());
             QVERIFY(tasks.snapshot().value("build_result").toMap().value("tests").toMap().value("passed").toInt()==1);
@@ -92,7 +121,8 @@ private slots:
             QVERIFY(click("newTaskButton")); QTRY_VERIFY(c.conversationId()!=keep); QTRY_VERIFY(!c.loading()); const auto waiting=c.conversationId();
             c.chooseRepository(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY")));
             QTRY_VERIFY(!c.repositoryPath().isEmpty()); QTRY_VERIFY(!c.busy()); QVERIFY(click("taskModeButton"));
-            prompt->setProperty("text","删除等待审批的任务"); QVERIFY(click("sendMessageButton")); QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000);
+            prompt->setProperty("text","删除等待审批的任务");
+            QVERIFY(submitLegacyTask(tasks,c,prompt->property("text").toString())); QTRY_VERIFY_WITH_TIMEOUT(tasks.canApprove(),15000);
             QTRY_COMPARE(c.history().first().toMap().value("title").toString(),QString("删除等待审批的任务"));
             QTRY_VERIFY(!c.historyLoading()); QTRY_VERIFY(ready("conversationMore_"+waiting)); QVERIFY(click("conversationMore_"+waiting)); QTRY_VERIFY(ready("deleteConversation_"+waiting)); QVERIFY(click("deleteConversation_"+waiting)); QTRY_VERIFY(!c.deleteLoading());
             QVERIFY(c.deleteActive()); QVERIFY(capture("approval-confirm")); QVERIFY(click("confirmDeleteConversationButton"));

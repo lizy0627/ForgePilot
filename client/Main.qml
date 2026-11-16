@@ -42,6 +42,13 @@ ApplicationWindow {
     }
     Connections {
         target: window.conversations
+        function onCodeTaskRequested(prompt, repositoryPath) {
+            if (window.missions) {
+                window.agentMode = true
+                window.conversations.mode = "chat"
+                window.missions.createMission({request: prompt, repository_path: repositoryPath, task_type: "auto"})
+            }
+        }
         function onSelectionChanged() { window.detailsExpanded = false }
         function onChanged() {
             if (window.conversations.mode !== window.previousConversationMode) {

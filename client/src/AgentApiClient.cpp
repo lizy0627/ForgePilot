@@ -106,6 +106,9 @@ quint64 AgentApiClient::send(const QString &operation, const QString &id, const 
 }
 
 quint64 AgentApiClient::createMission(const QJsonObject &body) { return sendMission("mission.create", {}, body); }
+quint64 AgentApiClient::listMissions(const QString &before, const QString &repositoryPath, const QString &status) {
+    return sendMission("mission.list", {}, {{"before", before}, {"repository_path", repositoryPath}, {"status", status}});
+}
 quint64 AgentApiClient::getMission(const QString &id) { return sendMission("mission.get", id); }
 quint64 AgentApiClient::getMissionGraph(const QString &id) { return sendMission("mission.graph", id); }
 quint64 AgentApiClient::getMissionArtifacts(const QString &id) { return sendMission("mission.artifacts", id); }
@@ -134,16 +137,23 @@ quint64 AgentApiClient::rejectRequest(const QString &op, const QString &id, cons
     return serial;
 }
 quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body) {
-    if (op != "mission.create" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
+    if (op != "mission.create" && op != "mission.list" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
     if (!MissionProtocol::validRequest(op, body)) return rejectRequest(op, id, "invalid_request");
     const auto serial = ++m_next;
     QString path = id.isEmpty() ? QString{} : '/' + id;
     const auto action = op.mid(8);
-    const bool readOnly = QSet<QString>{"get", "graph", "artifacts", "artifact", "diff", "validation"}.contains(action);
+    const bool readOnly = QSet<QString>{"get", "list", "graph", "artifacts", "artifact", "diff", "validation"}.contains(action);
     if (action == "approve") path += "/approvals";
     else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();
-    else if (action != "create" && action != "get") path += '/' + action;
-    auto *reply = JsonHttp::send(m_network, this, readOnly ? "GET" : "POST", MissionProtocol::endpoint(m_base, path),
+    else if (action != "create" && action != "get" && action != "list") path += '/' + action;
+    auto url = MissionProtocol::endpoint(m_base, path);
+    if (action == "list") {
+        QUrlQuery query; query.addQueryItem("limit", "20");
+        for (const auto &key : {"before", "repository_path", "status"})
+            if (!body.value(key).toString().isEmpty()) query.addQueryItem(key, body.value(key).toString());
+        url.setQuery(query);
+    }
+    auto *reply = JsonHttp::send(m_network, this, readOnly ? "GET" : "POST", url,
         readOnly ? QJsonObject{} : body, 64 * 1024 * 1024,
         [=, this](QNetworkReply *completed, const JsonHttp::Response &response) {
             if (!m_pending.remove(completed)) return;

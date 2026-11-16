@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QFile>
 #include <QAbstractItemModelTester>
+#include <QUrlQuery>
 #include "HttpFixture.h"
 #include "workbench/MissionController.h"
 #include "workbench/MissionProtocol.h"
@@ -49,7 +50,8 @@ struct Fixture {
         source.handle = [this](const Request &r) {
             if (intercept && intercept(r)) return;
             const auto task = current.value("task_id");
-            if (r.path.endsWith("/events")) { streams.append(r); Source::stream(r, ": ready\n\n", false); }
+            if (r.path.startsWith("/api/v2/missions?")) Source::json(r, {{"items", QJsonArray{current}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            else if (r.path.endsWith("/events")) { streams.append(r); Source::stream(r, ": ready\n\n", false); }
             else if (r.path.endsWith("/graph")) Source::json(r, graph(current));
             else if (r.path.endsWith("/artifacts")) Source::json(r, {{"task_id", task}, {"items", QJsonArray{}}});
             else if (r.path.endsWith("/diff")) Source::json(r, {{"task_id", task}, {"patch", ""}, {"change_sets", QJsonArray{}}});
@@ -68,6 +70,83 @@ class MissionControllerTests : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(MissionProtocol::validMission(mission())); QVERIFY(MissionProtocol::validGraph(graph(mission()))); }
+    void historyDiscoverySurvivesClientRestartWithoutResuming()
+    {
+        Fixture f; f.current = mission(A, 8, "interrupted"); f.current.insert("recovery_required", true);
+        {
+            MissionController first; first.setBaseUrl(f.source.url());
+            QTRY_VERIFY(first.historyLoaded()); QCOMPARE(first.missions()->count(), 1);
+            first.selectMission(A); QTRY_VERIFY(first.synchronized());
+        }
+        MissionController restarted; restarted.setBaseUrl(f.source.url());
+        QTRY_VERIFY(restarted.historyLoaded()); QCOMPARE(restarted.missions()->get(0).value("taskId").toString(), A);
+        QVERIFY(restarted.taskId().isEmpty()); restarted.selectMission(A); QTRY_VERIFY(restarted.synchronized());
+        QCOMPARE(restarted.status(), "interrupted"); QVERIFY(restarted.recovery().isEmpty());
+        for (const auto &request : f.source.requests) QCOMPARE(request.method, "GET");
+    }
+    void historyPaginationFiltersAndRefreshDiscardLatePages()
+    {
+        Fixture f; QList<Request> held; bool hold = false;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.startsWith("/api/v2/missions?")) return false;
+            if (hold) { held.append(r); return true; }
+            const QUrlQuery query(QUrl::fromEncoded(r.path));
+            if (query.queryItemValue("status") == "failed") {
+                Source::json(r, {{"items", QJsonArray{mission(B, 9, "failed")}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            } else if (!query.queryItemValue("before").isEmpty()) {
+                Source::json(r, {{"items", QJsonArray{mission(B)}}, {"total", 2}, {"next_cursor", QJsonValue::Null}});
+            } else Source::json(r, {{"items", QJsonArray{mission()}}, {"total", 2}, {"next_cursor", "stable-page-two"}});
+            return true;
+        };
+        MissionController c; c.setBaseUrl(f.source.url()); QTRY_VERIFY(c.historyLoaded());
+        QCOMPARE(c.missions()->count(), 1); QVERIFY(c.historyHasMore());
+        c.loadMoreMissions(); QTRY_COMPARE(c.missions()->count(), 2); QVERIFY(!c.historyHasMore());
+        QCOMPARE(c.missions()->get(0).value("taskId").toString(), A); QCOMPARE(c.missions()->get(1).value("taskId").toString(), B);
+        c.refreshMissions(); QTRY_COMPARE(c.missions()->count(), 1);
+        hold = true; c.loadMoreMissions(); QTRY_COMPARE(held.size(), 1);
+        hold = false; c.setStatusFilter("failed"); QTRY_VERIFY(!c.historyLoading());
+        QCOMPARE(c.historyTotal(), 1); QCOMPARE(c.missions()->get(0).value("taskId").toString(), B);
+        Source::json(held.first(), {{"items", QJsonArray{mission()}}, {"total", 2}, {"next_cursor", QJsonValue::Null}});
+        c.selectMission(A); QTRY_VERIFY(c.synchronized()); QTest::qWait(50);
+        QCOMPARE(c.missions()->count(), 1); QCOMPARE(c.missions()->get(0).value("taskId").toString(), B);
+        c.setRepositoryFilter("D:/Projects/Example"); QTRY_VERIFY(!c.historyLoading());
+        const QUrlQuery query(QUrl::fromEncoded(f.source.requests.last().path));
+        QCOMPARE(query.queryItemValue("repository_path"), "D:/Projects/Example"); QCOMPARE(query.queryItemValue("status"), "failed");
+    }
+    void historyErrorsAreIndependentFromSelectedMission()
+    {
+        Fixture f; MissionController c; c.setBaseUrl(f.source.url()); QTRY_VERIFY(c.historyLoaded());
+        c.selectMission(A); QTRY_VERIFY(c.synchronized());
+        f.intercept = [&](const Request &r) {
+            if (!r.path.startsWith("/api/v2/missions?")) return false;
+            Source::json(r, conflict("mission_internal"), 500); return true;
+        };
+        c.refreshMissions(); QTRY_VERIFY(!c.historyError().isEmpty());
+        QVERIFY(c.error().isEmpty()); QVERIFY(c.synchronized()); QCOMPARE(c.taskId(), A);
+        f.intercept = {}; c.refreshMissions(); QTRY_VERIFY(!c.historyLoading()); QVERIFY(c.historyError().isEmpty());
+    }
+    void historyUsesServerRepositoryIdentityAndNewestObservedRevision()
+    {
+        Fixture f; f.current = mission(A, 11, "running");
+        MissionController c; c.setBaseUrl(f.source.url()); QTRY_VERIFY(c.historyLoaded());
+        c.setRepositoryFilter("d:\\projects\\example"); QTRY_VERIFY(!c.historyLoading());
+        c.selectMission(A); QTRY_VERIFY(c.synchronized());
+        QCOMPARE(c.missions()->count(), 1); // The server accepted the slash/case alias.
+        QList<Request> held;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.startsWith("/api/v2/missions?")) return false;
+            held.append(r); return true;
+        };
+        c.setStatusFilter("running"); QTRY_COMPARE(held.size(), 1); QCOMPARE(c.missions()->count(), 0);
+        Source::json(held.first(), {{"items", QJsonArray{mission(A, 8, "running")}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+        QTRY_VERIFY(!c.historyLoading()); QCOMPARE(c.missions()->get(0).value("revision").toLongLong(), 11);
+        c.refreshMissions(); QTRY_COMPARE(held.size(), 2);
+        f.current = mission(A, 12, "failed"); c.refresh(); QTRY_COMPARE(c.revision(), 12);
+        QTRY_COMPARE(held.size(), 3); QCOMPARE(c.missions()->count(), 0);
+        Source::json(held[1], {{"items", QJsonArray{mission(A, 8, "running")}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+        Source::json(held[2], {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
+        QTRY_VERIFY(!c.historyLoading()); QCOMPARE(c.missions()->count(), 0); QCOMPARE(c.historyTotal(), 0);
+    }
     void loadsModelsAndApprovesOnlyCurrentFrozenPackage()
     {
         Fixture f; MissionController c; c.setBaseUrl(f.source.url());
