@@ -13,7 +13,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Desktop.ps1" -Acti
 set "FORGEPILOT_DESKTOP_EXIT=%errorlevel%"
 if not "%FORGEPILOT_DESKTOP_EXIT%"=="0" goto failed
 if /i "%~1"=="Check" pause
-if /i "%~1"=="Configure" pause
 goto finish
 :failed
 if "%FORGEPILOT_DESKTOP_EXIT%"=="0" set "FORGEPILOT_DESKTOP_EXIT=1"

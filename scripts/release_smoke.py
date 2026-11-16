@@ -17,6 +17,33 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENT = ROOT / "agent"
 
 
+def configuration_helper_command(config: Path) -> list[str]:
+    """Use the same packaged launcher entrypoint as the offline Qt wizard."""
+    prefix = ([sys.executable] if getattr(sys, "frozen", False) else
+              [sys.executable, "-I", str(ROOT / "scripts" / "desktop_launcher.py")])
+    return [*prefix, "config-helper", "--config", str(config)]
+
+
+def configuration_helper_smoke(directory: Path, environment: dict[str, str]) -> bool:
+    """Read absent settings through the helper without saving or making requests."""
+    config = directory / "unconfigured" / "config.json"
+    helper_environment = dict(environment)
+    helper_environment.pop("FORGEPILOT_API_KEY", None)
+    try:
+        result = subprocess.run(configuration_helper_command(config),
+            input=b'{"action":"load"}\n', cwd=ROOT, env=helper_environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        response = json.loads(result.stdout)
+        return (result.returncode == 0 and isinstance(response, dict) and response.get("ok") is True
+                and response.get("configured") is False
+                and response.get("has_api_key") is False
+                and response.get("has_embedding_key") is False and not config.exists())
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return False
+
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -40,6 +67,8 @@ def main() -> int:
                        ALL_PROXY="http://127.0.0.1:9", NO_PROXY="127.0.0.1,localhost,::1")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     with tempfile.TemporaryDirectory(prefix="forgepilot-release-", ignore_cleanup_errors=True) as directory:
+        if not configuration_helper_smoke(Path(directory), environment):
+            return 1
         database = Path(directory) / "health.sqlite3"
         command = [
             sys.executable,
@@ -81,6 +110,7 @@ def main() -> int:
                         schema = json.load(response)
                     if schema.get("openapi") and "/api/v1/conversations" in schema.get("paths", {}):
                         print("Offline backend health check passed.")
+                        print("Offline configuration helper check passed.")
                         print(f"backend_ready_ms={(time.monotonic() - launched_at) * 1000:.3f}")
                         return 0
                     return 1

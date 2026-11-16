@@ -757,6 +757,19 @@
         "title": "FileChange",
         "type": "object"
       },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
       "MCPCallRecord": {
         "properties": {
           "arguments_excerpt": {
@@ -3233,6 +3246,12 @@
         "title": "PlanFeedback",
         "type": "object"
       },
+      "PrepareRestart": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "PrepareRestart",
+        "type": "object"
+      },
       "PreviewMission": {
         "additionalProperties": false,
         "properties": {
@@ -3625,6 +3644,24 @@
           "revision"
         ],
         "title": "RagIndexStatusResponse",
+        "type": "object"
+      },
+      "RuntimeStatus": {
+        "properties": {
+          "active_count": {
+            "title": "Active Count",
+            "type": "integer"
+          },
+          "restarting": {
+            "title": "Restarting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "active_count",
+          "restarting"
+        ],
+        "title": "RuntimeStatus",
         "type": "object"
       },
       "SummaryState": {
@@ -4419,6 +4456,46 @@
           }
         },
         "title": "UpdateConversation",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
         "type": "object"
       }
     }
@@ -11463,6 +11540,62 @@
           }
         },
         "summary": "Mission Validation"
+      }
+    },
+    "/api/v2/runtime/prepare-restart": {
+      "post": {
+        "operationId": "prepare_restart_api_v2_runtime_prepare_restart_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareRestart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Prepare Restart"
+      }
+    },
+    "/api/v2/runtime/status": {
+      "get": {
+        "operationId": "runtime_status_api_v2_runtime_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Runtime Status"
       }
     }
   }

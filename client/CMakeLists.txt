@@ -23,6 +23,7 @@ add_library(ForgePilotCommunication STATIC
     src/RagController.h src/RagController.cpp
     src/MemoryController.h src/MemoryController.cpp
     src/McpController.h src/McpController.cpp
+    src/RuntimeConfigController.h src/RuntimeConfigController.cpp
     src/RecordListModel.h src/RecordListModel.cpp
     src/RepositoryModel.h src/RepositoryModel.cpp)
 target_sources(ForgePilotCommunication PRIVATE
@@ -49,7 +50,7 @@ set_target_properties(ForgePilotClient PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(ForgePilotClient PRIVATE ForgePilotCommunication Qt6::Quick Qt6::Qml Qt6::QuickControls2 Qt6::QuickDialogs2)
 qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/ConversationPanel.qml panels/ConversationHistoryPanel.qml panels/PlanPanel.qml panels/TracePanel.qml panels/BuildPanel.qml
-    panels/DiffPanel.qml panels/RepositoryPanel.qml panels/TaskHistoryPanel.qml panels/SettingsPanel.qml
+    panels/DiffPanel.qml panels/RepositoryPanel.qml panels/TaskHistoryPanel.qml panels/SettingsPanel.qml panels/RuntimeConfigDialog.qml
     panels/McpSettingsPanel.qml panels/McpServerDialog.qml panels/McpToolsDialog.qml
     panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
@@ -82,6 +83,13 @@ if(BUILD_TESTING)
     # Windows debug/CI hosts even when every individual case is healthy.
     set_tests_properties(client_communication PROPERTIES TIMEOUT 120)
     set_target_properties(ForgePilotClientTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    qt_add_executable(ForgePilotRuntimeConfigTests tests/tst_runtime_config.cpp)
+    target_link_libraries(ForgePilotRuntimeConfigTests PRIVATE ForgePilotCommunication Qt6::Test Qt6::Quick Qt6::Qml Qt6::QuickControls2)
+    target_compile_options(ForgePilotRuntimeConfigTests PRIVATE /utf-8)
+    target_compile_definitions(ForgePilotRuntimeConfigTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    set_target_properties(ForgePilotRuntimeConfigTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME client_runtime_config COMMAND ForgePilotRuntimeConfigTests -o "${CMAKE_CURRENT_BINARY_DIR}/runtime_config-results.txt,txt")
+    set_tests_properties(client_runtime_config PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     foreach(suite mission_api mission_sse workbench_models mission_controller mission_snapshot)
         qt_add_executable(ForgePilot_${suite}_tests tests/tst_${suite}.cpp)
         target_link_libraries(ForgePilot_${suite}_tests PRIVATE ForgePilotCommunication Qt6::Test)

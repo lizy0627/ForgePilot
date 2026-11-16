@@ -72,6 +72,30 @@ def startup_evidence(config, result, env):
     }, ensure_ascii=True)
 
 
+def close_fixture_window(pid):
+    api = ctypes.WinDLL('user32', use_last_error=True)
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    api.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    api.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    api.IsWindowVisible.argtypes = [wintypes.HWND]
+    api.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    closed = []
+    @callback_type
+    def visit(window, _):
+        owner = wintypes.DWORD()
+        api.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == pid and api.IsWindowVisible(window):
+            closed.append(bool(api.PostMessageW(window, 0x10, 0, 0)))
+        return True
+    deadline = time.monotonic() + 10
+    while not closed:
+        api.EnumWindows(visit, 0)
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    assert all(closed)
+
+
+
 def wait_stopped(config):
     deadline = time.monotonic() + 8
     while launcher.Kernel(config).running() and time.monotonic() < deadline:
@@ -343,7 +367,7 @@ async def test_model_check_names_invalid_configuration_purpose(tmp_path,monkeypa
 
 
 @pytest.mark.parametrize('existing_key', [False, True])
-def test_configure_checks_before_saving_and_check_reads_saved_key(tmp_path, existing_key):
+def test_gui_saves_offline_and_check_reads_saved_key(tmp_path, existing_key):
     accepted = False
     received = []
 
@@ -380,7 +404,8 @@ def test_configure_checks_before_saving_and_check_reads_saved_key(tmp_path, exis
         return subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
                               env=env, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
 
-    def entry(name):
+    def entry(action):
+        name = 'Configure-ForgePilot.cmd' if action == 'Configure' else 'Check-Model.cmd'
         result = subprocess.run(['cmd.exe', '/d', '/c', str(ROOT / name)], env=env, capture_output=True,
                                 timeout=45, stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
         assert KEY.encode() not in result.stdout + result.stderr
@@ -392,26 +417,41 @@ def test_configure_checks_before_saving_and_check_reads_saved_key(tmp_path, exis
                                "$s | ConvertFrom-SecureString | Set-Content -Encoding ASCII -LiteralPath $env:FORGEPILOT_TEST_KEY_FILE; $s.Dispose()")
             assert saved.returncode == 0
         original_key = encrypted.read_bytes() if encrypted.exists() else None
-        failure = entry('Configure-ForgePilot.cmd')
-        assert failure.returncode != 0
-        assert '模型鉴权失败' in (failure.stdout + failure.stderr).decode('utf-8', errors='replace')
+        from forgepilot.desktop_configuration import handle_request
+        loaded = asyncio.run(handle_request(config, {"action": "load"}))
+        fields = {**loaded["fields"], "chat_model": "offline-check", "task_model": "offline-check",
+                  "summary_model": "offline-check", "review_model": "offline-review",
+                  "task_model_family": "writer", "review_model_family": "reviewer"}
+        invalid = asyncio.run(handle_request(config, {"action": "save", "config_revision": loaded["config_revision"],
+            "fields": {**fields, "review_model_family": "writer"}, "api_key": KEY}))
+        assert not invalid["ok"]
         assert (encrypted.read_bytes() if encrypted.exists() else None) == original_key
         assert config.read_bytes() == original_config
-        assert len(received) == 1
-        accepted = True
-        success = entry('Configure-ForgePilot.cmd')
-        assert success.returncode == 0, (success.stdout + success.stderr).decode(errors='replace')
-        assert KEY not in encrypted.read_text()
+        saved_config = asyncio.run(handle_request(config, {"action": "save", "config_revision": loaded["config_revision"],
+            "fields": fields, "api_key": KEY}))
+        assert saved_config["ok"] and saved_config["restart_required"]
+        assert received == []  # GUI saves do not trigger connection detection.
+        data = json.loads(config.read_text(encoding="utf-8"))
+        encrypted = config.parent / data["credential_file"]
+        env['FORGEPILOT_TEST_KEY_FILE'] = str(encrypted)
+        assert KEY not in encrypted.read_text() and KEY not in config.read_text(encoding="utf-8")
         saved = encrypted.read_bytes()
+        final_config = config.read_bytes()
         decrypted = powershell("$s=(Get-Content -Raw -LiteralPath $env:FORGEPILOT_TEST_KEY_FILE).Trim() | ConvertTo-SecureString; "
                                "try { if ([Net.NetworkCredential]::new('', $s).Password -cne $env:FORGEPILOT_API_KEY) { exit 2 } } finally { $s.Dispose() }")
         assert decrypted.returncode == 0
         env['FORGEPILOT_API_KEY'] = 'unrelated-inherited-key'
-        assert entry('Check-Model.cmd').returncode == 0
-        assert len(received) == 3
-        assert all(path == '/v1/chat/completions' and auth == 'Bearer ' + KEY and body['model'] == 'offline-check'
-                   for path, auth, body in received)
-        assert encrypted.read_bytes() == saved and config.read_bytes() == original_config
+        failure = entry('Check')
+        assert failure.returncode != 0
+        assert '模型鉴权失败' in (failure.stdout + failure.stderr).decode('utf-8', errors='replace')
+        assert len(received) == 2
+        assert encrypted.read_bytes() == saved and config.read_bytes() == final_config
+        accepted = True
+        assert entry('Check').returncode == 0
+        assert len(received) == 4
+        assert all(path == '/v1/chat/completions' and auth == 'Bearer ' + KEY
+                   and body['model'] in {'offline-check', 'offline-review'} for path, auth, body in received)
+        assert encrypted.read_bytes() == saved and config.read_bytes() == final_config
         assert not list(config.parent.glob('api-key-*.tmp'))
         assert not (config.parent / 'runtime.json').exists()
     finally:
@@ -420,7 +460,7 @@ def test_configure_checks_before_saving_and_check_reads_saved_key(tmp_path, exis
         thread.join(timeout=5)
 
 
-def test_configure_saves_and_checks_distinct_purpose_models(tmp_path):
+def test_gui_save_and_explicit_check_use_distinct_purpose_models(tmp_path):
     received=[]
     class Endpoint(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -443,13 +483,21 @@ def test_configure_saves_and_checks_distinct_purpose_models(tmp_path):
                FORGEPILOT_CHAT_MODEL='fast-chat',FORGEPILOT_TASK_MODEL='quality-task',
                FORGEPILOT_SUMMARY_MODEL='cheap-summary')
     try:
-        result=subprocess.run(['cmd.exe','/d','/c',str(ROOT/'Configure-ForgePilot.cmd')],env=env,
+        from forgepilot.desktop_configuration import handle_request
+        loaded = asyncio.run(handle_request(config, {"action": "load"}))
+        fields = {**loaded["fields"], "chat_model": "fast-chat", "task_model": "quality-task",
+                  "summary_model": "cheap-summary", "review_model": "independent-review",
+                  "task_model_family": "writer", "review_model_family": "reviewer"}
+        saved_result = asyncio.run(handle_request(config, {"action": "save", "fields": fields,
+            "api_key": KEY, "config_revision": loaded["config_revision"]}))
+        assert saved_result["ok"] and not received
+        result=subprocess.run(['cmd.exe','/d','/c',str(ROOT/'Check-Model.cmd')],env=env,
             capture_output=True,timeout=50,stdin=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)
         assert result.returncode==0,(result.stdout+result.stderr).decode(errors='replace')
         saved=json.loads(config.read_text(encoding='utf-8-sig'))
         assert [saved[name] for name in ('chat_model','task_model','summary_model')]==[
             'fast-chat','quality-task','cheap-summary']
-        assert received==['fast-chat','quality-task','cheap-summary']
+        assert received==['fast-chat','quality-task','cheap-summary','independent-review']
         assert KEY.encode() not in result.stdout+result.stderr
         assert KEY not in config.read_text(encoding='utf-8-sig')
     finally:
@@ -460,6 +508,8 @@ def test_configure_saves_and_checks_distinct_purpose_models(tmp_path):
 def test_cmd_entrypoints_and_dpapi_roundtrip(configured, tmp_path, bad_backend):
     config, data, env = configured
     local = tmp_path / 'local app data 测试 🧪'
+    data.update(chat_model=data['model'], task_model=data['model'], summary_model=data['model'],
+                review_model='offline-review', task_model_family='writer', review_model_family='reviewer')
     if bad_backend:
         data['server_args'].append('--unknown-server-option')
     identity = hashlib.sha256(str(ROOT).lower().encode('utf-8')).hexdigest()[:16].upper()
@@ -479,19 +529,22 @@ def test_cmd_entrypoints_and_dpapi_roundtrip(configured, tmp_path, bad_backend):
     env = {**env, 'LOCALAPPDATA': str(local)}
     env.pop('FORGEPILOT_API_KEY')  # Entry point must decrypt it, not reuse our test environment.
 
-    def entry(name):
-        return subprocess.run(['cmd.exe', '/d', '/c', str(ROOT / name)], env=env,
+    def entry(action):
+        return subprocess.run(['cmd.exe', '/d', '/c', str(ROOT / f'{action}-ForgePilot.cmd')], env=env,
                               cwd=tmp_path, capture_output=True, timeout=55, stdin=subprocess.DEVNULL,
                               creationflags=subprocess.CREATE_NO_WINDOW)
     try:
-        started = entry('Start-ForgePilot.cmd')
-        assert started.returncode == (1 if bad_backend else 0), started.stdout.decode(errors='replace')
+        started = entry('Start')
+        assert started.returncode == 0, started.stdout.decode(errors='replace')
         assert runtime(actual)['status'] == ('failed' if bad_backend else 'running')
         if bad_backend:
             assert b'backend_start_failed' in started.stdout
-            assert b'ForgePilot launcher failed' in started.stdout
+            assert b'configuration_client_pid' in started.stdout
+            import re
+            pid = int(re.search(rb'"configuration_client_pid"\s*:\s*(\d+)', started.stdout).group(1))
+            close_fixture_window(pid)
         assert KEY.encode() not in started.stdout + started.stderr
-        stopped = entry('Stop-ForgePilot.cmd')
+        stopped = entry('Stop')
         assert stopped.returncode == 0, stopped.stdout.decode(errors='replace')
         if not bad_backend:
             assert runtime(actual)['shutdown'] == 'graceful'

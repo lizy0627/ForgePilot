@@ -2,6 +2,7 @@
 #include "ConversationController.h"
 #include "McpController.h"
 #include "RagController.h"
+#include "RuntimeConfigController.h"
 #include "ClientUi.h"
 #include "workbench/MissionController.h"
 #include <QCommandLineParser>
@@ -20,6 +21,8 @@ int main(int argc, char* argv[])
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption({"server", "本机后端 HTTP 地址", "url", "http://127.0.0.1:8765"});
+    parser.addOption({"runtime-config", "本机启动器配置路径", "path"});
+    parser.addOption({"configure", "打开运行配置向导"});
     parser.process(app);
     TaskController controller;
     controller.setBaseUrl(QUrl(parser.value("server")));
@@ -38,8 +41,11 @@ int main(int argc, char* argv[])
                      [&] { rag.setRepositoryPath(controller.repositoryPath()); });
     QObject::connect(&rag, &RagController::useForTasksChanged, &conversations,
                      [&] { conversations.setUseRag(rag.useForTasks()); });
+    RuntimeConfigController runtimeConfig;
+    QObject::connect(&runtimeConfig, &RuntimeConfigController::restartAccepted, &app, &QCoreApplication::quit);
+    runtimeConfig.configureHelper(parser.value("runtime-config"));
     QQmlApplicationEngine engine;
-    engine.setInitialProperties({{"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
+    engine.setInitialProperties({{"runtimeConfig", QVariant::fromValue(&runtimeConfig)}, {"showRuntimeConfiguration", parser.isSet("configure")}, {"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("ForgePilot", "Main");
     return app.exec();

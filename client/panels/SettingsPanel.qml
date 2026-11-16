@@ -9,6 +9,8 @@ ColumnLayout {
     required property var controller
     property var mcp: null
     property var rag: null
+    property var runtimeConfig: null
+    signal configureRuntimeRequested()
     onVisibleChanged: if (visible && rag && controller.repositoryPath) rag.refresh()
     TabBar {
         id: tabs; Layout.fillWidth: true
@@ -18,6 +20,17 @@ ColumnLayout {
     StackLayout {
         currentIndex: tabs.currentIndex; Layout.fillWidth: true; Layout.fillHeight: true
         ColumnLayout {
+            Panel {
+                Layout.fillWidth: true; title: "运行配置"
+                Label {
+                    Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Theme.secondary
+                    text: "配置模型、密钥及可选开发工具。后端未启动时也可打开；保存后通过受控重启生效。"
+                }
+                ActionButton {
+                    objectName: "openRuntimeConfigButton"; text: "配置模型与运行环境"; enabled: !!root.runtimeConfig
+                    onClicked: root.configureRuntimeRequested()
+                }
+            }
             Panel {
                 Layout.fillWidth: true; title: "连接"; subtitle: "本机后端"
                 RowLayout {

@@ -13,6 +13,9 @@ ApplicationWindow {
     property var mcp: null
     property var rag: null
     property var missions: null
+    property var runtimeConfig: null
+    property bool showRuntimeConfiguration: false
+    property bool configurationPrompted: false
     property bool developmentTest: false
     property bool detailsExpanded: false
     property bool sidebarExpanded: true
@@ -30,7 +33,21 @@ ApplicationWindow {
     onClosing: function(close) { if (window.mcp && !window.mcp.canCloseEditor) close.accepted = false }
     font.family: "Microsoft YaHei UI"; font.pixelSize: 13
     palette: DarkPalette {}
-    Component.onCompleted: conversations.refreshHistory()
+    Component.onCompleted: {
+        conversations.refreshHistory()
+        if (runtimeConfig) runtimeConfig.load()
+        if (showRuntimeConfiguration) { configurationPrompted = true; runtimeConfigDialog.open() }
+    }
+    Connections {
+        target: window.runtimeConfig
+        function onChanged() {
+            if (window.runtimeConfig.wizardRequired && !window.configurationPrompted) {
+                window.configurationPrompted = true
+                runtimeConfigDialog.open()
+            }
+        }
+    }
+    RuntimeConfigDialog { id: runtimeConfigDialog; controller: window.runtimeConfig }
     Connections {
         target: controller
         function onTaskFinished(state) { controller.refreshTasks() }
@@ -250,7 +267,7 @@ ApplicationWindow {
         width: Math.min(800, window.width - 48); height: Math.min(640, window.height - 48)
         onOpened: { if (window.mcp) window.mcp.open(); if (window.rag) window.rag.refresh() }
         onClosed: { if (window.mcp) window.mcp.close() }
-        contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag }
+        contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag; runtimeConfig: window.runtimeConfig; onConfigureRuntimeRequested: { settingsDialog.close(); runtimeConfigDialog.open() } }
         footer: DialogButtonBox { ActionButton { objectName: "closeSettingsButton"; text: "完成"; enabled: !window.mcp || window.mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }
     }
     Loader { active: !!window.mcp; sourceComponent: Component { McpServerDialog { mcp: window.mcp } } }

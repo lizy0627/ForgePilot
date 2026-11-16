@@ -3,9 +3,11 @@
 #include "TaskController.h"
 #include "McpController.h"
 #include "RagController.h"
+#include "RuntimeConfigController.h"
 #include "workbench/MissionController.h"
 #include "HttpFixture.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QFontDatabase>
 #include <QGuiApplication>
@@ -14,11 +16,47 @@
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSaveFile>
+#include <QTemporaryDir>
+#include <QThread>
 #include <QtTest>
 #include <algorithm>
 #include <functional>
 
 namespace {
+int runtimeConfigFixture()
+{
+    QFile input; if (!input.open(stdin, QIODevice::ReadOnly)) return 3;
+    const auto request = QJsonDocument::fromJson(input.readAll()).object();
+    const auto action = request.value("action").toString();
+    const auto path = QCoreApplication::arguments().last();
+    auto fields = QJsonObject{{"base_url", "http://127.0.0.1:1/v1"}, {"port", 8765},
+        {"chat_model", "fixture-chat"}, {"task_model", "fixture-task"}, {"review_model", "fixture-review"},
+        {"summary_model", "fixture-summary"}, {"task_model_family", "writer"}, {"review_model_family", "reviewer"},
+        {"cloud_model_allowed", false}, {"embedding_enabled", false}};
+    QFile previous(path);
+    bool configured = previous.exists();
+    if (previous.open(QIODevice::ReadOnly)) fields = QJsonDocument::fromJson(previous.readAll()).object();
+    previous.close();
+    bool ok = true;
+    if (action == "save") {
+        const auto proposed = request.value("fields").toObject();
+        ok = proposed.value("task_model") != "reject" && request.value("api_key") == "private-pipe-key";
+        if (ok) {
+            QSaveFile saved(path); if (!saved.open(QIODevice::WriteOnly)) return 4;
+            saved.write(QJsonDocument(proposed).toJson()); if (!saved.commit()) return 5;
+            fields = proposed; configured = true;
+        }
+    }
+    QThread::msleep(80);
+    const QJsonObject result{{"ok", ok}, {"configured", configured}, {"fields", fields},
+        {"has_api_key", configured}, {"has_embedding_key", false}, {"config_revision", "fixture-revision"},
+        {"restart_required", configured}, {"restart_allowed", configured}, {"active_count", 0},
+        {"notice", ok ? "配置已保存，受控重启后生效。" : "任务模型配置无效，旧配置保留。"},
+        {"errors", ok ? QJsonArray{} : QJsonArray{QJsonObject{{"purpose", "task"}, {"code", "llm_config"}, {"message", "任务模型配置无效"}}}}};
+    QFile output; if (!output.open(stdout, QIODevice::WriteOnly)) return 6;
+    output.write(QJsonDocument(result).toJson(QJsonDocument::Compact)); output.flush(); return 0;
+}
 const QString MissionId = "10000000-0000-4000-a000-000000000001";
 const QString McpId = "20000000-0000-4000-a000-000000000001";
 const QString Validation0 = "10000000-0000-4000-a000-000000000005";
@@ -246,7 +284,7 @@ struct Ui {
     QQuickWindow *window = nullptr;
     QStringList warnings;
 
-    explicit Ui(Fixture &fixture, int width = 1600, int height = 900)
+    explicit Ui(Fixture &fixture, int width = 1600, int height = 900, RuntimeConfigController *runtime = nullptr)
     {
         tasks.setBaseUrl(fixture.source.url()); missions.setBaseUrl(fixture.source.url());
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
@@ -255,6 +293,7 @@ struct Ui {
         engine.setInitialProperties({{"controller", QVariant::fromValue(&tasks)},
             {"conversations", QVariant::fromValue(&conversations)}, {"missions", QVariant::fromValue(&missions)},
             {"mcp", QVariant::fromValue(&mcp)}, {"rag", QVariant::fromValue(&rag)},
+            {"runtimeConfig", QVariant::fromValue(runtime)},
             {"width", width}, {"height", height}});
     }
     bool load()
@@ -354,6 +393,123 @@ private slots:
         for (const auto &name : {"msyh.ttc", "msyhbd.ttc", "segoeui.ttf", "seguisym.ttf", "seguiemj.ttf"})
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
+    }
+    void runtimeConfigurationFirstRunAndSettingsShareFormWithoutBackend()
+    {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto path = directory.filePath("config.json");
+        RuntimeConfigController runtime;
+        runtime.setHelperCommand(QCoreApplication::applicationFilePath(), {"--runtime-config-fixture"}, path);
+        Fixture fixture; Ui ui(fixture, 1280, 900, &runtime);
+        ui.tasks.setBaseUrl(QUrl("http://127.0.0.1:1")); ui.missions.setBaseUrl(QUrl("http://127.0.0.1:1"));
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QTRY_VERIFY(runtime.loaded()); QVERIFY(runtime.wizardRequired());
+        auto *dialog = ui.window->findChild<QObject *>("runtimeConfigDialog"); QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+        auto *key = ui.find("runtimeApiKey"); QVERIFY(key);
+        key->setProperty("text", "private-pipe-key");
+        QVERIFY(ui.click("runtimeConfigSave"));
+        QTRY_VERIFY(!runtime.busy()); QVERIFY(runtime.configured()); QVERIFY(!runtime.wizardRequired());
+        QCOMPARE(key->property("text").toString(), QString{});
+        QVERIFY(ui.find("runtimeConfigEffectiveTime")->property("text").toString().contains("重启"));
+        QVERIFY(ui.capture("runtime-configuration-saved"));
+        QFile saved(path); QVERIFY(saved.open(QIODevice::ReadOnly)); const auto original = saved.readAll(); saved.close();
+        QVERIFY(!original.contains("private-pipe-key"));
+        QVERIFY(ui.click("runtimeConfigClose")); QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(ui.click("settingsButton")); QVERIFY(ui.click("openRuntimeConfigButton"));
+        QTRY_VERIFY(dialog->property("visible").toBool());
+        QCOMPARE(ui.window->findChild<QObject *>("runtimeConfigDialog"), dialog);
+        auto *task = ui.find("runtimeTaskModel"); QVERIFY(task); task->setProperty("text", "reject");
+        QVERIFY(QMetaObject::invokeMethod(task, "textEdited")); key->setProperty("text", "private-pipe-key");
+        QVERIFY(ui.click("runtimeConfigSave")); QTRY_VERIFY(!runtime.busy());
+        QVERIFY(runtime.configured()); QVERIFY(!runtime.errors().isEmpty());
+        QCOMPARE(runtime.fields().value("task_model").toString(), "fixture-task");
+        QCOMPARE(key->property("text").toString(), QString{});
+        QVERIFY(saved.open(QIODevice::ReadOnly)); QCOMPARE(saved.readAll(), original);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void runtimeConfigurationRealPythonHelperSavesDpapiAndMissionInputs()
+    {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto root = QString(FORGEPILOT_SOURCE_DIR);
+        const auto python = qEnvironmentVariable("FORGEPILOT_TEST_PYTHON", root + "/agent.venv/Scripts/python.exe");
+        QVERIFY2(QFileInfo::exists(python), "Set FORGEPILOT_TEST_PYTHON to the existing Python 3.12 environment");
+        const auto configPath = directory.filePath("config.json");
+        RuntimeConfigController runtime;
+        runtime.setHelperCommand(python, {"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"}, configPath);
+        Fixture fixture; Ui ui(fixture, 1280, 900, &runtime);
+        ui.tasks.setBaseUrl(QUrl("http://127.0.0.1:1")); ui.missions.setBaseUrl(QUrl("http://127.0.0.1:1"));
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.loaded() && !runtime.busy(), 15000);
+        auto *dialog = ui.window->findChild<QObject *>("runtimeConfigDialog"); QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("visible").toBool()); QVERIFY(!runtime.configured());
+        const QList<QPair<QString, QString>> values{{"runtimeBaseUrl", "http://127.0.0.1:1/v1"},
+            {"runtimeChatModel", "offline-chat"}, {"runtimeTaskModel", "offline-task"},
+            {"runtimeReviewModel", "offline-review"}, {"runtimeSummaryModel", "offline-summary"},
+            {"runtimeTaskFamily", "writer"}, {"runtimeReviewFamily", "reviewer"}};
+        for (const auto &[name, value] : values) {
+            auto *input = ui.find(name); QVERIFY2(input, qPrintable(name)); input->setProperty("text", value);
+            QVERIFY(QMetaObject::invokeMethod(input, "textEdited"));
+        }
+        auto *key = ui.find("runtimeApiKey"); QVERIFY(key);
+        const QString dummyKey = "offline-gui-dummy-key-not-a-real-credential";
+        key->setProperty("text", dummyKey); QVERIFY(ui.click("runtimeConfigSave"));
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
+        QVERIFY2(runtime.configured(), qPrintable(runtime.message()));
+        QVERIFY(runtime.hasApiKey()); QVERIFY(runtime.errors().isEmpty()); QVERIFY(!runtime.warnings().isEmpty());
+        QCOMPARE(key->property("text").toString(), QString{});
+        QFile config(configPath); QVERIFY(config.open(QIODevice::ReadOnly));
+        const auto bytes = config.readAll(); config.close(); QVERIFY(!bytes.contains(dummyKey.toUtf8()));
+        const auto saved = QJsonDocument::fromJson(bytes).object();
+        QCOMPARE(saved.value("chat_model").toString(), "offline-chat");
+        QCOMPARE(saved.value("task_model").toString(), "offline-task");
+        QCOMPARE(saved.value("review_model").toString(), "offline-review");
+        QCOMPARE(saved.value("summary_model").toString(), "offline-summary");
+        QCOMPARE(saved.value("task_model_family").toString(), "writer");
+        QCOMPARE(saved.value("review_model_family").toString(), "reviewer");
+        QFile encrypted(directory.filePath(saved.value("credential_file").toString())); QVERIFY(encrypted.open(QIODevice::ReadOnly));
+        const auto protectedKey = encrypted.readAll(); QVERIFY(!protectedKey.isEmpty()); QVERIFY(!protectedKey.contains(dummyKey.toUtf8()));
+        QVERIFY(runtime.restartRequired());
+        QProcess routes;
+        const auto inspect = QString::fromUtf8(R"PY(
+import asyncio, json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / 'agent'))
+from forgepilot.desktop_configuration import read_config, load_saved_key
+from forgepilot.settings import model_gateway_from_args
+from forgepilot.server import parser
+config = Path(sys.argv[2])
+data = read_config(config)
+os.environ['FORGEPILOT_API_KEY'] = load_saved_key(config)
+args = parser().parse_args(data['server_args'])
+for name in ('base_url', 'chat_model', 'task_model', 'review_model', 'summary_model',
+             'task_model_family', 'review_model_family'):
+    setattr(args, name, data[name])
+gateway = model_gateway_from_args(args)
+names = ('chat', 'task', 'orchestration', 'analysis', 'implementation', 'repair', 'review', 'summary')
+result = {name: {'model': gateway.router.resolve(name).primary.model,
+                 'family': gateway.router.resolve(name).primary.family} for name in names}
+assert not gateway._providers
+asyncio.run(gateway.aclose())
+print(json.dumps(result))
+)PY");
+        routes.start(python, {"-X", "utf8", "-I", "-c", inspect, root, configPath});
+        QTRY_VERIFY_WITH_TIMEOUT(routes.state() == QProcess::NotRunning, 10000);
+        QCOMPARE(routes.exitCode(), 0);
+        const auto routing = QJsonDocument::fromJson(routes.readAllStandardOutput()).object();
+        for (const auto &role : {"task", "orchestration", "analysis", "implementation", "repair"})
+            QCOMPARE(routing.value(role).toObject().value("model").toString(), "offline-task");
+        QCOMPARE(routing.value("review").toObject().value("model").toString(), "offline-review");
+        QVERIFY(routing.value("review").toObject().value("family") != routing.value("implementation").toObject().value("family"));
+        QCOMPARE(routing.value("chat").toObject().value("model").toString(), "offline-chat");
+        QCOMPARE(routing.value("summary").toObject().value("model").toString(), "offline-summary");
+        QVERIFY(ui.capture("runtime-configuration-real-helper"));
+        // A Python-generated configuration is reloaded through the same helper,
+        // without checking model endpoints or restarting any real service.
+        QVERIFY(ui.click("runtimeConfigReload")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
+        QVERIFY(runtime.configured()); QVERIFY(runtime.hasApiKey());
+        QCOMPARE(runtime.fields().value("task_model").toString(), "offline-task");
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void missionMcpChoicesRequireExplicitReadOnlyAnnotation()
     {
@@ -964,5 +1120,16 @@ private slots:
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
 };
-QTEST_MAIN(WorkflowQmlTests)
+int main(int argc, char **argv)
+{
+    if (argc > 1 && QByteArray(argv[1]) == "--runtime-config-fixture") {
+        QCoreApplication application(argc, argv); return runtimeConfigFixture();
+    }
+#ifdef Q_OS_WIN
+    if (qEnvironmentVariableIsEmpty("QT_QPA_FONTDIR"))
+        qputenv("QT_QPA_FONTDIR", QDir(qEnvironmentVariable("WINDIR", "C:/Windows")).filePath("Fonts").toUtf8());
+#endif
+    QGuiApplication application(argc, argv);
+    WorkflowQmlTests tests; return QTest::qExec(&tests, argc, argv);
+}
 #include "tst_workflow_qml.moc"

@@ -28,6 +28,7 @@ from .mcp_api import MCPRequestGuard, register_mcp_routes
 from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes
 from .mission_host import MissionHost
 from .mission_events import MissionEventStream
+from .runtime_control import register_runtime_routes
 
 MAX_API_BODY = 1_048_576
 MAX_API_TARGET = 8_192
@@ -110,7 +111,7 @@ ERROR_STATUS = {
     "invalid_event_id": 400, "event_cursor_ahead": 409,
     "conversation_stream_capacity": 409, "conversation_stream_unavailable": 503,
     "conversation_stream_limit": 500, "conversation_stream_state": 500,
-    "task_capacity": 503, "server_stopping": 503, "llm_config": 503, "build_config": 503,
+    "runtime_busy": 409, "task_capacity": 503, "server_stopping": 503, "llm_config": 503, "build_config": 503,
     "task_internal": 500,
     "unknown_trace": 404, "invalid_page": 400, "storage_busy": 503, "storage_unavailable": 503,
     "unknown_conversation": 404, "unknown_request": 404, "conversation_busy": 409, "request_conflict": 409,
@@ -251,6 +252,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
     register_mission_routes(app, missions, mission_streams)
+    register_runtime_routes(app, host)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)
     async def create_task(body: CreateTask):

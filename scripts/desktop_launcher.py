@@ -27,7 +27,7 @@ from forgepilot.build_process import ProcessJob, build_environment
 from forgepilot.security import Redactor
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.gateway import ModelGateway
-from forgepilot.settings import resolve_models
+from forgepilot import desktop_configuration
 
 PYTHON = ROOT / 'agent.venv/Scripts/python.exe'
 LEGACY_PYTHON_ENVIRONMENT = ROOT / 'agent/.venv'
@@ -46,6 +46,7 @@ class Kernel:
             'CreateEventW': ([ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
             'OpenEventW': ([wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
             'SetEvent': ([wintypes.HANDLE], wintypes.BOOL),
+            'ResetEvent': ([wintypes.HANDLE], wintypes.BOOL),
             'WaitForSingleObject': ([wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
             'CloseHandle': ([wintypes.HANDLE], wintypes.BOOL),
             'OpenJobObjectW': ([wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
@@ -79,6 +80,12 @@ class Kernel:
             raise OSError('stop_event_unavailable')
         return handle
 
+    def restart_event(self):
+        handle = self.api.OpenEventW(0x100002, False, self.name + '-restart')
+        if not handle:
+            raise OSError('restart_event_unavailable')
+        return handle
+
     def signaled(self, handle):
         return self.api.WaitForSingleObject(handle, 0) == 0
 
@@ -109,87 +116,17 @@ def write_json(path, value):
 
 
 def read_config(path):
-    data = json.loads(path.read_text(encoding='utf-8-sig'))
-    required = {'base_url', 'port', 'server_args'}
-    model_fields = {'model', 'chat_model', 'task_model', 'summary_model'}
-    if not isinstance(data, dict) or not required <= set(data) or not set(data) <= required | model_fields:
-        raise ValueError('config_fields')
-    if not isinstance(data['base_url'], str) or not data['base_url'].strip():
-        raise ValueError('model_config')
-    try:
-        models = resolve_models(model=data.get('model'), chat_model=data.get('chat_model'),
-                                task_model=data.get('task_model'), summary_model=data.get('summary_model'))
-    except ForgePilotError as exc:
-        purposes = [name for name in ('fallback', 'chat', 'task', 'summary') if name in exc.message]
-        raise ValueError('model_config_' + '_'.join(purposes or ['unknown'])) from None
-    if type(data['port']) is not int or not 1 <= data['port'] <= 65535:
-        raise ValueError('port_config')
-    args = data['server_args']
-    if not isinstance(args, list) or not all(isinstance(a, str) and '\x00' not in a for a in args):
-        raise ValueError('server_args')
-    # Host/port and model identity have one authoritative configuration source.
-    reserved = {'--host', '--port', '--base-url', '--model', '--chat-model', '--task-model', '--summary-model'}
-    if any(a.split('=')[0] in reserved for a in args):
-        raise ValueError('reserved_server_arg')
-    return {**data, 'model': data.get('model'), 'chat_model': models.chat,
-            'task_model': models.task, 'summary_model': models.summary}
+    return desktop_configuration.read_config(path)
 
 
 async def check_model(config, *, transport=None):
-    """One bounded gateway call per distinct model; no history database needed."""
-    key = os.environ.get('FORGEPILOT_API_KEY', '')
-    redactor = Redactor((key,))
-    try:
-        data = read_config(config)
-        if not key:
-            raise ForgePilotError('llm_config', '未配置 API Key，请运行 Configure-ForgePilot.cmd。')
-        groups = {}
-        for purpose, model in (('聊天', data['chat_model']), ('任务', data['task_model']),
-                               ('摘要', data['summary_model'])):
-            groups.setdefault(model, []).append(purpose)
-        failed = False
-        for model, purposes in groups.items():
-            label = '/'.join(purposes)
-            try:
-                async with ModelGateway.from_legacy(
-                        data['base_url'], key, {'connection-check': model},
-                        timeout=30, transport=transport) as gateway:
-                    llm = gateway.for_route('connection-check')
-                    reply = await llm.chat([{'role': 'user', 'content': 'Reply with only OK.'}])
-                    if reply.message.tool_calls or not (reply.message.content or '').strip():
-                        raise ForgePilotError('llm_protocol', '模型未返回有效文本。')
-            except ForgePilotError as exc:
-                failed = True
-                print(f'{label}模型检查失败：' + redactor.text(str(exc)), file=sys.stderr)
-            except Exception:
-                failed = True
-                print(f'{label}模型检查失败：连接或响应无效。', file=sys.stderr)
-        if failed:
-            return 1
-    except ForgePilotError as exc:
-        print(redactor.text(str(exc)), file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        code = str(exc)
-        if code.startswith('model_config_'):
-            labels = [('chat','聊天'),('task','任务'),('summary','摘要'),('fallback','缺省')]
-            affected = '/'.join(label for name,label in labels if name in code) or '用途'
-            print(f'{affected}模型配置无效，请检查本机 config.json。', file=sys.stderr)
-        else:
-            print('模型连接检查未完成，请检查本机 config.json 和运行环境。', file=sys.stderr)
-        return 1
-    except Exception:
-        # Malformed local configuration must not echo arbitrary values either.
-        print('模型连接检查未完成，请检查本机 config.json 和运行环境。', file=sys.stderr)
-        return 1
-    print('模型连接检查通过：聊天、任务和摘要用途的所有不同模型均返回了文本回答。')
-    return 0
+    return await desktop_configuration.check_model(config, transport=transport, gateway_factory=ModelGateway)
 
 
 class RedactedLog:
     """Buffer complete lines, including fragmented traceback writes, before redaction."""
     def __init__(self, stream, key):
-        self.stream, self.redactor, self.pending = stream, Redactor((key, os.environ.get('FORGEPILOT_LOCAL_API_TOKEN', ''))), ''
+        self.stream, self.redactor, self.pending = stream, Redactor((key, os.environ.get('FORGEPILOT_LOCAL_API_TOKEN', ''), os.environ.get('FORGEPILOT_EMBEDDING_API_KEY', ''))), ''
 
     def write(self, value):
         self.pending += value
@@ -216,7 +153,8 @@ def backend(config, job, ready, log):
     kernel = Kernel(config)
     kernel.join(job)  # Before loading the service or spawning any of its tools.
     event = kernel.event()
-    data = read_config(config)
+    frozen_config = os.environ.get("FORGEPILOT_LAUNCH_CONFIG")
+    data = read_config(Path(frozen_config) if frozen_config else config)
     os.environ['FORGEPILOT_BASE_URL'] = data['base_url']
     if data['model']:
         os.environ['FORGEPILOT_MODEL'] = data['model']
@@ -248,8 +186,10 @@ def owned_client(job, log, port, local_token):
         proc = subprocess.Popen([str(PYTHON), '-I', str(worker), job.name], stdin=subprocess.PIPE,
                                 stdout=output, stderr=output, env=client_env,
                                 creationflags=subprocess.CREATE_NO_WINDOW)
-    payload = {'command': [str(ROOT / 'client/build/Release/ForgePilotClient.exe'),
-                           '--server', f'http://127.0.0.1:{port}'], 'cwd': str(ROOT)}
+    command = [str(ROOT / 'client/build/Release/ForgePilotClient.exe'), '--server', f'http://127.0.0.1:{port}']
+    if os.environ.get('FORGEPILOT_RUNTIME_CONFIG'):
+        command.extend(['--runtime-config', os.environ['FORGEPILOT_RUNTIME_CONFIG']])
+    payload = {'command': command, 'cwd': str(ROOT)}
     proc.stdin.write((json.dumps(payload) + '\n').encode())
     proc.stdin.close()
     return proc
@@ -308,6 +248,8 @@ def supervise(config, result):
         write_json(result, {'status': 'already_running'})
         return 0
     event = None
+    restart_event = None
+    restart_requested = False
     job = None
     client_job = None
     child = None
@@ -319,8 +261,28 @@ def supervise(config, result):
         event = kernel.api.CreateEventW(None, True, False, kernel.name + '-stop')
         if not event:
             raise OSError('event_create')
+        restart_event = kernel.api.CreateEventW(None, True, False, kernel.name + '-restart')
+        if not restart_event:
+            raise OSError('event_create')
         write_json(state_file, state)
-        data = read_config(config)
+        with desktop_configuration.ConfigurationLock(config):
+            data = read_config(config)
+            running_revision = desktop_configuration.configuration_revision(config)
+            if data.get('credential_file') or config.with_name('api-key.dpapi').is_file():
+                os.environ['FORGEPILOT_API_KEY'] = desktop_configuration.load_saved_key(config)
+            embedding_key = os.environ.get('FORGEPILOT_EMBEDDING_API_KEY', '')
+            optional_warning = None
+            if '--enable-rag' in data['server_args']:
+                try:
+                    saved_embedding_key = desktop_configuration.load_embedding_key(config)
+                    if data.get('embedding_credential_file') and not saved_embedding_key:
+                        raise desktop_configuration.ConfigurationError('embedding_credential', 'Saved embedding credential is missing')
+                    embedding_key = saved_embedding_key or embedding_key
+                except (desktop_configuration.ConfigurationError, OSError):
+                    data['server_args'] = [arg for arg in data['server_args'] if arg != '--enable-rag']
+                    embedding_key = ''
+                    optional_warning = 'embedding_credential_unavailable'
+
         if not os.environ.get('FORGEPILOT_API_KEY'):
             raise ValueError('missing_api_key')
         # A trusted process owner may supply a fresh token (for example an
@@ -333,7 +295,9 @@ def supervise(config, result):
             probe.bind(('127.0.0.1', data['port']))
         run = ROOT / 'logs/desktop' / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ-') + uuid4().hex[:8])
         run.mkdir(parents=True)
-        state.update(log_directory=str(run), port=data['port'], supervisor_pid=os.getpid())
+        launch_config = run / 'launch-config.json'
+        write_json(launch_config, data)
+        state.update(log_directory=str(run), port=data['port'], supervisor_pid=os.getpid(), running_revision=running_revision, optional_warning=optional_warning)
         write_json(state_file, state)
         job = ProcessJob()
         ready = run / 'backend.ready'
@@ -341,7 +305,9 @@ def supervise(config, result):
                                   '--job', job.name, '--ready', str(ready), '--log', str(run / 'backend.log')],
                                  cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
-                                 env={**os.environ, 'FORGEPILOT_LOCAL_API_TOKEN': local_token})
+                                 env={**os.environ, 'FORGEPILOT_LOCAL_API_TOKEN': local_token,
+                                      'FORGEPILOT_EMBEDDING_API_KEY': embedding_key,
+                                      'FORGEPILOT_LAUNCH_CONFIG': str(launch_config)})
         state['backend_pid'] = child.pid
         write_json(state_file, state)
         os.environ.pop('FORGEPILOT_API_KEY', None)
@@ -359,6 +325,7 @@ def supervise(config, result):
         # Separate jobs also work when Python's venv redirectors already have distinct
         # parent job hierarchies. A nonempty job cannot cross those hierarchies.
         client_job = ProcessJob()
+        os.environ['FORGEPILOT_RUNTIME_CONFIG'] = str(config)
         client = owned_client(client_job, run / 'client.log', data['port'], local_token)
         state['client_worker_pid'] = client.pid
         write_json(state_file, state)
@@ -381,7 +348,32 @@ def supervise(config, result):
         write_json(state_file, state)
         write_json(result, state)
         reported = True
+        status_due = 0.0
         while not kernel.signaled(event):
+            if kernel.signaled(restart_event):
+                kernel.api.ResetEvent(restart_event)
+                request_id = None
+                try:
+                    intent = json.loads(config.with_name('restart-request.json').read_text(encoding='utf-8'))
+                    request_id = intent['request_id']
+                    read_config(config)
+                    desktop_configuration.load_saved_key(config)
+                    _backend_runtime(data['port'], local_token, prepare=True)
+                    state.update(status='restarting', restart_request_id=request_id, restart_accepted=True)
+                    restart_requested = True
+                    write_json(state_file, state)
+                    break
+                except Exception as exc:
+                    state.update(restart_request_id=request_id, restart_accepted=False,
+                        restart_error=exc.code if isinstance(exc, ForgePilotError) else 'restart_unavailable')
+                    write_json(state_file, state)
+            if time.monotonic() >= status_due:
+                try:
+                    state['active_count'] = _backend_runtime(data['port'], local_token)['active_count']
+                except Exception:
+                    state['active_count'] = None
+                write_json(state_file, state)
+                status_due = time.monotonic() + 2
             if child.poll() is not None:
                 raise RuntimeError('backend_exited')
             if client.poll() is not None and state['client_status'] == 'running':
@@ -434,10 +426,15 @@ def supervise(config, result):
                 if not reported:
                     write_json(result, state)  # Failure is reported only after cleanup.
             finally:
+                if restart_event:
+                    kernel.api.CloseHandle(restart_event)
                 if event:
                     kernel.api.CloseHandle(event)
                 kernel.api.ReleaseMutex(mutex)
                 kernel.api.CloseHandle(mutex)
+    if restart_requested and state['status'] != 'failed':
+        os.environ['FORGEPILOT_API_KEY'] = desktop_configuration.load_saved_key(config)
+        return start(config)
     return 1 if state['status'] == 'failed' else 0
 
 
@@ -504,12 +501,133 @@ def start(config):
     return 0 if data['status'] in {'running', 'already_running'} else 1
 
 
+def runtime_status(config):
+    managed = Kernel(config).running()
+    if not managed:
+        return {'managed': False, 'active_count': 0, 'restarting': False, 'restart_allowed': True,
+                'notice': '配置保存后可启动后端。'}
+    try:
+        state = json.loads(config.with_name('runtime.json').read_text(encoding='utf-8'))
+        count = state.get('active_count')
+        known = type(count) is int and count >= 0
+        return {'managed': True, 'active_count': count if known else None,
+                'restarting': state.get('status') in {'stopping', 'restarting'},
+                'running_revision': state.get('running_revision'),
+                'restart_allowed': known and count == 0 and state.get('status') == 'running',
+                'notice': '有活动任务，仅保存；任务结束后再重启生效。' if known and count else
+                    '重启前会再次核对活动任务。' if known else '暂时无法核实活动任务；配置可保存，请稍后刷新。'}
+    except (OSError, ValueError):
+        return {'managed': True, 'active_count': None, 'restart_allowed': False, 'restarting': False,
+                'notice': '暂时无法核实活动任务；配置可保存，请稍后刷新。'}
+
+
+def request_restart(config):
+    # The owner is outside client/build jobs; the GUI helper may end when its
+    # client's job closes. The owner validates and performs the entire restart.
+    kernel = Kernel(config)
+    if not kernel.running():
+        return {'ok': desktop(config) == 0, 'notice': '正在使用已保存配置启动。', 'restart_required': False}
+    request_id = uuid4().hex
+    write_json(config.with_name('restart-request.json'), {'request_id': request_id})
+    event = kernel.restart_event()
+    try:
+        request_stop(kernel, event)
+    finally:
+        kernel.api.CloseHandle(event)
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            state = json.loads(config.with_name('runtime.json').read_text(encoding='utf-8'))
+            if state.get('restart_request_id') == request_id:
+                accepted = state.get('restart_accepted') is True
+                return {'ok': accepted, 'restart_required': not accepted,
+                        'notice': '正在通过启动器重启，新窗口将加载已保存配置。' if accepted else
+                            '当前有活动任务或无法安全重启；已保存配置将在任务结束后重启生效。',
+                        'error_code': state.get('restart_error')}
+        except (OSError, ValueError):
+            pass  # The owner's atomic status replacement can race a reader.
+        time.sleep(0.1)
+    return {'ok': False, 'restart_required': True, 'notice': '尚未确认重启，请刷新当前运行状态；不会自动重复重启。'}
+
+
+def _backend_runtime(port, token, *, prepare=False):
+    import httpx
+    path = '/api/v2/runtime/prepare-restart' if prepare else '/api/v2/runtime/status'
+    with httpx.Client(timeout=2, trust_env=False) as client:
+        response = client.request('POST' if prepare else 'GET', f'http://127.0.0.1:{port}' + path,
+            headers={'X-ForgePilot-Token': token}, **({'json': {}} if prepare else {}))
+    if response.status_code == 409:
+        raise ForgePilotError('runtime_busy', 'Tasks are still active')
+    response.raise_for_status()
+    result = response.json()
+    if type(result.get('active_count')) is not int or type(result.get('restarting')) is not bool:
+        raise ValueError('runtime_status')
+    return result
+
+
+def launch_configuration_client(config):
+    root = desktop_configuration.application_root()
+    command = [str(root / 'client/build/Release/ForgePilotClient.exe'), '--server', 'http://127.0.0.1:1', '--configure',
+               '--runtime-config', str(config)]
+    if not Path(command[0]).is_file():
+        print('缺少 Qt 客户端，请构建客户端或重新解压发布包。', file=sys.stderr)
+        return 1
+    environment = build_environment()
+    environment['FORGEPILOT_RUNTIME_CONFIG'] = str(config)
+    client = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+    print(json.dumps({'status': 'configuration', 'configuration_client_pid': client.pid}))
+    return 0
+
+
+def desktop(config, *, configure=False):
+    if configure:
+        return launch_configuration_client(config)
+    if Kernel(config).running():
+        return 0
+    loaded = asyncio.run(desktop_configuration.handle_request(config, {'action': 'load'}, status=lambda: runtime_status(config)))
+    if not loaded.get('configured'):
+        return launch_configuration_client(config)
+    previous_key = os.environ.get('FORGEPILOT_API_KEY')
+    try:
+        os.environ['FORGEPILOT_API_KEY'] = desktop_configuration.load_saved_key(config)
+        # Local validation only: connection checking is an explicit GUI action.
+        if start(config) == 0:
+            return 0
+    finally:
+        if previous_key is None:
+            os.environ.pop('FORGEPILOT_API_KEY', None)
+        else:
+            os.environ['FORGEPILOT_API_KEY'] = previous_key
+    return launch_configuration_client(config)
+
+
+def configuration_helper(config):
+    try:
+        raw = sys.stdin.buffer.read(65537)
+        if len(raw) > 65536:
+            raise ValueError('request_limit')
+        request = json.loads(raw.decode('utf-8'))
+        response = asyncio.run(desktop_configuration.handle_request(config, request,
+            restart=lambda: request_restart(config), status=lambda: runtime_status(config)))
+    except (ValueError, UnicodeError, OSError):
+        response = {'ok': False, 'notice': '配置请求无效，请重新打开配置。', 'errors': []}
+    sys.stdout.write(json.dumps(response, ensure_ascii=True) + '\n')
+    return 0
+
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'config-helper':
+        parser = argparse.ArgumentParser()
+        parser.add_argument('action'); parser.add_argument('--config', type=Path, required=True)
+        args = parser.parse_args()
+        return configuration_helper(args.config.resolve())
     if LEGACY_PYTHON_ENVIRONMENT.exists():
         print('WARNING: agent/.venv is not supported. Use the root agent.venv; '
               'the old environment was not removed.', file=sys.stderr)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('start', 'stop', 'status', 'supervise', 'backend', 'check'))
+    parser.add_argument('action', choices=('start', 'stop', 'status', 'supervise', 'backend', 'check', 'desktop', 'configure', 'check-saved'))
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--result', type=Path)
     parser.add_argument('--job')
@@ -517,6 +635,13 @@ def main():
     parser.add_argument('--log', type=Path)
     args = parser.parse_args()
     config = args.config.resolve()
+    if args.action == 'desktop':
+        return desktop(config)
+    if args.action == 'configure':
+        return desktop(config, configure=True)
+    if args.action == 'check-saved':
+        os.environ['FORGEPILOT_API_KEY'] = desktop_configuration.load_saved_key(config)
+        return asyncio.run(check_model(config))
     if args.action == 'check':
         return asyncio.run(check_model(config))
     if args.action == 'backend':
