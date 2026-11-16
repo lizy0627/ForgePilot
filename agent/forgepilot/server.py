@@ -20,7 +20,7 @@ from .service_composition import DevelopmentConfig, compose_server_resources
 from .sqlite_store import SqliteEventStore
 from .task_service import TaskService
 from .repository import Repository
-from .chat_service import ChatService
+from .conversations import ChatService
 from .stream_metrics import close_metrics_logging, configure_metrics_logging
 from .settings import add_code_intelligence_arguments, code_intelligence_from_args
 from .settings import add_mcp_arguments

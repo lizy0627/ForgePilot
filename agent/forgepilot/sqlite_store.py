@@ -16,8 +16,7 @@ from .errors import ForgePilotError
 from .security import Redactor
 from .trace import TraceEvent
 from .mission_events import safe_event_data
-from .conversation_store import ConversationStore
-from .memory_store import MemoryStore
+from .conversations import ConversationStore, MemoryStore
 from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
 from .mission_store import (
@@ -87,7 +86,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.missions = MissionRepository(self)
             self.mission_repository = self.missions
             self._recover()
-            self._recover_conversations()
+            self.recover_conversations()
             self._inspect_graph_recovery()
         except BaseException as exc:
             self.close()
@@ -148,10 +147,10 @@ class SqliteEventStore(ConversationStore, MemoryStore):
                     self._db.execute(statement)
                 self._db.execute(f"PRAGMA user_version={int(SchemaVersion.TASK_HISTORY)}")
             if version < SchemaVersion.CONVERSATIONS:
-                self._conversation_schema()
+                self.create_conversation_schema()
                 self._db.execute(f"PRAGMA user_version={int(SchemaVersion.CONVERSATIONS)}")
             if version < SchemaVersion.MEMORY:
-                self._memory_schema()
+                self.create_memory_schema()
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.MEMORY)}')
             if version < SchemaVersion.MCP_SERVERS:
                 create_mcp_schema(self._db)
@@ -333,7 +332,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
         if closed:
             self._db.execute("""UPDATE tool_calls SET status=?,finished_at=? WHERE task_id=? AND status='running'""",
                 ("cancelled" if snapshot["state"]=="cancelled" else "interrupted",snapshot.get("finished_at"),task_id))
-            self._sync_conversation_task(snapshot)
+            self.sync_conversation_task(snapshot)
         return True
 
     def publish(self, task_id, snapshot, events, *, closed=False, traces=()):
@@ -386,7 +385,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
                     raise ForgePilotError("invalid_page", "History cursor does not exist")
                 where="WHERE (created_at,task_id) < (?,?)"; params.extend(boundary)
             if conversation_id:
-                self._conversation(conversation_id)
+                self.require_conversation(conversation_id)
                 where+=(' AND ' if where else 'WHERE ')+"task_id IN (SELECT task_id FROM conversation_requests WHERE conversation_id=?)"
                 params.append(conversation_id)
             rows=self._db.execute("SELECT task_id,summary_json FROM tasks "+where+" ORDER BY created_at DESC,task_id DESC LIMIT ?",(*params,limit+1)).fetchall()

@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "agent"))
 
 from forgepilot.api import create_app
-from forgepilot.chat_service import ChatService
+from forgepilot.conversations import ChatService
 from forgepilot.llm import ContentDelta, StreamFinished
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.sqlite_store import SqliteEventStore

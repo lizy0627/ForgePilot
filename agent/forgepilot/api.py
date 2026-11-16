@@ -19,7 +19,7 @@ from .api_models import (ApproveTask, CancelTask, CreateTask, PlanFeedback, Erro
                          RagIndexStatusResponse, RagIndexDeleted, checked_rag_repository_path)
 from .errors import ForgePilotError
 from .task_host import TaskHost
-from .conversation_host import ConversationHost
+from .conversations import ConversationHost
 from .api_models import CreateConversation, UpdateConversation, ConversationRequest
 from .api_models import ConversationDetail, ConversationList, ConversationRequestState, ConversationMCPTools
 from .api_models import ConversationDeleted

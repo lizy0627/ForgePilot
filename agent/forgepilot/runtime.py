@@ -16,7 +16,7 @@ from .tools.change_tools import WRITE_TOOLS
 from .trace import TraceSink
 from .build import BUILD_TOOLS
 from .repair import MAX_REPAIR_ROUNDS, Reflection, classify_failure, excerpt, parse_reflection
-from .memory_context import MEMORY_RULES, with_background
+from .conversations import MEMORY_RULES, with_background
 from .llm import ModelClient, ToolSpec, context_size
 from .mcp_manager import MCPManager, MCP_RULES
 from .rag import RetrievalQuery
