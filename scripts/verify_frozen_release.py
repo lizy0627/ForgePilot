@@ -29,7 +29,8 @@ import zipfile
 SECRET = "offline-frozen-release-disposable-placeholder"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORBIDDEN = re.compile(
-    r"(^|/)(config\.json|api-key[^/]*\.dpapi|logs?|__pycache__|\.pytest_cache|uv\.exe|pythonw?\.exe)(/|$)"
+    r"(^|/)(config\.json|[^/]*\.dpapi|[^/]*\.env(?:\.[^/]*)?|logs?|__pycache__|"
+    r"\.pytest_cache|\.ruff_cache|\.mypy_cache|\.coverage[^/]*|uv\.exe|pythonw?\.exe)(/|$)"
     r"|\.(py|db|sqlite3?|log|pyc|pdb|obj|lib|exp)$", re.IGNORECASE)
 
 
