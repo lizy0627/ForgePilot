@@ -26,7 +26,8 @@ Diff、Trace 等投影。这些既有接口继续保留，v2 校验与工作台�
 
 | 类 | 职责 |
 | --- | --- |
-| `MissionController` | 创建/切换任务、读取一致快照、SSE 补偿、取消/重试/显式恢复，协调模型和操作可用性 |
+| `MissionController` | 创建/切换任务、SSE 补偿、取消/重试/显式恢复，接收完整快照并协调展示模型和操作可用性 |
+| `MissionSnapshotLoader` | 通过注入的 `AgentApiClient` 读取四类投影，合并刷新、重试暂态读取错误并校验 revision/游标栅栏；只发布完整 `MissionSnapshot` |
 | `MissionListModel` | 本会话创建或打开的任务，按 task_id 更新且 revision 不回退；后端当前没有 v2 列表端点 |
 | `GraphModel` | 节点状态、依赖、Agent、后端指标及操作提示；恢复期间禁用审批/直接重试 |
 | `ArtifactModel` | 产物 envelope、类型、来源、哈希、内容；详情通过后端读取 |
@@ -45,9 +46,11 @@ Diff、Trace 等投影。这些既有接口继续保留，v2 校验与工作台�
    v2 POST 使用不可回卷的上传流，断线不会由 Qt 隐式重发。
 2. `SseClient::eventApplied` 只发布尚未处理的 event_id / task_revision。旧版本不回退，
    乱序缺口停止应用；`snapshotRequired` 要求补快照，恢复后以 `Last-Event-ID` 续订。
-3. `MissionController` 合并事件刷新：先 GET Mission，再读取 Graph / Artifacts / Diff /
-   Validation，最后 GET Mission 校验。前后 revision、游标以及 Graph revision 一致，且覆盖
-   已观察的事件版本，才提交整批模型。刷新过程中操作不可用。
+3. `MissionController` 将事件版本下限交给 `MissionSnapshotLoader`，由后者合并刷新：
+   先 GET Mission，再读取 Graph / Artifacts / Diff / Validation，最后 GET Mission 校验。
+   前后 revision、游标以及 Graph revision 一致，且覆盖已观察的事件版本，才发布完整快照。
+   Controller 提交整批展示模型；读取或提交过程中操作不可用。Loader 不持有展示模型、
+   SSE、审批或恢复操作，切换/析构只取消自己拥有的 GET 和定时器。
 4. 审批固定提交 `expected_revision`、`task_spec_hash`、`plan_hash`、`scope_hash`。
    stale 或不确定网络结果触发读取，原审批绝不重发。用户需审阅刷新后的内容，再明确操作。
    审批节点只冻结并展示方案；批准前（包括拒绝路径）不运行仓库的 CMake/CTest 进程。
