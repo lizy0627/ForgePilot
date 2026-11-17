@@ -1,6 +1,7 @@
 """HTTP disconnects, worker lifecycle, admission and optimistic update races."""
 import asyncio
 import json
+import os
 from threading import Event
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -17,7 +18,8 @@ from test_conversations import RecallModel, send
 
 class Gate:
     """Test-only delayed delivery of real discovery, safe across both loops."""
-    def __init__(self):
+    def __init__(self, trace=None):
+        self.trace = trace
         self.enabled = False
         self.arrivals = []
         self.release = Event()
@@ -42,9 +44,13 @@ class Gate:
                         return await client.list_tools()
                     finally:
                         if gate.enabled:
+                            if gate.trace:
+                                gate.trace.event("gate.arrived")
                             gate.arrivals.append(True)
                             while not gate.release.is_set():
                                 await asyncio.sleep(0.005)
+                            if gate.trace:
+                                gate.trace.event("gate.released")
 
                 async def close(self):
                     await client.close()
@@ -52,11 +58,33 @@ class Gate:
         service.connection_factory = connect
 
 
+@pytest.fixture
+def editor_trace():
+    path = os.environ.get("FORGEPILOT_MCP_EDITOR_TRACE")
+    if not path:
+        yield None
+        return
+    from mcp_editor_trace import EditorTrace
+    trace = EditorTrace(path)
+    try:
+        yield trace
+    finally:
+        trace.write()
+
+
 @pytest.mark.asyncio
-async def test_real_http_two_editors_one_revision_and_capacity_is_shared(peers, tmp_path):
+async def test_real_http_two_editors_one_revision_and_capacity_is_shared(peers, tmp_path, editor_trace, monkeypatch):
     peer = await peers()
-    gate = Gate()
-    with serving(tmp_path, configure=gate.configure) as (url, app, store):
+    gate = Gate(editor_trace)
+
+    def configure(app):
+        if editor_trace:
+            from mcp_editor_server_trace import install_server_trace
+            editor_trace.install_asgi(app)
+            install_server_trace(editor_trace, monkeypatch, app)
+        gate.configure(app)
+
+    with serving(tmp_path, configure=configure) as (url, app, store):
         async with httpx.AsyncClient(base_url=url, timeout=10) as client:
             record = await saved(client, peer)
             initial_connections = len(app.state.mcp_clients)
@@ -67,13 +95,19 @@ async def test_real_http_two_editors_one_revision_and_capacity_is_shared(peers, 
             await eventually(lambda: sum(r["http"] == "DELETE" for r in peer.records) == initial_connections)
             endpoint = PREFIX + "/servers/" + record["server_id"]
             gate.enabled = True
-            tasks = [asyncio.create_task(client.put(endpoint, json={**candidate(peer, name=name),
-                "base_revision": 1, "catalog_hash": record["catalog_hash"]})) for name in ("editor-a", "editor-b")]
+            if editor_trace:
+                editor_trace.track("gate-coordinator", asyncio.current_task())
+            tasks = []
+            for name in ("editor-a", "editor-b"):
+                options = editor_trace.request_options(name) if editor_trace else {}
+                body = {**candidate(peer, name=name), "base_revision": 1, "catalog_hash": record["catalog_hash"]}
+                tasks.append(asyncio.create_task(client.put(endpoint, json=body, **options)))
             try:
                 await eventually(lambda: len(gate.arrivals) == 2)
                 assert len(app.state.task_host._mcp_active) == 2 and not store._db.in_transaction
                 count = sum(r['http'] != 'GET' for r in peer.records)
                 connections = len(app.state.mcp_clients)
+                assert connections == initial_connections + 2
                 # The SDK retries the optional GET stream after a 405. Let that
                 # happen while both checks are held; it does not open a new MCP session.
                 await asyncio.sleep(1.1)
@@ -86,13 +120,19 @@ async def test_real_http_two_editors_one_revision_and_capacity_is_shared(peers, 
                 assert (await client.get(endpoint)).status_code == 200
                 assert (await client.post("/api/v1/conversations", json={"title": "during checks"})).status_code == 201
             finally:
+                if editor_trace:
+                    editor_trace.event("gate.release_set")
                 gate.release.set()
-            results = await asyncio.gather(*tasks)
+                # Observe both terminal results even if a capacity assertion or one PUT fails.
+                # task.result() below still raises the original PUT exception.
+                await asyncio.gather(*tasks, return_exceptions=True)
+            results = [task.result() for task in tasks]
             assert sorted(response.status_code for response in results) == [200, 409]
             winner = next(response.json() for response in results if response.status_code == 200)
             error(next(response for response in results if response.status_code == 409), 409, "mcp_config_conflict")
             assert (await client.get(endpoint)).json() == winner and winner["revision"] == 2
             assert not app.state.task_host._mcp_active
+            assert all(c.owner.done() and c.transport.closed for c in app.state.mcp_clients)
 
 
 @pytest.mark.asyncio
