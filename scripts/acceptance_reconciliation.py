@@ -18,9 +18,13 @@ def runtime_identity() -> dict[str, str]:
         "forgepilot.models.openai": "agent/forgepilot/models/openai.py",
         "forgepilot.models.gateway": "agent/forgepilot/models/gateway.py",
         "forgepilot.models.accounting": "agent/forgepilot/models/accounting.py",
+        "forgepilot.models.profiles": "agent/forgepilot/models/profiles.py",
+        "forgepilot.models.routing": "agent/forgepilot/models/routing.py",
+        "forgepilot.rag.embedding": "agent/forgepilot/rag/embedding.py",
         "acceptance_budget": "scripts/acceptance_budget.py",
         "acceptance_reconciliation": "scripts/acceptance_reconciliation.py",
         "acceptance_recovery": "scripts/acceptance_recovery.py",
+        "acceptance_revalidation": "scripts/acceptance_revalidation.py",
         "run_product_acceptance": "scripts/run_product_acceptance.py",
     }
     identity = {}

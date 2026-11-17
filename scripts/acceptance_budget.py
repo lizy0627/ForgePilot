@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from time import monotonic
 from uuid import uuid4
 
 import httpx
@@ -193,7 +194,18 @@ class RequestBudget:
                             (token, label, amount))
             return token
 
-    def settle(self, token: str, usage, status: str):
+    def wire_attempts(self, label: str):
+        """Content-free evidence for verified HTTP attempts, in reservation order."""
+        with self.transaction(read_only=True):
+            if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wire_attempts'").fetchone():
+                return []
+            rows = self.db.execute("""SELECT r.id,r.charged,r.estimated,w.evidence FROM requests r
+                JOIN wire_attempts w ON w.request_id=r.id WHERE r.label=? ORDER BY r.rowid""", (label,))
+            return [{**json.loads(row["evidence"]), "request_id": row["id"],
+                     "reported_tokens": 0 if row["estimated"] else row["charged"],
+                     "estimated_tokens": row["charged"] if row["estimated"] else 0} for row in rows]
+
+    def settle(self, token: str, usage, status: str, *, wire=None):
         with self.transaction():
             row = self.db.execute("SELECT * FROM requests WHERE id=? AND status='pending'", (token,)).fetchone()
             if row is None:
@@ -208,9 +220,20 @@ class RequestBudget:
                 known = sum(usage.get(key, 0) for key in ("prompt_tokens", "completion_tokens"))
                 if type(total) is int and total >= known:
                     amount, estimated = total, False
+            if wire is not None:
+                if wire["usage_issue"]:
+                    # No trustworthy complete usage. Do not release the unused
+                    # reservation or discard a larger provider-reported count.
+                    amount = max(row["reserved"], wire["observed_charge_bound"])
+                    estimated = True
+                if amount > row["reserved"] and not wire["failure_reason"]:
+                    wire["failure_reason"] = "reservation_exceeded"
+                self.db.execute("""CREATE TABLE IF NOT EXISTS wire_attempts (
+                    request_id TEXT PRIMARY KEY, evidence TEXT NOT NULL)""")
+                self.db.execute("INSERT INTO wire_attempts VALUES(?,?)", (token, json.dumps(wire)))
             self.db.execute("UPDATE requests SET charged=?,estimated=?,status=? WHERE id=?",
                             (amount, int(estimated), status, token))
-            if amount > row["reserved"]:
+            if amount > row["reserved"] or wire is not None and wire["failure_reason"]:
                 self.db.execute("UPDATE campaign SET held=1")
                 latest = self._latest_audit()
                 if latest:
@@ -233,27 +256,133 @@ class RequestBudget:
         self.db.close()
 
 
+def _unique_wire_keys(pairs):
+    item = dict(pairs)
+    if len(item) != len(pairs):
+        raise ValueError("Duplicate provider JSON field")
+    return item
+
+
+def _usage_records(body, stream):
+    """Capture all reported usage events, including conflicting finish/tail reports."""
+    if not stream:
+        item = json.loads(body, object_pairs_hook=_unique_wire_keys)
+        if not isinstance(item, dict):
+            raise ValueError("Invalid provider response")
+        yield item.get("usage")
+        return
+    data = []
+    done = False
+    for line in [*bytes(body).splitlines(), b""]:
+        if line.startswith(b"data:"):
+            data.append(line[5:].lstrip(b" "))
+        elif not line and data:
+            event = b"\n".join(data)
+            data = []
+            if done:
+                yield False  # Invalid framing; still retain any later numeric usage observations.
+            if event.strip() == b"[DONE]":
+                done = True
+            else:
+                try:
+                    item = json.loads(event, object_pairs_hook=_unique_wire_keys)
+                except (ValueError, RecursionError):
+                    yield False
+                else:
+                    yield item.get("usage") if isinstance(item, dict) else False
+    if not done:
+        raise ValueError("Incomplete provider stream")
+
+
+def _wire_usage(body, stream, embedding, successful):
+    observations = []
+    issue = None
+    try:
+        for usage in _usage_records(body, stream):
+            if usage is None:
+                continue
+            if not isinstance(usage, dict):
+                issue = "invalid_usage"
+                continue
+            # Keep only recognized counters. Never persist arbitrary provider
+            # metadata, response text or malformed string values.
+            counters = {k: usage[k] for k in ("total_tokens", "prompt_tokens", "completion_tokens") if k in usage}
+            details = usage.get("completion_tokens_details")
+            if details is not None:
+                if not isinstance(details, dict):
+                    issue = "invalid_usage"
+                elif "reasoning_tokens" in details:
+                    counters["reasoning_tokens"] = details["reasoning_tokens"]
+            if any(type(n) is not int or not 0 <= n <= 2**63 - 1 for n in counters.values()):
+                issue = "invalid_usage"
+            observations.append({k: n for k, n in counters.items() if type(n) is int})
+    except (ValueError, RecursionError):
+        issue = "invalid_usage"
+    reported = observations[0] if observations else {}
+    if any(item != reported for item in observations):
+        issue = "conflicting_usage"
+        reported = {key: value for key, value in reported.items()
+                    if all(item.get(key) == value for item in observations)}
+    prompt = reported.get("prompt_tokens")
+    completion = reported.get("completion_tokens", 0 if embedding else None)
+    total = reported.get("total_tokens")
+    if (prompt is None or completion is None or total != prompt + completion
+            or successful and (not prompt or not embedding and not completion)
+            or embedding and completion != 0 or reported.get("reasoning_tokens", 0) > (completion or 0)):
+        issue = issue or "invalid_usage"
+    # On ambiguity preserve each reported counter and occupy at least the
+    # greatest representable charge implied by any observation.
+    bound = 0
+    for item in observations:
+        observed = max(item.get("total_tokens", 0),
+                       max(0, item.get("prompt_tokens", 0)) +
+                       max(0, item.get("completion_tokens", 0), item.get("reasoning_tokens", 0)))
+        bound = max(bound, min(observed, 2**63 - 1))
+    return {"prompt_tokens": prompt, "completion_tokens": reported.get("completion_tokens"), "total_tokens": total,
+            "observed_usage": observations, "observed_charge_bound": bound, "usage_issue": issue}
+
+
 class BudgetTransport(httpx.AsyncBaseTransport):
     """Charge every actual HTTP attempt, including gateway recovery and embeddings.
 
     Buffers bounded acceptance responses to capture usage before the provider can
     retry. No key, prompt, URL, response text or embedding vector enters the ledger.
     """
-    def __init__(self, ledger: RequestBudget, label, inner=None, *, total_output_parameter="max_tokens"):
+    def __init__(self, ledger: RequestBudget, label, inner=None, *, total_output_parameter="max_tokens",
+                 verify_usage=False, expected_model=None, api_root=None, request_kind=None, output_ceiling=None):
         if total_output_parameter not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError("Unverified total-output parameter")
         self.ledger, self.label = ledger, label
         self.total_output_parameter = total_output_parameter
+        self.verify_usage = verify_usage or ledger._requires_recovery
+        self.expected_model = expected_model
+        self.output_ceiling = output_ceiling
+        self.allowed_urls = ()
+        if ledger._requires_recovery or any(x is not None for x in (expected_model, api_root, request_kind, output_ceiling)):
+            if (not expected_model or not api_root or request_kind not in ("chat", "embedding")
+                    or request_kind == "chat" and (type(output_ceiling) is not int or output_ceiling < 1)
+                    or request_kind == "embedding" and output_ceiling is not None):
+                raise ValueError("Incomplete acceptance transport profile")
+            root = str(httpx.URL(api_root)).rstrip("/")
+            operations = ("/chat/completions",) if request_kind == "chat" else ("/embeddings", "/embeddings/multimodal")
+            self.allowed_urls = tuple(httpx.URL(root + operation) for operation in operations)
         self.inner = inner if inner is not None else httpx.AsyncHTTPTransport(retries=0)
 
     async def handle_async_request(self, request):
-        payload = json.loads(request.content)
+        payload = json.loads(request.content, object_pairs_hook=_unique_wire_keys)
+        if self.allowed_urls and (request.method != "POST" or request.url not in self.allowed_urls
+                                  or payload.get("model") != self.expected_model):
+            raise ForgePilotError("llm_budget", "Wire request differs from the configured acceptance model or endpoint")
+        if self.verify_usage and (not isinstance(payload.get("model"), str)
+                                  or not 0 < len(payload["model"]) <= 256):
+            raise ForgePilotError("llm_budget", "Verified acceptance requests require a configured model")
         embedding = request.url.path.endswith(("/embeddings", "/embeddings/multimodal"))
         if embedding:
             bound = len(request.content) + 64
         else:
             maximum = payload.get(self.total_output_parameter)
             if (type(maximum) is not int or maximum < 1
+                    or self.output_ceiling is not None and maximum > self.output_ceiling
                     or "max_tokens" in payload and "max_completion_tokens" in payload):
                 raise ForgePilotError("llm_budget", "Acceptance requests require a prospective output limit")
             tools = [ToolSpec(name=t["function"]["name"], description=t["function"].get("description", ""),
@@ -262,35 +391,75 @@ class BudgetTransport(httpx.AsyncBaseTransport):
                         len(request.content) + 16 * (len(payload["messages"]) + 1)) + maximum
         token = self.ledger.reserve(bound, self.label())
         response = None
+        body = bytearray()
+        started = monotonic()
         try:
-            response = await self.inner.handle_async_request(request)
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                if len(body) + len(chunk) > (32 if embedding else 1) * 1_048_576:
-                    raise ForgePilotError("llm_response_limit", "Acceptance response exceeds the provider boundary")
-                body.extend(chunk)
+            try:
+                response = await self.inner.handle_async_request(request)
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > (32 if embedding else 1) * 1_048_576:
+                        raise ForgePilotError("llm_response_limit", "Acceptance response exceeds the provider boundary")
+                    body.extend(chunk)
+            finally:
+                if response is not None:
+                    await response.aclose()
             usage = None
-            if payload.get("stream"):
+            if not self.verify_usage and payload.get("stream"):
                 for line in bytes(body).splitlines():
                     if line.startswith(b"data:") and line[5:].strip() != b"[DONE]":
                         item = json.loads(line[5:])
                         usage = item.get("usage") or usage
-            else:
+            elif not self.verify_usage:
                 try:
                     usage = json.loads(body).get("usage")
                 except (ValueError, AttributeError):
                     pass  # No usable usage was provided; charge the entire reservation.
-        except BaseException:
-            self.ledger.settle(token, None, "request_error")
+        except BaseException as exc:
+            if self.verify_usage:
+                reason = ("llm_timeout" if isinstance(exc, (TimeoutError, httpx.TimeoutException))
+                          else "llm_network" if isinstance(exc, httpx.TransportError)
+                          else "llm_response_limit" if isinstance(exc, ForgePilotError) and exc.code == "llm_response_limit"
+                          else "request_error")
+                self._settle_wire(token, payload, embedding, body, response, started, reason,
+                                  type(exc).__name__ if isinstance(exc, httpx.TransportError) else None)
+                if isinstance(exc, Exception):
+                    raise ForgePilotError("llm_budget", "Verified acceptance request failed; campaign held") from None
+            else:
+                self.ledger.settle(token, None, "request_error")
             raise
-        finally:
-            if response is not None:
-                await response.aclose()
-        if not self.ledger.settle(token, usage, "response_" + str(response.status_code)):
-            raise ForgePilotError("llm_budget", "Provider usage exceeded its reserved bound; campaign held")
+        if self.verify_usage:
+            accepted = self._settle_wire(token, payload, embedding, body, response, started)
+        else:
+            accepted = self.ledger.settle(token, usage, "response_" + str(response.status_code))
+        if not accepted:
+            raise ForgePilotError("llm_budget", "Acceptance wire or budget contract failed; campaign held")
         headers = [(key, value) for key, value in response.headers.multi_items()
                    if key.lower() not in {"content-length", "content-encoding", "transfer-encoding"}]
         return httpx.Response(response.status_code, headers=headers, content=bytes(body))
+
+    def _settle_wire(self, token, payload, embedding, body, response, started, reason=None, transport_error=None):
+        code = response.status_code if response is not None else None
+        success = code == 200
+        # A rejected streaming request can return a JSON error document (and
+        # billed usage) even though the successful response would be SSE.
+        stream = bool(payload.get("stream")) and (success or not body.lstrip().startswith(b"{"))
+        usage = _wire_usage(body, stream, embedding, success)
+        maximum = None if embedding else payload[self.total_output_parameter]
+        if reason is None and not success:
+            reason = f"http_{code}"
+        if reason is None and not embedding and any(
+                max(item.get("completion_tokens", 0), item.get("reasoning_tokens", 0)) > maximum
+                for item in usage["observed_usage"]):
+            reason = "output_limit_exceeded"
+        wire = {**usage, "kind": "embedding" if embedding else "chat", "model": payload.get("model"),
+                "output_parameter": None if embedding else self.total_output_parameter, "output_limit": maximum,
+                "status_code": code, "failure_reason": reason or usage["usage_issue"],
+                "transport_error": transport_error,
+                "duration_ms": int((monotonic() - started) * 1000)}
+        counters = {key: n for key, n in usage.items() if key in
+                    ("total_tokens", "completion_tokens", "prompt_tokens") and n is not None}
+        status = "request_error" if code is None else "response_" + str(code)
+        return self.ledger.settle(token, counters, status, wire=wire)
 
     async def aclose(self):
         await self.inner.aclose()

@@ -26,6 +26,11 @@ def _labels(plan):
     return [task["id"] + "-r" + str(n) for n in range(1, plan["rounds"] + 1) for task in plan["tasks"]]
 
 
+def sample_stopped_on_budget(run):
+    return (run.get("final_stop_reason") == "llm_budget" or run.get("reason") == "llm_budget"
+            or "llm_budget" in run.get("errors", []) or run.get("status") == "not_run_budget")
+
+
 def capture_stop(campaign: Path) -> dict:
     """Fingerprint original evidence and reconstruct the conservative held ledger."""
     directory = campaign.resolve(strict=True)
@@ -173,12 +178,44 @@ def open_recovery(campaign, ledger, runtime_identity):
     new_runs = runs[len(old["runs"]):]
     original_ids = {row["id"] for row in frozen["requests"]}
     resumed_requests = [row for row in current["requests"] if row["id"] not in original_ids]
-    completed_labels = {run["run"] for run in new_runs}
+    failed_slot = next(row["label"] for row in frozen["requests"] if row["id"] == manifest["request_id"])
+    identity = {key: old[key] for key in ("protocol_sha256", "model_configuration_sha256", "launcher_revision")}
+    identity.update(runtime_identity=runtime_identity, recovery_audit_sha256=digest)
+    extra = []
+    for field, label in (("revalidation", "revalidation"), ("retest", "retest-" + failed_slot)):
+        if field not in previous:
+            if os.path.lexists(directory / label):
+                raise ValueError("An incomplete post-repair record requires inspection")
+            continue
+        record = previous[field]
+        if not isinstance(record, dict) or record.get("run") != label:
+            raise ValueError("Unexpected post-repair record")
+        if field == "retest":
+            if record.get("retest_of") != failed_slot:
+                raise ValueError("Retest does not identify the original failed slot")
+            expected = {**identity, "original_result_sha256": manifest["original_files_sha256"][failed_slot + "/result.json"]}
+        else:
+            from acceptance_revalidation import verify_revalidation
+            expected = identity
+            old_preflight = json.loads(_read(directory, "preflight.json"))
+            verify_revalidation(record, ledger.wire_attempts(label), old["models"],
+                                require_embedding=old_preflight.get("embedding") == "passed")
+        if not _same(record.get("identity"), expected):
+            raise ValueError("Post-repair evidence identity changed")
+        extra.append(record)
+    if (new_runs or "retest" in previous) and "revalidation" not in previous:
+        raise ValueError("No verified post-repair preflight for the recorded samples")
+    completed = [*extra, *new_runs]
+    completed_labels = {run["run"] for run in completed}
     if any(row["label"] not in completed_labels for row in resumed_requests):
         raise ValueError("Reserved requests are missing from recorded recovery runs")
-    for run in new_runs:
+    for run in completed:
         calls = [row for row in resumed_requests if row["label"] == run["run"]]
-        if (run.get("reason") == "llm_budget" or "llm_budget" in run.get("errors", [])
+        if (run in new_runs and not _same(run.get("identity"), identity)
+                or run.get("reported_tokens") != sum(row["charged"] or 0 for row in calls if row["estimated"] == 0)
+                or run.get("estimated_tokens") != sum(row["charged"] or 0 for row in calls if row["estimated"] == 1)):
+            raise ValueError("Recorded identity or usage is inconsistent with the request ledger")
+        if (sample_stopped_on_budget(run)
                 or len(calls) != run["network_requests"] or any(row["charged"] is None for row in calls)
                 or not _same(run, json.loads(_read(directory, run["run"] + "/result.json")))):
             raise ValueError("Recovered run stopped on budget or does not match its result")

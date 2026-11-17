@@ -5,6 +5,44 @@ import json
 from pathlib import Path
 
 
+def mock_model_configuration():
+    from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+
+    profiles = tuple(ModelProfile(
+        profile_id=name, model=model, family=name, api_key_ref="env:FORGEPILOT_API_KEY",
+        base_url="https://ark.cn-beijing.volces.com/api/v3", max_output_tokens=32,
+    ) for name, model in (("ark", "doubao-seed-2-1-lite-fixture"), ("ds", "deepseek-v4-1-fixture")))
+    return ModelConfiguration(profiles=profiles, routes=(
+        ModelRoute(route_id="chat", primary="ark", fallback="ds"), ModelRoute(route_id="summary", primary="ds"),
+    ))
+
+
+def mock_revalidation_network(monkeypatch):
+    import httpx
+    import run_product_acceptance as acceptance
+
+    sent = []
+
+    def reply(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"},
+                                                      "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6,
+                      "completion_tokens_details": {"reasoning_tokens": 1}}})
+
+    mock = httpx.MockTransport(reply)
+
+    async def send(transport, request):
+        return await mock.handle_async_request(request)
+
+    async def fixture_settings(config_path):
+        return {"config_revision": acceptance.configuration_revision(config_path), "fields": {"embedding_enabled": False}}
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send)
+    monkeypatch.setattr(acceptance, "load_configuration", fixture_settings)
+    return sent
+
+
 def write_reconciliation_fixture(campaign, row, *, actual=123):
     from acceptance_reconciliation import runtime_identity
     from forgepilot.models.accounting import response_hash

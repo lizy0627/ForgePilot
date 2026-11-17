@@ -144,18 +144,26 @@ def test_real_overage_can_be_reported_but_cannot_authorize_recovery(tmp_path):
         ledger.close()
 
 
-def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp_path):
-    args = make_fixture(tmp_path)
+def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp_path, monkeypatch):
+    from test_acceptance_resume_entry import acceptance, command, fixture_inputs, offline_configuration
+    from reconciliation_support import mock_revalidation_network
+
+    args = fixture_inputs(tmp_path)
+    monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", tmp_path)
+    offline_configuration(monkeypatch, tmp_path)
+    mock_revalidation_network(monkeypatch)
+    monkeypatch.setattr(acceptance, "load_saved_key", lambda _: "fixture")
+    command(monkeypatch, tmp_path, "--reconcile", *args)
+    command(monkeypatch, tmp_path, "--resume", "--execute", "--revalidate-only")
     runtime = runtime_identity()
     db = tmp_path / "budget.sqlite3"
     ledger = RequestBudget(db, existing_only=True)
     try:
-        ledger.reconcile(*args, anchors=capture_stop(tmp_path))
-        materialize_recovery(tmp_path, ledger, runtime)
         state, path = open_recovery(tmp_path, ledger, runtime)
         label = "bug-inclusive-sum-r1"
         ledger.settle(ledger.reserve(80, label), {"total_tokens": 61}, "response_200")
-        result = {"run": label, "status": "passed", "network_requests": 1}
+        result = {"run": label, "status": "passed", "network_requests": 1,
+                  "identity": state["revalidation"]["identity"], "reported_tokens": 61, "estimated_tokens": 0}
         folder = tmp_path / label
         folder.mkdir()
         (folder / "result.json").write_text(json.dumps(result))

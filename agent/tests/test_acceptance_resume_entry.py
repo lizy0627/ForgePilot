@@ -5,18 +5,17 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import run_product_acceptance as acceptance
 from acceptance_budget import RequestBudget
-from reconciliation_support import make_fixture
+from reconciliation_support import make_fixture, mock_model_configuration, mock_revalidation_network
 
 
-@pytest.fixture
-def campaign(tmp_path, monkeypatch):
+@pytest.fixture(name="campaign")
+def fixture_campaign(tmp_path, monkeypatch):
     directory = tmp_path / "real-acceptance"
     directory.mkdir()
     monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", directory)
@@ -64,7 +63,9 @@ def test_alternate_directory_cannot_initialize_or_restore(campaign, monkeypatch,
 def fixture_inputs(campaign):
     inputs = make_fixture(campaign)
     summary = json.loads((campaign / "summary.json").read_bytes())
-    summary["model_configuration_sha256"] = hashlib.sha256(b"fixture").hexdigest()
+    config = mock_model_configuration()
+    summary["model_configuration_sha256"] = hashlib.sha256(config.model_dump_json().encode()).hexdigest()
+    summary["models"] = [{"profile": p.profile_id, "model": p.model, "family": p.family} for p in config.profiles]
     acceptance.save(campaign / "summary.json", summary)
     return inputs
 
@@ -76,7 +77,7 @@ def original_files(campaign):
 
 
 def offline_configuration(monkeypatch, campaign, *, revision="2" * 64):
-    fake = SimpleNamespace(model_dump_json=lambda: "fixture")
+    fake = mock_model_configuration()
     monkeypatch.setattr(acceptance, "saved_configuration", lambda: (campaign / "fixture-config", fake))
     monkeypatch.setattr(acceptance, "configuration_revision", lambda path: revision)
 
@@ -94,12 +95,14 @@ def test_offline_cli_creates_only_derived_state_and_next_stop_is_durable(campaig
     offline_configuration(monkeypatch, campaign)
     monkeypatch.setattr(acceptance, "load_saved_key", lambda path: "offline-fixture")
     labels = []
+    sent = mock_revalidation_network(monkeypatch)
 
-    async def synthetic_sample(task, repeat, config, key, ledger, output):
+    async def synthetic_sample(task, repeat, config, key, ledger, output, *, identity):
         assert key == "offline-fixture"
         label = task["id"] + "-r" + str(repeat)
         labels.append(label)
-        assert json.loads(next(output.glob("progress-*.json")).read_bytes())["budget"]["charged_or_reserved"] == 140
+        assert len(sent) == 4
+        assert json.loads(next(output.glob("progress-*.json")).read_bytes())["budget"]["charged_or_reserved"] == 164
         ledger.settle(ledger.reserve(40, label), {"total_tokens": 12}, "response_200")
         result = {"run": label, "status": "failed", "reason": "llm_budget", "tokens": 12, "network_requests": 1}
         (output / label).mkdir()
@@ -111,7 +114,7 @@ def test_offline_cli_creates_only_derived_state_and_next_stop_is_durable(campaig
     command(monkeypatch, campaign, "--execute", "--resume")
     assert labels == ["bug-inclusive-sum-r1"]
     progress = json.loads(next(campaign.glob("progress-*.json")).read_bytes())
-    assert progress["budget"]["charged_or_reserved"] == 152 and progress["budget"]["held"]
+    assert progress["budget"]["charged_or_reserved"] == 176 and progress["budget"]["held"]
     assert progress["stop_reason"] == "shared_budget_exhausted"
     assert immutable.read_bytes() == first and original_files(campaign) == originals
 

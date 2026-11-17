@@ -28,16 +28,17 @@ import httpx
 
 from acceptance_budget import BudgetTransport, RequestBudget
 from acceptance_reconciliation import runtime_identity
-from acceptance_recovery import capture_stop, materialize_recovery, open_recovery
+from acceptance_recovery import capture_stop, materialize_recovery, open_recovery, sample_stopped_on_budget
+from acceptance_revalidation import verify_revalidation
 from forgepilot.api import create_app
 from forgepilot.desktop_configuration import (
     ConfigurationLock, configuration_revision, load_configuration, load_embedding_key, load_saved_key,
 )
 from forgepilot.errors import ForgePilotError
 from forgepilot.mission_factory import MissionDependencies, build_mission_workflow
-from forgepilot.models.accounting import Accounting
+from forgepilot.models.accounting import Accounting, ModelBudget
 from forgepilot.models.gateway import ModelGateway
-from forgepilot.models.profiles import ModelConfiguration, SecretResolver
+from forgepilot.models.profiles import ModelConfiguration, ModelRoute, SecretResolver
 from forgepilot.presets import BuildConfig
 from forgepilot.process import executable
 from forgepilot.rag.embedding import OpenAICompatibleEmbeddingProvider
@@ -107,70 +108,113 @@ def saved_configuration():
     return path, configuration
 
 
-def gateway(configuration, key, ledger, label, *, check=False):
+def gateway(configuration, key, ledger, label, *, check=False, verify_usage=False):
     if check:
         configuration = configuration.model_copy(update={"profiles": tuple(
             profile.model_copy(update={"max_output_tokens": min(1024, profile.max_output_tokens)})
             for profile in configuration.profiles)})
     def transport(profile):
         host = urlsplit(profile.base_url).hostname or ""
-        if host == "ark.cn-beijing.volces.com" and profile.model.startswith("doubao-seed-2-1-"):
-            parameter = "max_completion_tokens"
-        elif host == "ark.cn-beijing.volces.com" and profile.model.startswith("deepseek-v4-1-"):
-            parameter = "max_tokens"
-        else:
+        from acceptance_revalidation import total_output_parameter
+
+        try:
+            parameter = total_output_parameter(profile.model)
+        except ValueError:
+            raise ForgePilotError("llm_budget", "Acceptance has no verified total-output bound for this model") from None
+        if host != "ark.cn-beijing.volces.com":
             raise ForgePilotError("llm_budget", "Acceptance has no verified total-output bound for this provider/model")
-        return BudgetTransport(ledger, lambda: label, total_output_parameter=parameter)
+        return BudgetTransport(ledger, lambda: label, total_output_parameter=parameter, verify_usage=verify_usage,
+                               expected_model=profile.model, api_root=profile.base_url, request_kind="chat",
+                               output_ceiling=profile.max_output_tokens)
     return ModelGateway(configuration, secret_resolver=SecretResolver(environment={**os.environ, "FORGEPILOT_API_KEY": key}),
                         transport_factory=transport,
                         accounting=Accounting(max_records=4096))
 
 
-async def preflight(config_path, configuration, key, ledger, output):
-    result = {"connections": [], "chat": "not_run", "summary": "not_run", "embedding": "not_run"}
-    async with gateway(configuration, key, ledger, "preflight", check=True) as models:
-        for profile in configuration.profiles:
-            # Reuse the selected provider through a complete gateway configuration.
-            from forgepilot.models.profiles import ModelRoute
-            check_config = configuration.model_copy(update={"routes": (
-                ModelRoute(route_id="connection-check", primary=profile.profile_id),),
-                "enforce_review_family_separation": False})
-            try:
-                async with gateway(check_config, key, ledger, "connection:" + profile.profile_id, check=True) as check_models:
-                    reply = await check_models.for_route("connection-check").chat([
-                        {"role": "user", "content": "Reply with only OK."}])
-                    result["connections"].append({"profile": profile.profile_id, "ok": bool(reply.message.content)})
-            except ForgePilotError as exc:
-                result["connections"].append({"profile": profile.profile_id, "ok": False, "code": exc.code})
-        if all(row["ok"] for row in result["connections"]):
-            for route, prompt in (("chat", "In one sentence, what is a C++ unit test?"),
-                                  ("summary", "Summarize this dialogue in one short sentence: user asks to fix a C++ boundary error; assistant will inspect code and run tests.")):
-                try:
-                    reply = await models.for_route(route).chat([{"role": "user", "content": prompt}])
-                    result[route] = "passed" if reply.message.content else "failed"
-                except ForgePilotError as exc:
-                    result[route] = exc.code
-        result["accounting"] = [asdict(record) for record in models.accounting.snapshot()]
-    state = await load_configuration(config_path)
-    fields = state["fields"]
-    if fields["embedding_enabled"]:
-        embedding_key = load_embedding_key(config_path) or os.environ.get("FORGEPILOT_EMBEDDING_API_KEY", "")
-        if not embedding_key and urlsplit(fields["embedding_base_url"]) == urlsplit(fields["base_url"]):
-            embedding_key = key  # Same configured provider only; never writes a credential/config.
-            result["embedding_credential"] = "existing_same_provider_key_for_this_probe_only"
-        if embedding_key:
-            try:
+async def run_revalidation(config_path, configuration, key, ledger, *, label, identity):
+    from acceptance_revalidation import verify_probe
+
+    if label != "revalidation" or any(r["label"] == label for r in ledger.snapshot()["requests"]):
+        raise ValueError("Revalidation requires its unused campaign label")
+    started = monotonic()
+    checks = []
+    result = {"run": label, "status": "failed", "identity": identity, "checks": checks,
+              "embedding_enabled": None, "first_failure_reason": None, "final_stop_reason": None}
+    try:
+        state = await load_configuration(config_path)
+        if state["config_revision"] != identity["launcher_revision"]:
+            raise ForgePilotError("acceptance_config_drift", "Launcher changed before revalidation")
+        fields = state["fields"]
+        result["embedding_enabled"] = fields["embedding_enabled"]
+        planned = [("connection:" + p.profile_id, p, "Reply with only OK.") for p in configuration.profiles]
+        router = configuration.router()
+        planned.extend((name, router.resolve(name).primary, prompt) for name, prompt in (
+            ("chat", "In one sentence, what is a C++ unit test?"),
+            ("summary", "Summarize this dialogue in one short sentence: user asks to fix a C++ boundary error; "
+                        "assistant will inspect code and run tests.")))
+        if fields["embedding_enabled"]:
+            embedding_key = load_embedding_key(config_path) or os.environ.get("FORGEPILOT_EMBEDDING_API_KEY")
+            if not embedding_key and urlsplit(fields["embedding_base_url"]) == urlsplit(fields["base_url"]):
+                embedding_key = key
+            if not embedding_key:
+                raise ForgePilotError("credential_missing", "Configured embedding credential unavailable")
+            if configuration_revision(config_path) != identity["launcher_revision"]:
+                raise ForgePilotError("acceptance_config_drift", "Launcher changed during credential capture")
+            planned.append(("embedding", None, "C++ boundary check"))
+        for name, profile, prompt in planned:
+            check = {"name": name, "kind": "chat" if profile else "embedding", "status": "failed",
+                     "model": profile.model if profile else fields["embedding_model"],
+                     "profile": profile.profile_id if profile else None,
+                     "output_limit": min(1024, profile.max_output_tokens) if profile else None}
+            checks.append(check)
+            if profile:
+                route = ModelRoute(route_id="connection-check", primary=profile.profile_id)
+                config = configuration.model_copy(update={"routes": (route,), "enforce_review_family_separation": False})
+                async with gateway(config, key, ledger, label, check=True, verify_usage=True) as models:
+                    client = models.for_route(route.route_id, budget=ModelBudget(max_model_calls=1))
+                    reply = await client.chat([{"role": "user", "content": prompt}])
+                    content = (reply.message.content or "").strip()
+                    if not content or name.startswith("connection:") and content.casefold() != "ok":
+                        raise ForgePilotError("llm_response", "Unexpected acceptance probe reply")
+            else:
+                transport = BudgetTransport(ledger, lambda: label, verify_usage=True,
+                                            expected_model=fields["embedding_model"], api_root=fields["embedding_base_url"],
+                                            request_kind="embedding")
                 async with OpenAICompatibleEmbeddingProvider(fields["embedding_base_url"], embedding_key,
-                        fields["embedding_model"], transport=BudgetTransport(ledger, lambda: "embedding-check")) as embeddings:
-                    vector = await embeddings.embed_query("C++ boundary check")
-                    result["embedding"] = "passed"
-                    result["embedding_dimensions"] = len(vector)
-            except ForgePilotError as exc:
-                result["embedding"] = exc.code
-        else:
-            result["embedding"] = "credential_missing"
-    save(output / "preflight.json", result)
-    return all(row["ok"] for row in result["connections"]) and result["chat"] == result["summary"] == "passed"
+                        fields["embedding_model"], transport=transport) as embeddings:
+                    check["dimensions"] = len(await embeddings.embed_query(prompt))
+            attempts = ledger.wire_attempts(label)
+            if len(attempts) != len(checks):
+                raise ForgePilotError("revalidation_wire", "Probe needs exactly one wire attempt")
+            check["request_id"] = attempts[-1]["request_id"]
+            try:
+                verify_probe(check, attempts[-1])
+            except ValueError:
+                raise ForgePilotError("probe_usage_invalid", "Probe did not prove the budget contract") from None
+            check["status"] = "passed"
+        result["status"] = "passed"
+    except Exception as exc:
+        code = exc.code if isinstance(exc, ForgePilotError) else type(exc).__name__
+        result["first_failure_reason"] = result["final_stop_reason"] = code
+    attempts = ledger.wire_attempts(label)
+    if attempts and result["status"] == "failed" and checks:
+        first = next((a for a in attempts if a["failure_reason"]), None)
+        if first:
+            result["first_failure_reason"] = first["failure_reason"]
+        if len(checks) == len(attempts):
+            checks[-1]["request_id"] = attempts[-1]["request_id"]
+    result.update(duration_seconds=round(monotonic() - started, 3), network_requests=len(attempts),
+                  wire_attempts=attempts,
+                  reported_tokens=sum(a["reported_tokens"] for a in attempts),
+                  estimated_tokens=sum(a["estimated_tokens"] for a in attempts))
+    if result["status"] == "passed":
+        try:
+            verify_revalidation(result, attempts, [{"profile": p.profile_id, "model": p.model}
+                                                    for p in configuration.profiles])
+        except ValueError:
+            result.update(status="failed", first_failure_reason="revalidation_evidence",
+                          final_stop_reason="revalidation_evidence")
+    return result
 
 
 def fixture(task):
@@ -194,13 +238,106 @@ def fixture(task):
     return root, source, oracle, git("rev-parse", "HEAD"), git
 
 
-async def run_sample(task, repeat, configuration, key, ledger, output):
-    label = task["id"] + "-r" + str(repeat)
-    evidence = output / label; evidence.mkdir()
+def sample_terminal_failure(missions, task_id):
+    """Read the persisted task failure even when an interrupted node has no NodeResult."""
+    after = 0
+    terminal = None
+    while True:
+        _, rows, high_water = missions.event_page(task_id, after, 128)
+        for row in rows:
+            if row["event_type"] == "task.failed":
+                code = json.loads(row["payload_json"]).get("error_code")
+                if code:
+                    terminal = {"event_type": row["event_type"], "sequence": row["sequence"], "error_code": code}
+        if not rows or rows[-1]["sequence"] >= high_water:
+            return terminal
+        after = rows[-1]["sequence"]
+
+
+def sample_failure_reasons(result, wire_attempts=()):
+    """Keep the earliest transport/accounting cause even if budget stops a later attempt."""
+    first = next((r["failure_reason"] for r in wire_attempts if r.get("failure_reason")), None)
+    if first is None:
+        first = next((r["status"] for r in result.get("accounting", [])
+                      if r.get("status") not in (None, "success")), None)
+    if result["status"] == "passed":
+        return first, None
+    errors = result.get("errors") or []
+    reason = result.get("reason")
+    if reason and reason not in {"failed", "cancelled", "retryable", "interrupted", "awaiting_human"}:
+        stop = reason
+    elif "llm_budget" in errors:
+        stop = "llm_budget"
+    elif result.get("terminal_failure_event"):
+        stop = result["terminal_failure_event"]["error_code"]
+    else:
+        stop = errors[-1] if errors else reason or result["status"]
+    return first or (errors[0] if errors else stop), stop
+
+
+async def run_sample(task, repeat, configuration, key, ledger, output, *, identity, retest_of=None):
+    if task not in TASKS or type(repeat) is not int or not 1 <= repeat <= 3:
+        raise ValueError("Sample must match a fixed task and round")
+    slot = f"{task['id']}-r{repeat}"
+    label = slot
+    result = {"task": task["id"], "repeat": repeat, "status": "failed", "identity": identity}
+    if retest_of is not None:
+        if retest_of != slot:
+            raise ValueError("Retest must identify its original fixed slot")
+        path = output / slot / "result.json"
+        if path.resolve(strict=True) != path.absolute() or path.stat().st_nlink != 1:
+            raise ValueError("Unsafe original result")
+        raw = path.read_bytes()
+        original = json.loads(raw)
+        if (original.get("run") != slot or original.get("status") != "failed"
+                or identity.get("original_result_sha256") != hashlib.sha256(raw).hexdigest()):
+            raise ValueError("Retest requires the frozen failed result")
+        first, stop = sample_failure_reasons(original)
+        failure = {"first_failure_reason": first, "final_stop_reason": stop}
+        hold_path = output / "budget-hold-audit.json"
+        if hold_path.exists():
+            if hold_path.resolve(strict=True) != hold_path.absolute() or hold_path.stat().st_nlink != 1:
+                raise ValueError("Unsafe original hold evidence")
+            raw_hold = hold_path.read_bytes()
+            hold = json.loads(raw_hold)
+            if hold["original_request"]["label"] == slot:
+                failure.update(hold_reason=hold["reason"], hold_audit_sha256=hashlib.sha256(raw_hold).hexdigest())
+        result.update(retest_of=slot, original_failure=failure)
+        label = "retest-" + slot
+    evidence = output / label
+    evidence.mkdir(exist_ok=False)
+    result["run"] = label
+    started = monotonic()
+    try:
+        await _run_sample_workflow(task, configuration, key, ledger, evidence, result)
+    except asyncio.CancelledError:
+        result.update(status="cancelled", reason="cancelled")
+        raise
+    except Exception as exc:
+        result.update(status="failed", reason=exc.code if isinstance(exc, ForgePilotError) else type(exc).__name__)
+    finally:
+        rows = [row for row in ledger.snapshot()["requests"] if row["label"] == label]
+        attempts = ledger.wire_attempts(label)
+        result.update(duration_seconds=round(monotonic() - started, 3), network_requests=len(rows),
+                      reported_tokens=sum(r["charged"] for r in rows if r["estimated"] == 0),
+                      estimated_tokens=sum(r["reserved"] if r["charged"] is None else r["charged"]
+                                           for r in rows if r["estimated"] != 0), wire_attempts=attempts)
+        result["tokens"] = result["reported_tokens"] + result["estimated_tokens"]
+        result["first_failure_reason"], result["final_stop_reason"] = sample_failure_reasons(result, attempts)
+        if not rows and result["final_stop_reason"] == "llm_budget":
+            result["status"] = "not_run_budget"
+        save(evidence / "result.json", result)
+    return result
+
+
+async def _run_sample_workflow(task, configuration, key, ledger, evidence, result):
     root, source, oracle, head, git = fixture(task)
+    result.update(fixture_root=str(root), source_head=head)
     before = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in source.rglob("*") if p.is_file() and ".git" not in p.parts}
-    models = gateway(configuration, key, ledger, label)
+    result["source_files_sha256"] = before
+    result["source_status_before"] = git("status", "--porcelain")
+    models = gateway(configuration, key, ledger, result["run"], verify_usage=True)
     store = SqliteEventStore(root / "mission.sqlite3", artifact_root=root / "a", redactor=models.redactor)
     workflows = []
     build = BuildConfig(cmake=executable(None, "cmake"), ctest=executable(None, "ctest"),
@@ -216,8 +353,6 @@ async def run_sample(task, repeat, configuration, key, ledger, output):
         workflows.append(workflow)
         return workflow
     app = create_app(no_legacy, store=store, mission_factory=factory, model_client_closer=models.aclose)
-    result = {"run": label, "task": task["id"], "repeat": repeat, "status": "failed", "fixture_root": str(root)}
-    started = monotonic(); initial_charge = ledger.snapshot()["charged_or_reserved"]
     task_id = None
     try:
         async with app.router.lifespan_context(app):
@@ -264,12 +399,17 @@ async def run_sample(task, repeat, configuration, key, ledger, output):
                             or any(p != "src/value.cpp" for step in plans[-1]["steps"] for p in step["expected_files"])):
                         raise ForgePilotError("acceptance_scope", "Plan exceeds precommitted sample authorization")
                     graph = await call("GET", path + "/graph")
-                    assert all(n["status"] == "pending" for n in graph["nodes"] if n["node_id"] in {"baseline_capture", "implementer"})
+                    pending = {n["node_id"]: n["status"] for n in graph["nodes"]
+                               if n["node_id"] in {"baseline_capture", "implementer"}}
+                    if pending != {"baseline_capture": "pending", "implementer": "pending"}:
+                        raise ForgePilotError("acceptance_approval", "Execution nodes must be pending before approval")
                     save(evidence / "approved-review.json", state["review"])
                     review = state["review"]
                     await call("POST", path + "/approvals", {"expected_revision": review["revision"], "decision": "approved",
                         **{field: review[field] for field in ("task_spec_hash", "plan_hash", "scope_hash")}})
                     state = await settle()
+                if state["status"] == "failed":
+                    result["terminal_failure_event"] = sample_terminal_failure(store.missions, task_id)
                 artifacts = (await call("GET", path + "/artifacts"))["items"]
                 graph = await call("GET", path + "/graph")
                 validation = await call("GET", path + "/validation")
@@ -282,35 +422,52 @@ async def run_sample(task, repeat, configuration, key, ledger, output):
                     if n.get("result") and n["result"].get("error_summary")], tool_context=state.get("tool_context"))
                 if state["status"] == "succeeded" and bundles and reports and reviews:
                     last = reports[-1]
-                    assert last["status"] == "passed" and last["failure_classification"] == "none"
-                    assert last["hidden_oracle"] == last["test_integrity"] == "passed"
-                    assert all(c["exit_code"] == 0 for c in last["commands"])
-                    assert {"configure", "build", "test", "protected_test", "integrity"} <= {c["kind"] for c in last["commands"]}
-                    assert reviews[-1]["recommend_delivery"] and reviews[-1]["verdict"] == "approve"
+                    if (last["status"] != "passed" or last["failure_classification"] != "none"
+                            or any(last[k] != "passed" for k in ("hidden_oracle", "test_integrity", "workspace_integrity", "diff_scope"))
+                            or last["tests_passed"] < 1 or last["tests_failed"]
+                            or any(c["exit_code"] != 0 for c in last["commands"])
+                            or not {"configure", "build", "test", "protected_test", "integrity"} <= {c["kind"] for c in last["commands"]}):
+                        raise ForgePilotError("acceptance_validation", "Missing successful build, tests, integrity or scope checks")
+                    calls = models.accounting.snapshot()
+                    writers = {configuration.profile(c.profile_id).family for c in calls
+                               if c.role in {"implementer", "repair"} and c.status == "success"}
+                    reviewers = {configuration.profile(c.profile_id).family for c in calls
+                                 if c.role == "reviewer" and c.status == "success"}
+                    if (not reviews[-1]["recommend_delivery"] or reviews[-1]["verdict"] != "approve"
+                            or not writers or not reviewers or writers & reviewers):
+                        raise ForgePilotError("acceptance_review", "Independent review approval is required")
+                    if bundles[-1]["content"]["changed_files"] != ["src/value.cpp"]:
+                        raise ForgePilotError("acceptance_scope", "Delivery exceeded fixed sample scope")
+                    result.update(writer_families=sorted(writers), reviewer_families=sorted(reviewers))
                     diff = await call("GET", path + "/diff"); save(evidence / "diff.json", diff)
                     preview = await call("POST", path + "/delivery", {"expected_revision": state["current_revision"], "mode": "preview"})
                     exported = await call("POST", path + "/delivery", {"expected_revision": preview["mission"]["current_revision"],
                         "mode": "patch", "token": preview["delivery"]["token"]})
+                    delivery = exported["delivery"]
+                    patch = delivery["patch"]
+                    patch_file = Path(patch["path"])
+                    if (delivery["mode"] != "patch" or patch_file.resolve(strict=True) != patch_file
+                            or not patch_file.is_relative_to(root / "a")):
+                        raise ForgePilotError("acceptance_delivery", "Unexpected exported patch path")
+                    patch_bytes = patch_file.read_bytes()
+                    if len(patch_bytes) != patch["size"] or not patch_bytes or hashlib.sha256(patch_bytes).hexdigest() != patch["sha256"]:
+                        raise ForgePilotError("acceptance_delivery", "Patch export identity mismatch")
+                    with (evidence / "delivery.patch").open("xb") as file:
+                        file.write(patch_bytes)
                     save(evidence / "delivery.json", exported)
                     result["status"] = "passed"
                 else:
                     result["reason"] = state["status"]
-                after = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                         for p in source.rglob("*") if p.is_file() and ".git" not in p.parts}
-                assert after == before and git("rev-parse", "HEAD") == head and not git("status", "--porcelain")
-                result["source_unchanged"] = True
-    except Exception as exc:
-        result.update(status="failed", reason=exc.code if isinstance(exc, ForgePilotError) else type(exc).__name__)
     finally:
-        result["duration_seconds"] = round(monotonic() - started, 3)
-        result["tokens"] = ledger.snapshot()["charged_or_reserved"] - initial_charge
-        result["network_requests"] = sum(row["label"] == label for row in ledger.snapshot()["requests"])
-        if not result["network_requests"] and (result.get("reason") == "llm_budget" or "llm_budget" in result.get("errors", [])):
-            result["status"] = "not_run_budget"
         result["accounting"] = [asdict(record) for record in models.accounting.snapshot()]
-        save(evidence / "result.json", result)
         store.close()
-    return result
+        after = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in source.rglob("*") if p.is_file() and ".git" not in p.parts}
+        result["source_status_after"] = git("status", "--porcelain")
+        result["source_unchanged"] = (after == before and git("rev-parse", "HEAD") == head
+                                      and result["source_status_before"] == result["source_status_after"] == "")
+        if not result["source_unchanged"]:
+            raise ForgePilotError("acceptance_source", "Source repository changed")
 
 
 def campaign_ledger(output):
@@ -344,7 +501,7 @@ def reconcile_offline(output, inputs):
         ledger.close()
 
 
-async def execute(output):
+async def execute(output, *, revalidate_only=False, retest=None):
     output = output.absolute()
     ledger = campaign_ledger(output)
     try:
@@ -355,6 +512,9 @@ async def execute(output):
             return
         if not audits or original.get("stop_reason") != "shared_budget_exhausted":
             raise ValueError("Missing the original stop or its request-level reconciliation")
+        failed_slot = audits[0]["before"]["label"]
+        if retest is not None and retest != failed_slot:
+            raise ValueError("Retest must identify the original reconciled failure")
         verify_plan(output)
         identity = runtime_identity()
         # Serialize progress checkpoints across harness processes. This uses a
@@ -365,23 +525,28 @@ async def execute(output):
             raise ValueError("Unexpected linked campaign writer lock")
         with writer:
             previous, progress = open_recovery(output, ledger, identity)
-            await _execute_available(output, ledger, previous, progress, identity)
+            await _execute_available(output, ledger, previous, progress, identity,
+                                     failed_slot=failed_slot, revalidate_only=revalidate_only, retest=retest)
     finally:
         ledger.close()
 
 
-async def _execute_available(output, ledger, previous, progress, runtime):
+async def _execute_available(output, ledger, previous, progress, runtime, *, failed_slot, revalidate_only, retest):
     config_path, configuration = saved_configuration()
     identity = {"model_configuration_sha256": hashlib.sha256(configuration.model_dump_json().encode()).hexdigest(),
                 "launcher_revision": configuration_revision(config_path)}
-    if any(previous.get(name) != value for name, value in identity.items()):
+    models = [{"profile": p.profile_id, "model": p.model, "family": p.family} for p in configuration.profiles]
+    if any(previous.get(name) != value for name, value in identity.items()) or previous["models"] != models:
         raise ValueError("Acceptance model configuration or credential identity changed; cannot resume")
-    prior = json.loads((output / "preflight.json").read_bytes())
-    if not (prior["connections"] and all(row["ok"] is True for row in prior["connections"])
-            and prior["chat"] == prior["summary"] == "passed"):
-        raise ValueError("Original preflight is incomplete; cannot resume paid samples")
     runs = list(previous["runs"])
-    summary = {**previous, **identity, "runtime_identity": runtime, "runs": runs}
+    identity.update(protocol_sha256=previous["protocol_sha256"], runtime_identity=runtime,
+                    recovery_audit_sha256=previous["recovery_audit_sha256"])
+    summary = {**previous, **identity, "runs": runs}
+    # open_recovery checked these records against the original ledger and the
+    # per-slot evidence before permitting this connection to reserve tokens.
+    if previous.get("revalidation") and (revalidate_only or (retest and previous.get("retest"))
+                                         or not retest and len(runs) == previous["planned_runs"]):
+        return
 
     def checkpoint():
         attempted = sum(run.get("network_requests", 0) > 0 for run in runs)
@@ -394,7 +559,48 @@ async def _execute_available(output, ledger, previous, progress, runtime):
     key = load_saved_key(config_path)
     if not key:
         raise ValueError("Existing model credential unavailable")
+    if configuration_revision(config_path) != identity["launcher_revision"]:
+        raise ValueError("Acceptance credential identity changed during key load")
     try:
+        if not summary.get("revalidation"):
+            label = "revalidation"
+            directory = output / label
+            directory.mkdir()
+            result = await run_revalidation(config_path, configuration, key, ledger, label=label, identity=identity)
+            if result["status"] == "passed":
+                old_preflight = json.loads((output / "preflight.json").read_bytes())
+                try:
+                    verify_revalidation(result, ledger.wire_attempts(label), previous["models"],
+                                        require_embedding=old_preflight.get("embedding") == "passed")
+                except ValueError:
+                    result.update(status="failed", first_failure_reason="invalid_revalidation_evidence",
+                                  final_stop_reason="invalid_revalidation_evidence")
+            save(directory / "result.json", result)
+            summary[label] = result
+            if result["status"] != "passed":
+                summary["stop_reason"] = result["final_stop_reason"] or "revalidation_failed"
+                if not ledger.snapshot()["held"]:
+                    ledger.stop_recovery()
+            checkpoint()
+            if summary.get("stop_reason"):
+                return
+        if revalidate_only:
+            return
+        if retest:
+            original = next(r for r in runs if r["run"] == failed_slot)
+            task = next(t for t in TASKS if failed_slot.rsplit("-r", 1)[0] == t["id"])
+            repeat = int(failed_slot.rsplit("-r", 1)[1])
+            audit = ledger.reconciliation_audits()[0]
+            retest_identity = {**identity, "original_result_sha256": audit["result_sha256"]}
+            result = await run_sample(task, repeat, configuration, key, ledger, output,
+                                      identity=retest_identity, retest_of=original["run"])
+            summary["retest"] = result
+            if ledger.snapshot()["held"] or sample_stopped_on_budget(result):
+                if not ledger.snapshot()["held"]:
+                    ledger.stop_recovery()
+                summary["stop_reason"] = result.get("final_stop_reason") or "shared_budget_exhausted"
+            checkpoint()
+            return
         for repeat in range(1, 4):
             for task in TASKS:
                 label = task["id"] + "-r" + str(repeat)
@@ -403,10 +609,11 @@ async def _execute_available(output, ledger, previous, progress, runtime):
                 if (output / label).exists():
                     raise ValueError("An incomplete run directory requires inspection; never overwrite paid evidence")
                 print("RUN", task["id"], repeat, flush=True)
-                result = await run_sample(task, repeat, configuration, key, ledger, output)
+                result = await run_sample(task, repeat, configuration, key, ledger, output, identity=identity)
                 runs.append(result)
-                if result.get("reason") == "llm_budget" or "llm_budget" in result.get("errors", []):
-                    ledger.stop_recovery()
+                if ledger.snapshot()["held"] or sample_stopped_on_budget(result):
+                    if not ledger.snapshot()["held"]:
+                        ledger.stop_recovery()
                     summary["stop_reason"] = "shared_budget_exhausted"
                 checkpoint()
                 print("RESULT", result["run"], result["status"], result["tokens"], flush=True)
@@ -432,9 +639,14 @@ def main():
     action.add_argument("--rebuild-recovery", action="store_true",
                         help="publish or verify the derived record for an already committed audit offline")
     parser.add_argument("--resume", action="store_true", help="continue remaining planned runs using the same ledger and evidence")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--revalidate-only", action="store_true", help="only check the post-repair provider contracts")
+    mode.add_argument("--retest", metavar="ORIGINAL_RUN", help="one separate post-repair run of the reconciled failure")
     args = parser.parse_args()
     if args.execute != args.resume:
         parser.error("paid acceptance requires --execute --resume and the existing stage-six campaign")
+    if (args.revalidate_only or args.retest is not None) and not args.execute:
+        parser.error("revalidation and retest require explicit --execute --resume")
     if args.runtime_identity:
         print(json.dumps(runtime_identity(), indent=2))
         return
@@ -444,7 +656,7 @@ def main():
         if args.output.absolute() != PAID_CAMPAIGN.absolute():
             parser.error("paid acceptance must use the existing stage-six campaign directory")
         if args.execute:
-            asyncio.run(execute(args.output))
+            asyncio.run(execute(args.output, revalidate_only=args.revalidate_only, retest=args.retest))
         else:
             reconcile_offline(args.output, args.reconcile)
     else:
