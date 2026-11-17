@@ -104,6 +104,37 @@ def _large_change(task_id: str, plan_id: str, artifact_id: str | None = None):
     )
 
 
+@pytest.mark.parametrize("external", [False, True])
+def test_crlf_change_set_preserves_payload_and_hash_on_reopen(tmp_path, monkeypatch, external):
+    if external:
+        monkeypatch.setattr(artifact_sqlite, "INLINE_LIMIT_BYTES", 1)
+    database, root = tmp_path / "changes.sqlite3", tmp_path / "artifacts"
+    task_id = str(uuid4())
+    spec = _spec(task_id)
+    execution = _plan(task_id, spec.artifact_id)
+    diff = "--- before/src/window.cpp\n+++ after/src/window.cpp\n@@ -1 +1 @@\n-return 1;\r\n+return 0;\r\n"
+    content = ChangeSet(execution_plan_artifact_id=execution.artifact_id, summary="Fix Windows source.",
+        files=(ChangedFile(path="src/window.cpp", change_type="modified", unified_diff=diff,
+            before_sha256=HASH_A, after_sha256=HASH_B, plan_step_ids=("STEP-1",),
+            acceptance_criteria_ids=("AC-1",)),))
+    artifact = create_artifact(task_id=task_id, producer="implementer.v1", producer_node="implement",
+        parent_artifact_ids=(execution.artifact_id,), content=content)
+    store = SqliteEventStore(database, artifact_root=root)
+    try:
+        for item in (spec, execution, artifact):
+            store.artifacts.put(item)
+        assert store.artifacts.get(artifact.artifact_id) == artifact
+    finally:
+        store.close()
+    reopened = SqliteEventStore(database, artifact_root=root)
+    try:
+        saved = reopened.artifacts.get(artifact.artifact_id)
+        assert saved.content.files[0].unified_diff == diff
+        assert saved.content_sha256 == artifact.content_sha256
+    finally:
+        reopened.close()
+
+
 def test_v7_to_v8_verified_backup_reopen_and_failure_rollback(tmp_path, monkeypatch):
     path = tmp_path / "schema7.sqlite3"
     conversation_id = _v7_database(path)
@@ -290,5 +321,71 @@ def test_concurrent_writers_approval_invalidation_and_safe_model_metadata(tmp_pa
         assert saved["tool_schema"]["api_key"] == "[REDACTED]"
         columns = {row[1] for row in store._db.execute("PRAGMA table_info(model_calls)")}
         assert not {"prompt", "response", "api_key", "reasoning", "chain_of_thought"} & columns
+    finally:
+        store.close()
+
+
+def _patch_artifact(task_id, execution, diff, summary="Edit Windows source."):
+    content = ChangeSet(
+        execution_plan_artifact_id=execution.artifact_id, summary=summary,
+        files=(ChangedFile(path="src/window.cpp", change_type="modified", unified_diff=diff,
+                           before_sha256=HASH_A, after_sha256=HASH_B, plan_step_ids=("STEP-1",),
+                           acceptance_criteria_ids=("AC-1",)),),
+    )
+    return create_artifact(task_id=task_id, producer="implementer.v1", producer_node="implement",
+                               parent_artifact_ids=(execution.artifact_id,), content=content)
+
+
+@pytest.mark.parametrize("registered_newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_crlf_change_set_rejects_known_multiline_value_on_write_and_reopen(tmp_path, registered_newline):
+    diff = "@@ -1 +1 @@\n-opaque-before\r\n+opaque-after\r\n"
+    redactor = Redactor(("opaque-before" + registered_newline + "+opaque-after",))
+    database = tmp_path / "changes.sqlite3"
+    root = tmp_path / "artifacts"
+    task_id = str(uuid4())
+    spec = _spec(task_id)
+    execution = _plan(task_id, spec.artifact_id)
+    artifact = _patch_artifact(task_id, execution, diff)
+    store = SqliteEventStore(database, artifact_root=root, redactor=redactor)
+    try:
+        for parent in (spec, execution):
+            store.artifacts.put(parent)
+        with pytest.raises(ArtifactStorageError, match="prohibited sensitive content"):
+            store.artifacts.put(artifact)
+        assert store._db.execute("SELECT count(*) FROM artifacts").fetchone()[0] == 2
+        assert not list(root.rglob("*.json"))
+    finally:
+        store.close()
+
+    legacy = SqliteEventStore(database, artifact_root=root)
+    try:
+        legacy.artifacts.put(artifact)
+    finally:
+        legacy.close()
+    reopened = SqliteEventStore(database, artifact_root=root, redactor=redactor)
+    try:
+        with pytest.raises(ArtifactIntegrityError, match="prohibited sensitive content"):
+            reopened.artifacts.get(artifact.artifact_id)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("content_field", ["diff", "summary"])
+def test_change_set_preserves_control_character_rejection_outside_crlf_diff_lines(tmp_path, content_field):
+    diff = "@@ -1 +1 @@\n-old\r\n+new\r\n"
+    task_id = str(uuid4())
+    spec = _spec(task_id)
+    execution = _plan(task_id, spec.artifact_id)
+    if content_field == "diff":
+        artifact = _patch_artifact(task_id, execution, diff + "+unexpected\rcontrol")
+    else:
+        artifact = _patch_artifact(task_id, execution, diff, summary="Unexpected\r\nmetadata")
+    store = SqliteEventStore(":memory:", artifact_root=tmp_path)
+    try:
+        for parent in (spec, execution):
+            store.artifacts.put(parent)
+        with pytest.raises(ArtifactStorageError, match="prohibited sensitive content"):
+            store.artifacts.put(artifact)
+        assert store._db.execute("SELECT count(*) FROM artifacts").fetchone()[0] == 2
     finally:
         store.close()

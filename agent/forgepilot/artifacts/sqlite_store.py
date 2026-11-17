@@ -11,7 +11,7 @@ from uuid import uuid4
 from ..errors import ForgePilotError
 from ..repository import is_link, opened_path
 from .canonical import canonical_json_bytes
-from .models import ArtifactContent, ArtifactEnvelope, ArtifactEnvelopeBase, DeliveryBundle
+from .models import ArtifactContent, ArtifactEnvelope, ArtifactEnvelopeBase, ChangeSet, DeliveryBundle
 from .store import (
     ArtifactIntegrityError, ArtifactNotFoundError, ArtifactRelation, ArtifactStorageError,
     DuplicateArtifactError, validate_relationships,
@@ -210,12 +210,26 @@ class SqliteArtifactStore:
             raise ArtifactIntegrityError("Artifact payload is invalid") from None
         if not self._matches_row(artifact, row):
             raise ArtifactIntegrityError("Artifact payload does not match SQLite metadata")
-        candidate = artifact.model_dump(mode="json")
-        if canonical_json_bytes(self.events.redactor.data(candidate)) != canonical_json_bytes(candidate):
+        if self._contains_sensitive_content(artifact):
             # Old, integrity-valid Artifacts may predate the write boundary.
             # Refuse to expose them rather than changing immutable content/hash.
             raise ArtifactIntegrityError("Artifact contains prohibited sensitive content")
         return artifact
+
+    def _contains_sensitive_content(self, artifact: ArtifactEnvelopeBase) -> bool:
+        candidate = artifact.model_dump(mode="json")
+        if isinstance(artifact.content, ChangeSet):
+            # A unified diff retains the source file's CRLF bytes. Normalize
+            # only the inspection copy, leaving the immutable payload and hash
+            # untouched. Lone CR and all credential checks still apply.
+            for changed in candidate["content"]["files"]:
+                diff = changed["unified_diff"]
+                if "\r\n" in diff:
+                    # A registered value may itself span a CRLF boundary.
+                    if self.events.redactor.text(diff, preserve_cr=True) != diff:
+                        return True
+                    changed["unified_diff"] = diff.replace("\r\n", "\n")
+        return canonical_json_bytes(self.events.redactor.data(candidate)) != canonical_json_bytes(candidate)
 
     def put(self, artifact: ArtifactEnvelopeBase) -> None:
         self._put(artifact)
@@ -227,8 +241,7 @@ class SqliteArtifactStore:
         # reject the entire candidate before either SQLite or the external
         # payload directory can observe it. The caller may then produce a safe
         # revision through the normal protocol.
-        candidate = artifact.model_dump(mode="json")
-        if canonical_json_bytes(self.events.redactor.data(candidate)) != canonical_json_bytes(candidate):
+        if self._contains_sensitive_content(artifact):
             raise ArtifactStorageError("Artifact contains prohibited sensitive content")
         payload = canonical_json_bytes(artifact)
         payload_hash = sha256(payload).hexdigest()
