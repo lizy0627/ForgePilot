@@ -33,7 +33,7 @@ class ModelProfile(BaseModel):
     supports_streaming: bool = True
     supports_tool_calling: bool = True
     timeout_seconds: float = Field(default=60.0, gt=0, le=600, allow_inf_nan=False)
-    max_output_tokens: int = Field(default=12_000, ge=1, le=65_536)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     temperature: float = Field(default=0.1, ge=0, le=2, allow_inf_nan=False)
 
     @field_validator("base_url")
@@ -128,20 +128,29 @@ class ModelConfiguration(BaseModel):
         return ModelRouter(self)
 
     @classmethod
-    def from_json(cls, raw: str | bytes):
+    def from_json(cls, raw: str | bytes, *, preserve_output_limits: bool = False):
         try:
             if len(raw.encode("utf-8") if isinstance(raw, str) else raw) > MAX_CONFIGURATION_BYTES:
                 raise ValueError("Configuration too large")
-            return cls.model_validate(json.loads(raw, object_pairs_hook=_unique_json_pairs))
+            config = cls.model_validate(json.loads(raw, object_pairs_hook=_unique_json_pairs))
+            profiles = []
+            for profile in config.profiles:
+                if preserve_output_limits:
+                    # Older model files could omit the field and use the v1 default.
+                    limit = profile.max_output_tokens if "max_output_tokens" in profile.model_fields_set else 12_000
+                else:
+                    limit = None
+                profiles.append(profile.model_copy(update={"max_output_tokens": limit}))
+            return config.model_copy(update={"profiles": tuple(profiles)})
         except (ValueError, TypeError, RecursionError, UnicodeError):
             raise ForgePilotError("llm_config", "Invalid model configuration") from None
 
     @classmethod
-    def load(cls, path: str | Path):
+    def load(cls, path: str | Path, *, preserve_output_limits: bool = False):
         try:
             with Path(path).open("rb") as stream:
                 raw = stream.read(MAX_CONFIGURATION_BYTES + 1)
-            return cls.from_json(raw)
+            return cls.from_json(raw, preserve_output_limits=preserve_output_limits)
         except OSError:
             raise ForgePilotError("llm_config", "Cannot read model configuration") from None
 

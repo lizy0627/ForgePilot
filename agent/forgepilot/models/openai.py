@@ -51,15 +51,14 @@ class OpenAICompatibleClient:
             raise ForgePilotError("llm_config", "Request timeout must be in (0, 600] seconds")
         if type(stream_include_usage) is not bool:
             raise ForgePilotError("llm_config", "stream_include_usage must be a boolean")
-        if max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 65536):
+        if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens < 1):
             raise ForgePilotError("llm_config", "Invalid output token limit")
         if temperature is not None and (type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2):
             raise ForgePilotError("llm_config", "Invalid temperature")
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
         self._url = str(url).rstrip("/") + "/chat/completions"
-        # Ark's Doubao 2.1 max_tokens caps only answer text. Node budgets must
-        # bound reasoning too; this documented field covers the entire output.
+        # An explicit Doubao 2.1 output limit includes reasoning and answer tokens.
         self.output_token_parameter = ("max_completion_tokens"
             if url.host == "ark.cn-beijing.volces.com" and model.startswith("doubao-seed-2-1-")
             else "max_tokens")
@@ -85,7 +84,7 @@ class OpenAICompatibleClient:
     def _output_limit(self, requested):
         if requested is None:
             return self.max_output_tokens
-        if (type(requested) is not int or not 1 <= requested <= 65_536
+        if (type(requested) is not int or requested < 1
                 or self.max_output_tokens is not None and requested > self.max_output_tokens):
             raise ForgePilotError("llm_config", "Request output limit must not exceed the configured limit")
         return requested

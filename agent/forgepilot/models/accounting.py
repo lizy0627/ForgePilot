@@ -108,19 +108,18 @@ class Accounting:
 
 
 class ModelBudget:
-    """One trusted Agent/node budget shared across tools, retries and fallbacks.
-
-    Reservations are synchronous under a lock, so concurrent calls cannot each
-    spend the same remaining tokens. Missing usage keeps the full reservation.
-    """
-    def __init__(self, *, max_model_calls=8, max_input_tokens=100_000,
-                 max_output_tokens=65_536, max_tool_calls=40, timeout_seconds=900):
-        values = (max_model_calls, max_input_tokens, max_output_tokens, max_tool_calls)
-        if (any(type(v) is not int or v < 0 for v in values)
-                or max_model_calls < 1 or max_input_tokens < 1 or max_output_tokens < 1
+    """Track token use and enforce shared call counts and the node deadline."""
+    def __init__(self, *, max_model_calls=8, max_input_tokens=None,
+                 max_output_tokens=None, max_tool_calls=40, timeout_seconds=900):
+        if (type(max_model_calls) is not int or max_model_calls < 1
+                or type(max_tool_calls) is not int or max_tool_calls < 0
+                or any(v is not None and (type(v) is not int or v < 1)
+                       for v in (max_input_tokens, max_output_tokens))
                 or type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 3600):
             raise ValueError("Invalid model budget")
-        self.max_model_calls, self.max_input_tokens, self.max_output_tokens, self.max_tool_calls = values
+        self.max_model_calls, self.max_tool_calls = max_model_calls, max_tool_calls
+        # Retain historical definition fields for callers reading old snapshots.
+        self.max_input_tokens, self.max_output_tokens = max_input_tokens, max_output_tokens
         self.model_calls = self.input_tokens = self.output_tokens = self.tool_calls = 0
         self.timeout_seconds = timeout_seconds
         self.deadline = monotonic() + timeout_seconds
@@ -137,44 +136,25 @@ class ModelBudget:
         return remaining
 
     def reserve(self, input_tokens: int, output_tokens: int) -> tuple[int, int]:
-        return self._reserve(input_tokens, output_tokens, cap_output=False)
-
-    def reserve_request(self, input_tokens: int, output_tokens: int) -> tuple[int, int]:
-        """Reserve a request whose provider enforces the returned output cap.
-
-        The configured response limit must fit the whole node budget. Later
-        requests may use its remaining output allowance, atomically with all
-        other reservations on this budget.
-        """
-        return self._reserve(input_tokens, output_tokens, cap_output=True)
-
-    def _reserve(self, input_tokens: int, output_tokens: int, *, cap_output: bool) -> tuple[int, int]:
         if any(type(v) is not int or v < 0 for v in (input_tokens, output_tokens)):
             raise ValueError("Invalid budget reservation")
         with self._lock:
             self.remaining_seconds()
-            if cap_output:
-                if output_tokens > self.max_output_tokens:
-                    raise ForgePilotError("llm_budget", "Configured response limit exceeds the node token budget")
-                output_tokens = min(output_tokens, self.max_output_tokens - self.output_tokens)
-                if output_tokens <= 0:
-                    raise ForgePilotError("llm_budget", "Agent output token budget exhausted")
-            if (self.model_calls >= self.max_model_calls
-                    or self.input_tokens + input_tokens > self.max_input_tokens
-                    or self.output_tokens + output_tokens > self.max_output_tokens):
-                raise ForgePilotError("llm_budget", "Agent model or token budget exhausted")
+            if self.model_calls >= self.max_model_calls:
+                raise ForgePilotError("llm_budget", "Agent model call budget exhausted")
             self.model_calls += 1
             self.input_tokens += input_tokens
             self.output_tokens += output_tokens
             return input_tokens, output_tokens
+
+    reserve_request = reserve
 
     def settle(self, reservation, usage) -> bool:
         with self._lock:
             if usage is not None:
                 self.input_tokens += usage.get("prompt_tokens", reservation[0]) - reservation[0]
                 self.output_tokens += usage.get("completion_tokens", reservation[1]) - reservation[1]
-            return (self.input_tokens <= self.max_input_tokens
-                    and self.output_tokens <= self.max_output_tokens)
+            return True
 
     def consume_tools(self, count: int):
         with self._lock:

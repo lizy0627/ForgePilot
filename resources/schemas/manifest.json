@@ -1,6 +1,6 @@
 {
   "files": {
-    "agent-definition.v1.schema.json": "c2d9dac3decebe5ea40134260b42f25bcafeedd7bb0b0a305936ccb988327d38",
+    "agent-definition.v1.schema.json": "4411b79abd4d32bb11a2de9999e0f6ac71994872389ab6db2f73c2ac08c4ddcd",
     "agent-draft-task-spec-input.v1.schema.json": "c09b379990e4e3ab46246630f14e476540b636da8bc5b0d9991dc22e9c7dad9d",
     "agent-draft-task-spec-output.v1.schema.json": "f1a11bcbdb03f88724bd4d012284104a992ea650847eb19b016729436db134d0",
     "agent-generate-plan-input.v1.schema.json": "282504f6805e493c7fe543c9585febd23ff34a826cb2f753d6bcd9d043841de0",

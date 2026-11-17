@@ -38,9 +38,17 @@ def test_implementer_has_its_own_write_capable_prompt_and_cannot_select_analysis
 def test_implementer_budget_can_only_be_reduced():
     registry = AgentRegistry()
     limits = registry.get("implementer.v1").limits
-    for field in ("max_model_calls", "max_tool_calls", "max_input_tokens",
-                  "max_output_tokens", "timeout_seconds"):
+    for field in ("max_model_calls", "max_tool_calls", "timeout_seconds"):
         payload = limits.model_dump()
         payload[field] += 1
         with pytest.raises(ForgePilotError, match="budget"):
             registry.validate_limits("implementer.v1", payload)
+
+
+def test_definition_accepts_missing_or_historical_token_fields():
+    registry = AgentRegistry()
+    for token_fields in ({}, {"max_input_tokens": 500_000, "max_output_tokens": 100_000}):
+        payload = {"max_model_calls": 2, "max_tool_calls": 0, "timeout_seconds": 30, **token_fields}
+        result = registry.validate_limits("implementer.v1", payload)
+        assert result.max_input_tokens == token_fields.get("max_input_tokens")
+        assert result.max_output_tokens == token_fields.get("max_output_tokens")

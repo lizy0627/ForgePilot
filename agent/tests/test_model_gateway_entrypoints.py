@@ -55,7 +55,7 @@ async def test_explicit_config_replaces_legacy_flags_and_uses_reference_only(tmp
         assert key not in gateway.redactor.text(key)
     assert len(requests) == 1
     assert requests[0]["model"] == "configured-model"
-    assert requests[0]["max_tokens"] == 321
+    assert "max_tokens" not in requests[0] and "max_completion_tokens" not in requests[0]
     assert requests[0]["temperature"] == 0.25
     assert key not in path.read_text(encoding="utf-8")
 

@@ -461,7 +461,7 @@ def model_configuration(fields: dict, server_args: list[str]) -> ModelConfigurat
         profiles = tuple(ModelProfile(profile_id="desktop-" + purpose, base_url=fields["base_url"],
             api_key_ref="env:FORGEPILOT_API_KEY", model=fields[purpose + "_model"],
             family=fields["review_model_family"] if purpose == "review" else fields["task_model_family"],
-            timeout_seconds=timeout, max_output_tokens=4096) for purpose in ("chat", "task", "review", "summary"))
+            timeout_seconds=timeout) for purpose in ("chat", "task", "review", "summary"))
         routes = tuple(ModelRoute(route_id=route, primary="desktop-task")
             for route in ("task", "orchestration", "analysis", "implementation", "repair"))
         routes += tuple(ModelRoute(route_id=purpose, primary="desktop-" + purpose)

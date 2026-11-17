@@ -36,8 +36,8 @@ def test_definition_accepts_declarative_contract_from_json():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("max_model_calls", 65), ("max_tool_calls", 257), ("max_input_tokens", 262145),
-    ("max_output_tokens", 65537), ("timeout_seconds", 3601),
+    ("max_model_calls", 65), ("max_tool_calls", 257), ("max_input_tokens", 0),
+    ("max_output_tokens", -1), ("timeout_seconds", 3601),
 ])
 def test_hard_limits_reject_excess(field, value):
     limits = {

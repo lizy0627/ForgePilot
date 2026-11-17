@@ -184,7 +184,7 @@ async def test_unknown_tool_and_missing_invalid_arguments(name, arguments, attem
 
 
 @pytest.mark.asyncio
-async def test_model_and_token_budgets_stop_before_next_network_attempt():
+async def test_call_budget_stops_retry_while_legacy_token_fields_allow_recovery():
     seen = []
     def handler(request):
         seen.append(request)
@@ -194,10 +194,10 @@ async def test_model_and_token_budgets_stop_before_next_network_attempt():
         with pytest.raises(ForgePilotError, match="llm_budget"):
             await gateway.for_route("analysis", budget=budget).chat([])
         assert budget.model_calls == len(seen) == 1
-        budget = ModelBudget(max_output_tokens=31)
-        with pytest.raises(ForgePilotError, match="llm_budget"):
+        budget = ModelBudget(max_input_tokens=1, max_output_tokens=1)
+        with pytest.raises(ForgePilotError, match="llm_network"):
             await gateway.for_route("analysis", budget=budget).chat([])
-        assert budget.model_calls == 0 and len(seen) == 1
+        assert budget.model_calls == 3 and len(seen) == 4 and budget.input_tokens > 1
 
 
 @pytest.mark.asyncio

@@ -166,7 +166,7 @@ class ModelGateway:
                     identifiers[model] = identifier
                     profiles.append(ModelProfile(profile_id=identifier, base_url=base_url,
                         api_key_ref="env:FORGEPILOT_API_KEY", model=model, family="legacy",
-                        timeout_seconds=timeout, max_output_tokens=4096))
+                        timeout_seconds=timeout))
                 routes.append(ModelRoute(route_id=use_case, primary=identifiers[model]))
             config = ModelConfiguration(profiles=tuple(profiles), routes=tuple(routes),
                                         enforce_review_family_separation=False)
@@ -207,7 +207,7 @@ class ModelGateway:
         if budget is not None:
             if (not isinstance(budget, ModelBudget) or any(
                     getattr(budget, name) > getattr(definition.limits, name)
-                    for name in ("max_model_calls", "max_tool_calls", "max_input_tokens", "max_output_tokens"))
+                    for name in ("max_model_calls", "max_tool_calls"))
                     or budget.timeout_seconds > definition.limits.timeout_seconds):
                 raise ForgePilotError("llm_budget", "Budget exceeds AgentDefinition limits")
         return self.for_route(definition.model_route, role=definition.role,
@@ -310,12 +310,9 @@ class GatewayClient:
             if tools and not profile.supports_tool_calling or stream and not profile.supports_streaming:
                 raise ForgePilotError("llm_config", "Model lacks a required request capability")
             provider = self.gateway._provider(profile)
-            bounded_output = getattr(provider, "supports_output_token_limit", False) is True
-            reserved = (input_reservation(messages, tools), profile.max_output_tokens)
+            reserved = (input_reservation(messages, tools), 0)
             if self.budget is not None:
-                reserve = self.budget.reserve_request if bounded_output else self.budget.reserve
-                reserved = reserve(*reserved)
-            output_options = {"max_output_tokens": reserved[1]} if bounded_output else {}
+                self.budget.reserve(*reserved)
             started = monotonic()
             reply = None
             assembled = _StreamReply()
@@ -330,7 +327,7 @@ class GatewayClient:
                     timeout = min(timeout, self.budget.remaining_seconds())
                 async with asyncio.timeout(timeout):
                     if stream:
-                        kwargs = {"tools": deepcopy(tools), **output_options}
+                        kwargs = {"tools": deepcopy(tools)}
                         if getattr(provider, "supports_stream_diagnostics", False):
                             kwargs.update(diagnostics=diagnostics, model_started=model_started)
                         iterator = provider.stream_chat(deepcopy(messages), **kwargs)
@@ -347,7 +344,7 @@ class GatewayClient:
                             await iterator.aclose()
                         reply = assembled.reply()
                     else:
-                        reply = await provider.chat(deepcopy(messages), tools=deepcopy(tools), **output_options)
+                        reply = await provider.chat(deepcopy(messages), tools=deepcopy(tools))
                     reply = _validate_reply(reply, tools, validator)
             except asyncio.CancelledError:
                 status = "cancelled"
@@ -374,12 +371,22 @@ class GatewayClient:
                     usage = OpenAICompatibleClient._validate_usage(usage) if usage is not None else None
                 except ValueError:
                     usage = None
-                within_budget = self.budget.settle(reserved, usage) if self.budget is not None else True
-                if not within_budget and error is None and status != "cancelled":
-                    error = ForgePilotError("llm_budget", "Provider exceeded the remaining token budget")
                 status = category_of(error) if error is not None else status
-                input_tokens = usage.get("prompt_tokens", reserved[0]) if usage else reserved[0]
-                output_tokens = usage.get("completion_tokens", reserved[1]) if usage else reserved[1]
+                counters = usage or {}
+                input_tokens = counters.get("prompt_tokens", reserved[0])
+                output_tokens = counters.get("completion_tokens")
+                if output_tokens is None:
+                    # In the absence of usage, estimate only the visible reply by UTF-8 bytes.
+                    if isinstance(reply, ChatReply):
+                        content, calls = reply.message.content or "", reply.message.tool_calls or []
+                    else:
+                        content, calls = assembled.content, assembled.calls
+                    output_tokens = len(content.encode("utf-8", errors="replace"))
+                    if calls:
+                        serialized = [c.model_dump() if hasattr(c, "model_dump") else c for c in calls]
+                        output_tokens += len(json.dumps(serialized, ensure_ascii=False).encode("utf-8", errors="replace"))
+                if self.budget is not None:
+                    self.budget.settle(reserved, {"prompt_tokens": input_tokens, "completion_tokens": output_tokens})
                 record = AttemptRecord(call_id=call_id, profile_id=profile.profile_id,
                     model=self.redactor.text(profile.model), route=self.use_case, role=self.role,
                     prompt_version=self.prompt_version, attempt=attempt, status=status,

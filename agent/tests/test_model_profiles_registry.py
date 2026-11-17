@@ -31,7 +31,8 @@ def test_profile_roundtrip_and_role_route_override(tmp_path):
     path = tmp_path / "models.json"
     path.write_text(config.model_dump_json(), encoding="utf-8")
     loaded = ModelConfiguration.load(path)
-    assert loaded == config
+    assert all(p.max_output_tokens is None for p in loaded.profiles)
+    assert ModelConfiguration.load(path, preserve_output_limits=True) == config
     assert loaded.router().resolve("analysis", "root_cause_analyst").primary.profile_id == "primary"
     assert loaded.router().resolve("analysis", "impact_test_analyst").primary.profile_id == "fallback"
     with pytest.raises(ForgePilotError, match="No model route"):
@@ -46,13 +47,29 @@ def test_profile_roundtrip_and_role_route_override(tmp_path):
     {"base_url": "file:///secrets"}, {"base_url": "https://model.test/#raw-secret"},
     {"provider": "python-plugin"}, {"temperature": float("nan")},
     {"temperature": 2.1}, {"timeout_seconds": 0}, {"timeout_seconds": 601},
-    {"timeout_seconds": True}, {"max_output_tokens": 0}, {"max_output_tokens": 65_537},
+    {"timeout_seconds": True}, {"max_output_tokens": 0}, {"max_output_tokens": True},
     {"model": "bad\nmodel"}, {"family": ""}, {"supports_tool_calling": "true"},
 ])
 def test_profile_rejects_credentials_and_invalid_settings(changes):
     with pytest.raises(ValidationError) as caught:
         profile(**changes)
     assert "raw-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("legacy", [4096, 8192, None])
+def test_loading_legacy_profiles_removes_output_ceiling_without_changing_file(tmp_path, legacy):
+    item = profile().model_dump()
+    if legacy is None:
+        del item["max_output_tokens"]
+    else:
+        item["max_output_tokens"] = legacy
+    data = json.dumps({"profiles": [item], "routes": [{"route_id": "chat", "primary": "primary"}]}).encode()
+    path = tmp_path / "models.json"
+    path.write_bytes(data)
+    assert ModelConfiguration.load(path).profile("primary").max_output_tokens is None
+    assert ModelConfiguration.load(path, preserve_output_limits=True).profile("primary").max_output_tokens == (
+        legacy if legacy is not None else 12_000)
+    assert path.read_bytes() == data
 
 
 def test_config_loader_safe_errors_duplicate_ids_and_unknown_profiles():

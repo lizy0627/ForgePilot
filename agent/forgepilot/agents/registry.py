@@ -12,6 +12,7 @@ from .definitions import AgentDefinition, AgentLimits
 
 
 def _limits(model=8, tools=40, input_tokens=64_000, output_tokens=12_000, timeout=900):
+    # Keep the historical token metadata in built-in definition hashes for existing missions.
     return AgentLimits(
         max_model_calls=model, max_tool_calls=tools, max_input_tokens=input_tokens,
         max_output_tokens=output_tokens, timeout_seconds=timeout,
@@ -147,6 +148,7 @@ class AgentRegistry:
         """Allow a caller to reduce, never increase, a registered Agent's budget."""
         requested = AgentLimits.model_validate(limits)
         allowed = self.get(agent_id).limits
-        if any(value > getattr(allowed, name) for name, value in requested.model_dump().items()):
+        if any(getattr(requested, name) > getattr(allowed, name)
+               for name in ("max_model_calls", "max_tool_calls", "timeout_seconds")):
             raise ForgePilotError("agent_budget", "Requested budget exceeds the Agent definition")
         return requested

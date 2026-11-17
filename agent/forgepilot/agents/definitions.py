@@ -52,8 +52,9 @@ class AgentLimits(BaseModel):
 
     max_model_calls: int = Field(ge=1, le=64)
     max_tool_calls: int = Field(ge=0, le=256)
-    max_input_tokens: int = Field(ge=1, le=262_144)
-    max_output_tokens: int = Field(ge=1, le=65_536)
+    # Retained in version-one definition snapshots for stable checkpoint identities.
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     timeout_seconds: int = Field(ge=1, le=3_600)
 
 

@@ -1,4 +1,4 @@
-"""Default Mission output limits allow tool continuations within one budget."""
+"""Mission tool continuations track usage and share call and time limits."""
 import asyncio
 import json
 
@@ -32,7 +32,7 @@ def completion(content="done", *, calls=None, output=30, usage=True):
 
 
 @pytest.mark.asyncio
-async def test_default_analyst_budget_sends_remaining_cap_across_real_repository_tools(cpp_repo, rg_exe):
+async def test_default_analyst_sends_no_output_limit_across_real_repository_tools(cpp_repo, rg_exe):
     seen = []
     def handler(request):
         body = json.loads(request.content)
@@ -57,14 +57,13 @@ async def test_default_analyst_budget_sends_remaining_cap_across_real_repository
         result = await gateway.for_agent(definition, budget=budget).run_tool_loop(
             [{"role": "user", "content": "Inspect Counter"}], registry)
         assert result.message.content == "done"
-        assert config.profiles[0].max_output_tokens == definition.limits.max_output_tokens == 12_000
-        assert [request["max_tokens"] for request in seen] == [12_000, 11_970, 11_940]
+        assert all("max_tokens" not in request and "max_completion_tokens" not in request for request in seen)
         assert budget.model_calls == 3 and budget.tool_calls == 2 and budget.output_tokens == 90
         assert all(not record.usage_estimated for record in gateway.accounting.snapshot())
 
 
 @pytest.mark.asyncio
-async def test_streaming_request_uses_remaining_cap_without_changing_shared_provider():
+async def test_streaming_requests_use_explicit_provider_limit_without_decrementing_it():
     seen = []
     def handler(request):
         body = json.loads(request.content)
@@ -75,13 +74,15 @@ async def test_streaming_request_uses_remaining_cap_without_changing_shared_prov
         usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}}
         data = "".join("data: " + json.dumps(value) + "\n\n" for value in (delta, finish, usage)) + "data: [DONE]\n\n"
         return httpx.Response(200, content=data.encode(), headers={"Content-Type": "text/event-stream"})
-    budget = ModelBudget(max_output_tokens=12_000)
-    async with ModelGateway(configuration(), secret_resolver=lambda _: "offline-key",
+    budget = ModelBudget(max_output_tokens=1)
+    config = configuration()
+    profile = config.profiles[0].model_copy(update={"max_output_tokens": 12_000})
+    async with ModelGateway(config.model_copy(update={"profiles": (profile,)}), secret_resolver=lambda _: "offline-key",
             transport_factory=lambda _: httpx.MockTransport(handler)) as gateway:
         client = gateway.for_route("analysis", budget=budget)
         for _ in range(2):
             assert [event async for event in client.stream_chat([])]
-        assert [body["max_tokens"] for body in seen] == [12_000, 11_993]
+        assert [body["max_tokens"] for body in seen] == [12_000, 12_000]
         assert budget.output_tokens == 14
         fresh = gateway.for_route("analysis", budget=ModelBudget(max_output_tokens=12_000))
         assert [event async for event in fresh.stream_chat([])]
@@ -89,7 +90,7 @@ async def test_streaming_request_uses_remaining_cap_without_changing_shared_prov
 
 
 @pytest.mark.asyncio
-async def test_concurrent_requests_cannot_reserve_the_same_remaining_output():
+async def test_concurrent_requests_exceed_old_token_limits_and_share_the_call_limit():
     seen = []
     entered, release = asyncio.Event(), asyncio.Event()
     async def handler(request):
@@ -100,7 +101,7 @@ async def test_concurrent_requests_cannot_reserve_the_same_remaining_output():
             entered.set()
             await release.wait()
         return httpx.Response(200, json=completion(output=output))
-    budget = ModelBudget(max_model_calls=3, max_output_tokens=12_000)
+    budget = ModelBudget(max_model_calls=3, max_output_tokens=1)
     async with ModelGateway(configuration(), secret_resolver=lambda _: "offline-key",
             transport_factory=lambda _: httpx.MockTransport(handler)) as gateway:
         client = gateway.for_route("analysis", budget=budget)
@@ -108,21 +109,21 @@ async def test_concurrent_requests_cannot_reserve_the_same_remaining_output():
         running = asyncio.create_task(client.chat([]))
         await entered.wait()
         try:
+            await client.chat([])
             with pytest.raises(ForgePilotError, match="llm_budget"):
                 await client.chat([])
-            assert budget.model_calls == 2 and budget.output_tokens == 12_000 and len(seen) == 2
+            assert budget.model_calls == len(seen) == 3 and budget.output_tokens == 9000
         finally:
             release.set()
             await running
-        await client.chat([])
-        assert [body["max_tokens"] for body in seen] == [12_000, 4_000, 3_000]
+        assert all("max_tokens" not in body for body in seen)
         assert budget.output_tokens == 10_000 and budget.model_calls == 3
         await gateway.for_route("analysis", budget=ModelBudget(max_output_tokens=12_000)).chat([])
-        assert seen[-1]["max_tokens"] == 12_000
+        assert len(seen) == 4 and "max_tokens" not in seen[-1]
 
 
 @pytest.mark.asyncio
-async def test_missing_usage_keeps_whole_reservation_and_stops_before_next_request():
+async def test_missing_usage_is_estimated_for_each_request_and_allows_continuation():
     seen = []
     def handler(request):
         seen.append(request)
@@ -132,14 +133,13 @@ async def test_missing_usage_keeps_whole_reservation_and_stops_before_next_reque
             transport_factory=lambda _: httpx.MockTransport(handler)) as gateway:
         client = gateway.for_route("analysis", budget=budget)
         await client.chat([])
-        with pytest.raises(ForgePilotError, match="llm_budget"):
-            await client.chat([])
-        assert len(seen) == budget.model_calls == 1 and budget.output_tokens == 12_000
-        assert gateway.accounting.snapshot()[0].usage_estimated
+        await client.chat([])
+        assert len(seen) == budget.model_calls == 2 and budget.output_tokens == 2 * len("done")
+        assert all(r.usage_estimated and r.input_tokens > 0 for r in gateway.accounting.snapshot())
 
 
 @pytest.mark.asyncio
-async def test_unknown_provider_retains_fixed_output_reservation_contract():
+async def test_unknown_provider_keeps_its_existing_chat_signature_across_calls():
     requests = []
     class Provider:
         async def chat(self, messages, tools=None):
@@ -152,17 +152,19 @@ async def test_unknown_provider_retains_fixed_output_reservation_contract():
             provider_factory=lambda *_: Provider()) as gateway:
         client = gateway.for_route("analysis", budget=budget)
         await client.chat([])
-        with pytest.raises(ForgePilotError, match="llm_budget"):
-            await client.chat([])
-        assert len(requests) == budget.model_calls == 1 and budget.output_tokens == 30
+        await client.chat([])
+        assert len(requests) == budget.model_calls == 2 and budget.output_tokens == 60
 
 
 @pytest.mark.asyncio
-async def test_incompatible_configured_response_limit_still_fails_before_wire():
+async def test_agent_budget_can_use_legacy_token_fields_above_its_definition():
     seen = []
-    budget = ModelBudget(max_output_tokens=11_999)
+    definition = AgentRegistry().get("root-cause-analyst.v1")
+    budget = ModelBudget(**(definition.limits.model_dump() | {"max_input_tokens": 10**9, "max_output_tokens": 10**9}))
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=completion())
     async with ModelGateway(configuration(), secret_resolver=lambda _: "offline-key",
-            transport_factory=lambda _: httpx.MockTransport(lambda request: seen.append(request))) as gateway:
-        with pytest.raises(ForgePilotError, match="llm_budget"):
-            await gateway.for_route("analysis", budget=budget).chat([])
-        assert not seen and budget.model_calls == budget.output_tokens == 0
+            transport_factory=lambda _: httpx.MockTransport(handler)) as gateway:
+        await gateway.for_agent(definition, budget=budget).chat([])
+        assert len(seen) == budget.model_calls == 1 and budget.output_tokens == 30
