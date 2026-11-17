@@ -27,8 +27,12 @@ sys.path.insert(0, str(ROOT / "agent"))
 import httpx
 
 from acceptance_budget import BudgetTransport, RequestBudget
+from acceptance_reconciliation import runtime_identity
+from acceptance_recovery import capture_stop, materialize_recovery, open_recovery
 from forgepilot.api import create_app
-from forgepilot.desktop_configuration import load_saved_key, load_embedding_key, load_configuration, configuration_revision
+from forgepilot.desktop_configuration import (
+    ConfigurationLock, configuration_revision, load_configuration, load_embedding_key, load_saved_key,
+)
 from forgepilot.errors import ForgePilotError
 from forgepilot.mission_factory import MissionDependencies, build_mission_workflow
 from forgepilot.models.accounting import Accounting
@@ -65,9 +69,18 @@ TASKS = (
 
 
 def save(path, value):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    output = tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".tmp",
+                                         delete=False, mode="w", encoding="utf-8")
+    temporary = Path(output.name)
+    try:
+        with output:
+            json.dump(value, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def plan():
@@ -300,83 +313,143 @@ async def run_sample(task, repeat, configuration, key, ledger, output):
     return result
 
 
-async def execute(output):
-    if output.resolve() != PAID_CAMPAIGN.resolve():
+def campaign_ledger(output):
+    if output.absolute() != PAID_CAMPAIGN.absolute() or output.resolve() != PAID_CAMPAIGN.absolute():
         raise ValueError("Paid acceptance must use the existing stage-six campaign directory")
-    previous = json.loads((output / "summary.json").read_text(encoding="utf-8")) if (output / "summary.json").exists() else None
-    ledger = RequestBudget(PAID_CAMPAIGN / "budget.sqlite3")
-    if ledger.snapshot()["held"] or previous and previous.get("stop_reason") == "shared_budget_exhausted":
-        ledger.close()
-        print("Shared acceptance budget is held; existing evidence is unchanged.", flush=True)
-        return
+    path = PAID_CAMPAIGN / "budget.sqlite3"
+    if not path.is_file():
+        raise ValueError("Missing original acceptance ledger")
+    for file in (path, path.with_suffix(".sqlite3-wal"), path.with_suffix(".sqlite3-shm"),
+                 path.with_suffix(".sqlite3-journal")):
+        if file.is_symlink() or file.exists() and (file.resolve() != file or file.stat().st_nlink != 1):
+            raise ValueError("Unexpected linked acceptance ledger")
+    return RequestBudget(path, existing_only=True)
+
+
+def verify_plan(output):
+    persisted = json.loads((output / "plan.json").read_bytes())
+    if json.dumps(persisted, sort_keys=True) != json.dumps(plan(), sort_keys=True):
+        raise ValueError("Fixed acceptance plan changed; cannot resume this campaign")
+
+
+def reconcile_offline(output, inputs):
+    ledger = campaign_ledger(output)
     try:
-        await _execute_available(output, ledger, previous)
+        verify_plan(output)
+        if inputs:
+            ledger.reconcile(*inputs, anchors=capture_stop(output))
+        derived = materialize_recovery(output, ledger, runtime_identity())
+        print(f"Offline recovery record: {derived}", flush=True)
     finally:
         ledger.close()
 
 
-async def _execute_available(output, ledger, previous):
+async def execute(output):
+    output = output.absolute()
+    ledger = campaign_ledger(output)
+    try:
+        original = json.loads((output / "summary.json").read_bytes())
+        audits = ledger.reconciliation_audits()
+        if ledger.snapshot()["held"] or (original.get("stop_reason") == "shared_budget_exhausted" and not audits):
+            print("Shared acceptance budget is held; existing evidence is unchanged.", flush=True)
+            return
+        if not audits or original.get("stop_reason") != "shared_budget_exhausted":
+            raise ValueError("Missing the original stop or its request-level reconciliation")
+        verify_plan(output)
+        identity = runtime_identity()
+        # Serialize progress checkpoints across harness processes. This uses a
+        # campaign-local OS lock; SQLite still arbitrates each transport reservation.
+        writer = ConfigurationLock(output / "summary.json")
+        if writer.path.is_symlink() or writer.path.exists() and (
+                writer.path.resolve() != writer.path or writer.path.stat().st_nlink != 1):
+            raise ValueError("Unexpected linked campaign writer lock")
+        with writer:
+            previous, progress = open_recovery(output, ledger, identity)
+            await _execute_available(output, ledger, previous, progress, identity)
+    finally:
+        ledger.close()
+
+
+async def _execute_available(output, ledger, previous, progress, runtime):
     config_path, configuration = saved_configuration()
-    key = load_saved_key(config_path)
-    if not key:
-        raise ValueError("Existing model credential unavailable")
     identity = {"model_configuration_sha256": hashlib.sha256(configuration.model_dump_json().encode()).hexdigest(),
                 "launcher_revision": configuration_revision(config_path)}
-    if previous and any(previous.get(name) != value for name, value in identity.items()):
+    if any(previous.get(name) != value for name, value in identity.items()):
         raise ValueError("Acceptance model configuration or credential identity changed; cannot resume")
-    runs = previous.get("runs", []) if previous else []
-    summary = {"planned_runs": 12, "protocol_sha256": hashlib.sha256(json.dumps(plan(), sort_keys=True).encode()).hexdigest(),
-               "models": [{"profile": p.profile_id, "model": p.model, "family": p.family} for p in configuration.profiles],
-               **identity, "runs": runs}
-    try:
-        save(output / "summary.json", {**summary, "budget": ledger.snapshot()})
-        prior = json.loads((output / "preflight.json").read_text(encoding="utf-8")) if (output / "preflight.json").exists() else None
-        ready = prior and all(row["ok"] for row in prior["connections"]) and prior["chat"] == prior["summary"] == "passed"
-        if ready or await preflight(config_path, configuration, key, ledger, output):
-            for repeat in range(1, 4):
-                for task in TASKS:
-                    label = task["id"] + "-r" + str(repeat)
-                    if any(run["run"] == label for run in runs):
-                        continue
-                    if (output / label).exists():
-                        raise ValueError("An incomplete run directory requires inspection; never overwrite paid evidence")
-                    print("RUN", task["id"], repeat, flush=True)
-                    result = await run_sample(task, repeat, configuration, key, ledger, output)
-                    runs.append(result)
-                    save(output / "summary.json", {**summary, "budget": ledger.snapshot()})
-                    print("RESULT", result["run"], result["status"], result["tokens"], flush=True)
-                    if result.get("reason") == "llm_budget" or "llm_budget" in result.get("errors", []):
-                        summary["stop_reason"] = "shared_budget_exhausted"
-                        return
-        else:
-            summary["stop_reason"] = "preflight_failed"
-    finally:
+    prior = json.loads((output / "preflight.json").read_bytes())
+    if not (prior["connections"] and all(row["ok"] is True for row in prior["connections"])
+            and prior["chat"] == prior["summary"] == "passed"):
+        raise ValueError("Original preflight is incomplete; cannot resume paid samples")
+    runs = list(previous["runs"])
+    summary = {**previous, **identity, "runtime_identity": runtime, "runs": runs}
+
+    def checkpoint():
         attempted = sum(run.get("network_requests", 0) > 0 for run in runs)
         summary.update(attempted_runs=attempted, passed_runs=sum(r["status"] == "passed" for r in runs),
                        unattempted_runs=12-attempted, budget=ledger.snapshot())
-        save(output / "summary.json", summary)
+        save(progress, summary)
+
+    # Verify the first writable continuation checkpoint before reading a key.
+    checkpoint()
+    key = load_saved_key(config_path)
+    if not key:
+        raise ValueError("Existing model credential unavailable")
+    try:
+        for repeat in range(1, 4):
+            for task in TASKS:
+                label = task["id"] + "-r" + str(repeat)
+                if any(run["run"] == label for run in runs):
+                    continue
+                if (output / label).exists():
+                    raise ValueError("An incomplete run directory requires inspection; never overwrite paid evidence")
+                print("RUN", task["id"], repeat, flush=True)
+                result = await run_sample(task, repeat, configuration, key, ledger, output)
+                runs.append(result)
+                if result.get("reason") == "llm_budget" or "llm_budget" in result.get("errors", []):
+                    ledger.stop_recovery()
+                    summary["stop_reason"] = "shared_budget_exhausted"
+                checkpoint()
+                print("RESULT", result["run"], result["status"], result["tokens"], flush=True)
+                if summary.get("stop_reason"):
+                    return
+    except BaseException:
+        # A partial run or a failed progress write needs inspection before any
+        # further paid work, including from another process.
+        if not ledger.snapshot()["held"]:
+            ledger.stop_recovery()
+        raise
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--execute", action="store_true", help="send budgeted real requests using existing configuration")
+    parser.add_argument("--output", type=Path)
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--runtime-identity", action="store_true",
+                        help="print the current source fingerprints for an offline reconciliation manifest")
+    action.add_argument("--execute", action="store_true", help="send budgeted real requests using existing configuration")
+    action.add_argument("--reconcile", type=Path, nargs=2, metavar=("MANIFEST", "PROVIDER_RECORD"),
+                        help="reconcile one held request offline and publish its recovery record")
+    action.add_argument("--rebuild-recovery", action="store_true",
+                        help="publish or verify the derived record for an already committed audit offline")
     parser.add_argument("--resume", action="store_true", help="continue remaining planned runs using the same ledger and evidence")
     args = parser.parse_args()
-    if args.execute and args.output.resolve() != PAID_CAMPAIGN.resolve():
-        parser.error("paid acceptance must use the existing stage-six campaign directory")
-    if args.resume:
-        if not args.execute or not (args.output / "budget.sqlite3").is_file():
-            parser.error("resume requires execute and the existing paid ledger")
-        previous = json.loads((args.output / "plan.json").read_text(encoding="utf-8"))
-        if json.dumps(previous, sort_keys=True) != json.dumps(plan(), sort_keys=True):
-            parser.error("fixed acceptance plan changed; cannot resume this campaign")
+    if args.execute != args.resume:
+        parser.error("paid acceptance requires --execute --resume and the existing stage-six campaign")
+    if args.runtime_identity:
+        print(json.dumps(runtime_identity(), indent=2))
+        return
+    if args.output is None:
+        parser.error("--output is required for a campaign operation")
+    if args.execute or args.reconcile or args.rebuild_recovery:
+        if args.output.absolute() != PAID_CAMPAIGN.absolute():
+            parser.error("paid acceptance must use the existing stage-six campaign directory")
+        if args.execute:
+            asyncio.run(execute(args.output))
+        else:
+            reconcile_offline(args.output, args.reconcile)
     else:
         args.output.mkdir(parents=True, exist_ok=False)
         save(args.output / "plan.json", plan())
-    if args.execute:
-        asyncio.run(execute(args.output))
-    else:
         print("Prepared fixed protocol only; no real request sent.")
 
 
