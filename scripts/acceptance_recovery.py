@@ -187,7 +187,7 @@ def open_recovery(campaign, ledger, runtime_identity):
 
 
 def _check_runs(directory, ledger, base, original_rows, previous, identity, failed_slot, original_sha,
-                *, bounded=False, check_directories=True):
+                *, bounded=False, check_directories=True, revalidation_label="revalidation", configured_limits=None):
     current_rows = previous["budget"]["requests"]
     by_id = {row["id"]: row for row in current_rows}
     if len(by_id) != len(current_rows) or any(not _same(by_id.get(row["id"]), row) for row in original_rows):
@@ -201,7 +201,7 @@ def _check_runs(directory, ledger, base, original_rows, previous, identity, fail
     original_ids = {row["id"] for row in original_rows}
     resumed_requests = [row for row in current_rows if row["id"] not in original_ids]
     extra = []
-    for field, label in (("revalidation", "revalidation"), ("retest", "retest-" + failed_slot)):
+    for field, label in (("revalidation", revalidation_label), ("retest", "retest-" + failed_slot)):
         if field in base:
             if not _same(base[field], previous.get(field)):
                 raise ValueError("An inherited post-repair result changed")
@@ -223,8 +223,12 @@ def _check_runs(directory, ledger, base, original_rows, previous, identity, fail
             old_preflight = json.loads(_read(directory, "preflight.json"))
             attempts = ledger.wire_attempts(label)
             if bounded or record.get("status") != "failed":
+                limits = {}
+                if label == "revalidation-configured":
+                    values = configured_limits() if callable(configured_limits) else configured_limits
+                    limits["configured_limits"] = values
                 verify_revalidation(record, attempts, base["models"],
-                                    require_embedding=old_preflight.get("embedding") == "passed")
+                                    require_embedding=old_preflight.get("embedding") == "passed", **limits)
             elif (not record.get("final_stop_reason") or previous.get("stop_reason") != record["final_stop_reason"]
                   or not _same(record.get("wire_attempts"), attempts)):
                 raise ValueError("Failed preflight evidence is inconsistent with its recorded stop")
@@ -252,7 +256,38 @@ def _check_runs(directory, ledger, base, original_rows, previous, identity, fail
         raise ValueError("An incomplete run directory requires inspection")
 
 
-def open_continuation(campaign, ledger, runtime_identity):
+def _stopped_at_probe_limit(state):
+    from acceptance_revalidation import verify_probe
+
+    result = state.get("revalidation", {})
+    if (result.get("run") != "revalidation" or result.get("status") != "failed"
+            or state.get("stop_reason") != "llm_incomplete"
+            or result.get("first_failure_reason") != "llm_incomplete" or result.get("final_stop_reason") != "llm_incomplete"
+            or "retest" in state):
+        return False
+    checks = result["checks"]
+    wire = result["wire_attempts"]
+    models = {m["profile"]: m["model"] for m in state["models"]}
+    if (not models or len(wire) != len(checks)
+            or [c["name"] for c in checks] != ["connection:" + profile for profile in models] + ["chat"]
+            or [c["status"] for c in checks] != ["passed"] * len(models) + ["failed"]):
+        return False
+    for check, attempt in zip(checks, wire, strict=True):
+        if (check["kind"] != "chat" or check["model"] != models.get(check["profile"])
+                or check["name"].startswith("connection:") and check["name"] != "connection:" + check["profile"]
+                or attempt.get("usage_issue") or attempt.get("transport_error")):
+            return False
+        verify_probe(check, attempt)
+    last = wire[-1]
+    observations = last.get("observed_usage", [])
+    return (last["output_parameter"] == "max_completion_tokens"
+            and last["output_limit"] == last["completion_tokens"] == 1024
+            and bool(observations) and all(row.get("reasoning_tokens") == 1024
+                and row.get("completion_tokens") == 1024 and row.get("total_tokens") == last["total_tokens"]
+                and row.get("prompt_tokens") == last["prompt_tokens"] for row in observations))
+
+
+def open_continuation(campaign, ledger, runtime_identity, *, configured_limits=None):
     """Resume the original fixed slots, retaining legacy estimates and completed evidence."""
     directory = campaign.resolve(strict=True)
     current = ledger.snapshot()
@@ -287,20 +322,53 @@ def open_continuation(campaign, ledger, runtime_identity):
             base, original_rows = legacy, legacy["budget"]["requests"]
             origin["legacy_progress"] = hashlib.sha256(raw).hexdigest()
     digest = hashlib.sha256(json.dumps(origin, sort_keys=True).encode()).hexdigest()
-    identity.update(runtime_identity=runtime_identity, continuation_id=digest)
     progress = directory / "progress-continuation.json"
-    binding = {**identity, "failed_slot": failed_slot, "original_result_sha256": original_sha}
+    successor = directory / "progress-continuation-configured.json"
+    binding = {"failed_slot": failed_slot, "original_result_sha256": original_sha}
+    revalidation_label = "revalidation"
+    if os.path.lexists(progress):
+        raw = _read(directory, progress.name)
+        prior = json.loads(raw)
+        if _stopped_at_probe_limit(prior):
+            recorded_identity = {**identity, "runtime_identity": prior["runtime_identity"], "continuation_id": digest}
+            if (any(not _same(prior.get(k), v) for k, v in {**recorded_identity, **binding}.items())
+                    or any(not _same(prior.get(k), old.get(k)) for k in fields)
+                    or not _same(prior["runs"], base["runs"])):
+                raise ValueError("Stopped preflight identity or original samples changed")
+            original_ids = {r["id"] for r in original_rows}
+            prior_rows = [r for r in current["requests"] if r["id"] in original_ids or r["label"] == "revalidation"]
+            prior_budget = {**current, "requests": prior_rows, "charged_or_reserved": sum(
+                r["reserved"] if r["charged"] is None else r["charged"] for r in prior_rows)}
+            if not _same(prior["budget"], prior_budget):
+                raise ValueError("Stopped preflight budget differs from its ledger evidence")
+            _check_runs(directory, ledger, base, original_rows, prior, recorded_identity, failed_slot, original_sha,
+                        check_directories=False)
+            result_bytes = _read(directory, "revalidation/result.json")
+            origin.update(stopped_progress=hashlib.sha256(raw).hexdigest(),
+                          stopped_result=hashlib.sha256(result_bytes).hexdigest())
+            digest = hashlib.sha256(json.dumps(origin, sort_keys=True).encode()).hexdigest()
+            base = {k: v for k, v in prior.items() if k not in ("revalidation", "stop_reason")}
+            original_rows = prior_rows
+            progress = successor
+            revalidation_label = "revalidation-configured"
+    if progress != successor and (os.path.lexists(successor) or os.path.lexists(directory / "revalidation-configured")):
+        raise ValueError("Configured preflight is missing its verified predecessor")
+    identity.update(runtime_identity=runtime_identity, continuation_id=digest)
+    binding.update(identity)
     has_progress = os.path.lexists(progress)
     if has_progress:
         previous = json.loads(_read(directory, progress.name))
         if (any(not _same(previous.get(k), v) for k, v in binding.items())
                 or any(not _same(previous.get(k), old.get(k)) for k in fields)
+                or previous.get("revalidation_label", "revalidation") != revalidation_label
                 or not _same(previous["budget"], current)):
             raise ValueError("Continuation progress differs from the original identity, runtime or ledger")
     else:
         previous = {**base, **binding, "budget": current}
         previous.pop("recovery_audit_sha256", None)
-    _check_runs(directory, ledger, base, original_rows, previous, identity, failed_slot, original_sha)
+    previous["revalidation_label"] = revalidation_label
+    _check_runs(directory, ledger, base, original_rows, previous, identity, failed_slot, original_sha,
+                revalidation_label=revalidation_label, configured_limits=configured_limits)
     preflight = previous.get("revalidation", {})
     stop = preflight.get("final_stop_reason") if preflight.get("status") == "failed" else None
     for record in [*previous["runs"][len(old["runs"]):], previous.get("retest", {})]:

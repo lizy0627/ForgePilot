@@ -52,9 +52,13 @@ def setup_probes(tmp_path, monkeypatch):
     old.write_bytes(b'{"chat":"passed","summary":"passed","embedding":"passed"}')
     identity = {"runtime_identity": {"sdk": "fixture"}, "launcher_revision": "fixture"}
 
-    async def run():
-        data = await harness.run_revalidation(tmp_path / "mock-config", conf, "synthetic-key",
-                                              ledger, label="revalidation", identity=identity)
+    async def run(*, label="revalidation", limits=None):
+        configuration = conf
+        if limits is not None:
+            configuration = conf.model_copy(update={"profiles": tuple(
+                p.model_copy(update={"max_output_tokens": limits[p.profile_id]}) for p in profiles)})
+        data = await harness.run_revalidation(tmp_path / "mock-config", configuration, "synthetic-key",
+                                              ledger, label=label, identity=identity)
         assert old.read_bytes() == b'{"chat":"passed","summary":"passed","embedding":"passed"}'
         assert data["identity"] == identity
         return data
@@ -93,6 +97,40 @@ async def test_revalidation_proves_each_probe_with_its_own_wire_usage(setup_prob
     with pytest.raises(ValueError):
         await run()
     assert len(incoming) == 5
+
+
+@pytest.mark.asyncio
+async def test_configured_preflight_uses_and_verifies_each_profiles_exact_output_limit(setup_probes):
+    from acceptance_revalidation import verify_revalidation
+
+    run, ledger, incoming, _, models = setup_probes
+    limits = {"first": 4096, "second": 8192}
+    legacy = await run(limits=limits)
+    assert legacy["status"] == "passed"
+    assert [c["output_limit"] for c in legacy["checks"]] == [1024, 1024, 1024, 1024, None]
+    label = "revalidation-configured"
+    result = await run(label=label, limits=limits)
+    assert result["status"] == "passed" and result["network_requests"] == 5
+    attempts = ledger.wire_attempts(label)
+    verify_revalidation(result, attempts, models, require_embedding=True, configured_limits=limits)
+    expected = [4096, 8192, 8192, 4096, None]
+    assert [p.get("max_completion_tokens", p.get("max_tokens")) for p in incoming[5:]] == expected
+    assert [check["output_limit"] for check in result["checks"]] == expected
+    assert [a["output_limit"] for a in attempts] == expected
+    with pytest.raises(ValueError):
+        await run(label=label, limits=limits)
+    assert len(incoming) == 10
+
+    for bad_limits in (None, {"first": 4096}, {**limits, "unknown": 4096}, {**limits, "first": True}):
+        with pytest.raises(ValueError):
+            verify_revalidation(result, attempts, models, configured_limits=bad_limits)
+    with pytest.raises(ValueError):
+        verify_revalidation({**result, "run": "revalidation"}, attempts, models)
+    # Even a matching result and wire observation must respect the saved profile.
+    changed = deepcopy(result)
+    changed["checks"][2]["output_limit"] = changed["wire_attempts"][2]["output_limit"] = 4096
+    with pytest.raises(ValueError):
+        verify_revalidation(changed, changed["wire_attempts"], models, configured_limits=limits)
 
 
 @pytest.mark.asyncio

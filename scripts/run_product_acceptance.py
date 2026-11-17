@@ -109,6 +109,10 @@ def saved_configuration():
     return path, configuration
 
 
+def profile_limits(configuration):
+    return {p.profile_id: p.max_output_tokens for p in configuration.profiles}
+
+
 def gateway(configuration, key, ledger, label, *, check=False, verify_usage=False):
     if check:
         configuration = configuration.model_copy(update={"profiles": tuple(
@@ -135,7 +139,9 @@ def gateway(configuration, key, ledger, label, *, check=False, verify_usage=Fals
 async def run_revalidation(config_path, configuration, key, ledger, *, label, identity):
     from acceptance_revalidation import verify_probe
 
-    if label != "revalidation" or any(r["label"] == label for r in ledger.snapshot()["requests"]):
+    configured = label == "revalidation-configured"
+    if label not in {"revalidation", "revalidation-configured"} or any(
+            r["label"] == label for r in ledger.snapshot()["requests"]):
         raise ValueError("Revalidation requires its unused campaign label")
     started = monotonic()
     checks = []
@@ -163,15 +169,18 @@ async def run_revalidation(config_path, configuration, key, ledger, *, label, id
                 raise ForgePilotError("acceptance_config_drift", "Launcher changed during credential capture")
             planned.append(("embedding", None, "C++ boundary check"))
         for name, profile, prompt in planned:
+            output_limit = None
+            if profile:
+                output_limit = profile.max_output_tokens if configured else min(1024, profile.max_output_tokens)
             check = {"name": name, "kind": "chat" if profile else "embedding", "status": "failed",
                      "model": profile.model if profile else fields["embedding_model"],
                      "profile": profile.profile_id if profile else None,
-                     "output_limit": min(1024, profile.max_output_tokens) if profile else None}
+                     "output_limit": output_limit}
             checks.append(check)
             if profile:
                 route = ModelRoute(route_id="connection-check", primary=profile.profile_id)
                 config = configuration.model_copy(update={"routes": (route,), "enforce_review_family_separation": False})
-                async with gateway(config, key, ledger, label, check=True, verify_usage=True) as models:
+                async with gateway(config, key, ledger, label, check=not configured, verify_usage=True) as models:
                     client = models.for_route(route.route_id, budget=ModelBudget(max_model_calls=1))
                     reply = await client.chat([{"role": "user", "content": prompt}])
                     content = (reply.message.content or "").strip()
@@ -189,7 +198,7 @@ async def run_revalidation(config_path, configuration, key, ledger, *, label, id
                 raise ForgePilotError("revalidation_wire", "Probe needs exactly one wire attempt")
             check["request_id"] = attempts[-1]["request_id"]
             try:
-                verify_probe(check, attempts[-1])
+                verify_probe(check, attempts[-1], expected_output_limit=output_limit if configured else None)
             except ValueError:
                 raise ForgePilotError("probe_usage_invalid", "Probe did not prove the budget contract") from None
             check["status"] = "passed"
@@ -211,7 +220,8 @@ async def run_revalidation(config_path, configuration, key, ledger, *, label, id
     if result["status"] == "passed":
         try:
             verify_revalidation(result, attempts, [{"profile": p.profile_id, "model": p.model}
-                                                    for p in configuration.profiles])
+                                                    for p in configuration.profiles],
+                                configured_limits=profile_limits(configuration) if configured else None)
         except ValueError:
             result.update(status="failed", first_failure_reason="revalidation_evidence",
                           final_stop_reason="revalidation_evidence")
@@ -515,7 +525,8 @@ async def execute(output, *, revalidate_only=False, retest=None):
                 writer.path.resolve() != writer.path or writer.path.stat().st_nlink != 1):
             raise ValueError("Unexpected linked campaign writer lock")
         with writer:
-            previous, progress = open_continuation(output, ledger, identity)
+            previous, progress = open_continuation(
+                output, ledger, identity, configured_limits=lambda: profile_limits(saved_configuration()[1]))
             failed_slot = previous["failed_slot"]
             if retest is not None and retest != failed_slot:
                 raise ValueError("Retest must identify the original failed slot")
@@ -558,7 +569,7 @@ async def _execute_available(output, ledger, previous, progress, runtime, *, fai
     if configuration_revision(config_path) != identity["launcher_revision"]:
         raise ValueError("Acceptance credential identity changed during key load")
     if not summary.get("revalidation"):
-        label = "revalidation"
+        label = previous.get("revalidation_label", "revalidation")
         directory = output / label
         directory.mkdir()
         result = await run_revalidation(config_path, configuration, key, ledger, label=label, identity=identity)
@@ -566,12 +577,13 @@ async def _execute_available(output, ledger, previous, progress, runtime, *, fai
             old_preflight = json.loads((output / "preflight.json").read_bytes())
             try:
                 verify_revalidation(result, ledger.wire_attempts(label), previous["models"],
-                                    require_embedding=old_preflight.get("embedding") == "passed")
+                                    require_embedding=old_preflight.get("embedding") == "passed",
+                                    configured_limits=profile_limits(configuration) if label == "revalidation-configured" else None)
             except ValueError:
                 result.update(status="failed", first_failure_reason="invalid_revalidation_evidence",
                               final_stop_reason="invalid_revalidation_evidence")
         save(directory / "result.json", result)
-        summary[label] = result
+        summary["revalidation"] = result
         if result["status"] != "passed":
             summary["stop_reason"] = result["final_stop_reason"] or "revalidation_failed"
         checkpoint()

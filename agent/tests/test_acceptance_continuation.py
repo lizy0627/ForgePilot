@@ -88,3 +88,66 @@ def test_previously_audited_progress_is_imported_with_its_own_runtime(tmp_path):
             open_continuation(tmp_path, active, new_runtime)
     finally:
         active.close()
+
+
+def test_configured_preflight_replaces_only_verified_reasoning_limit_stop(tmp_path):
+    make_fixture(tmp_path)
+    summary = tmp_path / "summary.json"
+    old = json.loads(summary.read_bytes())
+    model = "doubao-seed-2-1-lite-fixture"
+    old["models"] = [{"profile": "profile", "model": model, "family": "doubao"}]
+    summary.write_text(json.dumps(old))
+    ledger = RequestBudget(tmp_path / "budget.sqlite3", existing_only=True, enforce_limit=False)
+
+    def finish_probe(state, path, *, limit, truncated):
+        label = state["revalidation_label"]
+        checks = []
+        for name in (["connection:profile", "chat"] if truncated else ["connection:profile", "chat", "summary"]):
+            failed = truncated and name == "chat"
+            completion = limit if failed else 37
+            usage = {"prompt_tokens": 51, "completion_tokens": completion, "total_tokens": 51 + completion}
+            attempt = {**usage, "kind": "chat", "model": model, "output_parameter": "max_completion_tokens",
+                       "output_limit": limit, "status_code": 200, "failure_reason": None, "usage_issue": None,
+                       "observed_usage": [{**usage, "reasoning_tokens": completion if failed else 36}]}
+            rid = ledger.reserve(100 + limit, label)
+            ledger.settle(rid, usage, "response_200", wire=attempt)
+            checks.append({"name": name, "kind": "chat", "status": "failed" if failed else "passed",
+                           "profile": "profile", "model": model, "output_limit": limit, "request_id": rid})
+        wire = ledger.wire_attempts(label)
+        reason = "llm_incomplete" if truncated else None
+        result = {"run": label, "status": "failed" if truncated else "passed",
+                  "identity": {key: state[key] for key in ("runtime_identity", "continuation_id", "protocol_sha256",
+                                                          "model_configuration_sha256", "launcher_revision")},
+                  "wire_attempts": wire, "network_requests": len(wire), "estimated_tokens": 0, "checks": checks,
+                  "reported_tokens": sum(a["reported_tokens"] for a in wire), "duration_seconds": 1,
+                  "first_failure_reason": reason, "final_stop_reason": reason, "embedding_enabled": False}
+        (tmp_path / label).mkdir()
+        (tmp_path / label / "result.json").write_text(json.dumps(result))
+        state.update(revalidation=result, budget=ledger.snapshot())
+        if truncated:
+            state["stop_reason"] = reason
+        path.write_text(json.dumps(state))
+
+    try:
+        runtime = runtime_identity()
+        first, first_path = open_continuation(tmp_path, ledger, runtime)
+        finish_probe(first, first_path, limit=1024, truncated=True)
+        first_bytes = first_path.read_bytes()
+        new_runtime = {**runtime, "configured": "new implementation"}
+        second, second_path = open_continuation(tmp_path, ledger, new_runtime)
+        assert second_path.name == "progress-continuation-configured.json"
+        assert second["revalidation_label"] == "revalidation-configured"
+        assert "revalidation" not in second and "stop_reason" not in second
+        assert second["runs"] == first["runs"] and second["budget"] == first["budget"]
+        finish_probe(second, second_path, limit=16000, truncated=False)
+        restored, restored_path = open_continuation(tmp_path, ledger, new_runtime,
+                                                    configured_limits=lambda: {"profile": 16000})
+        assert restored == second and restored_path == second_path and first_path.read_bytes() == first_bytes
+        with pytest.raises(ValueError):
+            open_continuation(tmp_path, ledger, new_runtime, configured_limits={"profile": 10000})
+        with first_path.open("ab") as file:
+            file.write(b" ")
+        with pytest.raises(ValueError, match="identity"):
+            open_continuation(tmp_path, ledger, new_runtime, configured_limits={"profile": 16000})
+    finally:
+        ledger.close()
