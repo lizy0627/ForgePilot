@@ -147,6 +147,7 @@ def test_real_overage_can_be_reported_but_cannot_authorize_recovery(tmp_path):
 def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp_path, monkeypatch):
     from test_acceptance_resume_entry import acceptance, command, fixture_inputs, offline_configuration
     from reconciliation_support import mock_revalidation_network
+    from acceptance_recovery import open_continuation
 
     args = fixture_inputs(tmp_path)
     monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", tmp_path)
@@ -157,9 +158,9 @@ def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp
     command(monkeypatch, tmp_path, "--resume", "--execute", "--revalidate-only")
     runtime = runtime_identity()
     db = tmp_path / "budget.sqlite3"
-    ledger = RequestBudget(db, existing_only=True)
+    ledger = RequestBudget(db, existing_only=True, enforce_limit=False)
     try:
-        state, path = open_recovery(tmp_path, ledger, runtime)
+        state, path = open_continuation(tmp_path, ledger, runtime)
         label = "bug-inclusive-sum-r1"
         ledger.settle(ledger.reserve(80, label), {"total_tokens": 61}, "response_200")
         result = {"run": label, "status": "passed", "network_requests": 1,
@@ -172,9 +173,9 @@ def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp
         path.write_text(json.dumps(state))
     finally:
         ledger.close()
-    reopened = RequestBudget(db, existing_only=True)
+    reopened = RequestBudget(db, existing_only=True, enforce_limit=False)
     try:
-        restored, restored_path = open_recovery(tmp_path, reopened, runtime)
+        restored, restored_path = open_continuation(tmp_path, reopened, runtime)
         assert restored == state and restored_path == path
     finally:
         reopened.close()
@@ -183,11 +184,10 @@ def test_valid_progress_resumes_only_with_matching_run_evidence_and_requests(tmp
     result["network_requests"] = 0
     path.write_text(json.dumps(state))
     (folder / "result.json").write_text(json.dumps(result))
-    reopened = RequestBudget(db, existing_only=True)
+    reopened = RequestBudget(db, existing_only=True, enforce_limit=False)
     try:
         with pytest.raises(ValueError):
-            open_recovery(tmp_path, reopened, runtime)
-        with pytest.raises(ForgePilotError):
-            reopened.reserve(1, "unauthorized")
+            open_continuation(tmp_path, reopened, runtime)
+        assert reopened.snapshot()["requests"] == state["budget"]["requests"]
     finally:
         reopened.close()

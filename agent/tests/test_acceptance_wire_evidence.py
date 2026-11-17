@@ -179,3 +179,72 @@ async def test_profile_pins_are_enforced_before_reservation_or_network(ledger, k
             await sdk.post(url, json=payload)
     assert failure.value.code == "llm_budget"
     assert ledger.snapshot()["requests"] == [] and ledger.wire_attempts("revalidation") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("historical_hold", [True, False])
+async def test_observation_mode_keeps_original_ledger_and_checks_each_wire_request(tmp_path, historical_hold):
+    path = tmp_path / "budget.sqlite3"
+    original = RequestBudget(path, 100)
+    try:
+        reservation = original.reserve(100, "original")
+        original.settle(reservation, None, "request_error")
+        with original.transaction():
+            original.db.execute("UPDATE campaign SET held=?", (int(historical_hold),))
+        original_row, = original.snapshot()["requests"]
+    finally:
+        original.close()
+
+    ledger = RequestBudget(path, existing_only=True, enforce_limit=False)
+    timeout = httpx.ReadTimeout("offline fixture")
+    responses = iter([
+        httpx.Response(200, json={"usage": units(3, 11)}),
+        httpx.Response(200, json={}),
+        httpx.Response(503, json={"usage": units(4, 0)}),
+        timeout,
+        httpx.Response(200, json={"usage": units(2000, 7)}),
+    ])
+
+    def reply(request):
+        response = next(responses)
+        if response is timeout:
+            raise timeout
+        return response
+
+    transport = BudgetTransport(
+        ledger, lambda: "continued", httpx.MockTransport(reply),
+        total_output_parameter="max_completion_tokens", expected_model=PAYLOAD["model"],
+        api_root="https://example.invalid", request_kind="chat", output_ceiling=10)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="https://example.invalid") as sdk:
+            with pytest.raises(ForgePilotError, match="model or endpoint"):
+                await sdk.post("/chat/completions", json={**PAYLOAD, "model": "wrong"})
+            with pytest.raises(ForgePilotError, match="output limit"):
+                await sdk.post("/chat/completions", json={**PAYLOAD, "max_completion_tokens": 11})
+            with pytest.raises(ForgePilotError) as overrun:
+                await sdk.post("/chat/completions", json=PAYLOAD)
+            assert overrun.value.code == "llm_response_limit"
+            assert (await sdk.post("/chat/completions", json=PAYLOAD)).status_code == 200
+            assert (await sdk.post("/chat/completions", json=PAYLOAD)).status_code == 503
+            with pytest.raises(httpx.ReadTimeout):
+                await sdk.post("/chat/completions", json=PAYLOAD)
+            assert (await sdk.post("/chat/completions", json=PAYLOAD)).status_code == 200
+
+        snapshot = ledger.snapshot()
+        assert snapshot["enforce_limit"] is False and snapshot["limit"] is None and not snapshot["held"]
+        assert snapshot["historical_limit"] == 100 and snapshot["historical_held"] is historical_hold
+        assert original_row in snapshot["requests"] and len(snapshot["requests"]) == 6
+        assert snapshot["charged_or_reserved"] > 2000
+        attempts = ledger.wire_attempts("continued")
+        assert [r["failure_reason"] for r in attempts] == [
+            "output_limit_exceeded", "invalid_usage", "http_503", "llm_timeout", None]
+        assert [r["reported_tokens"] for r in attempts] == [14, 0, 4, 0, 2007]
+        assert [r["estimated_tokens"] > 0 for r in attempts] == [False, True, False, True, False]
+    finally:
+        ledger.close()
+    reopened = RequestBudget(path, 100)
+    try:
+        assert reopened.snapshot()["held"] is historical_hold
+        assert reopened.snapshot()["requests"] == snapshot["requests"]
+    finally:
+        reopened.close()

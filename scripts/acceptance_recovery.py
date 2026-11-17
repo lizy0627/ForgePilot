@@ -31,6 +31,15 @@ def sample_stopped_on_budget(run):
             or "llm_budget" in run.get("errors", []) or run.get("status") == "not_run_budget")
 
 
+def provider_contract_failure(result):
+    for attempt in result.get("wire_attempts", []):
+        if attempt.get("failure_reason") == "output_limit_exceeded":
+            return "output_limit_exceeded"
+        if attempt.get("status_code") == 200 and attempt.get("usage_issue"):
+            return attempt["usage_issue"]
+    return None
+
+
 def capture_stop(campaign: Path) -> dict:
     """Fingerprint original evidence and reconstruct the conservative held ledger."""
     directory = campaign.resolve(strict=True)
@@ -168,23 +177,37 @@ def open_recovery(campaign, ledger, runtime_identity):
             raise ValueError("Recovery progress is stopped or inconsistent with the original runs")
     if not _same(previous["budget"], current):
         raise ValueError("Ledger changed outside the saved recovery progress")
-    by_id = {row["id"]: row for row in current["requests"]}
-    if any(not _same(by_id.get(row["id"]), row) for row in frozen["requests"]):
-        raise ValueError("A frozen request changed after reconciliation")
-    labels = _labels(json.loads(_read(directory, "plan.json")))
-    runs = previous["runs"]
-    if [run["run"] for run in runs] != labels[:len(runs)]:
-        raise ValueError("Recovery progress violates the frozen run order")
-    new_runs = runs[len(old["runs"]):]
-    original_ids = {row["id"] for row in frozen["requests"]}
-    resumed_requests = [row for row in current["requests"] if row["id"] not in original_ids]
     failed_slot = next(row["label"] for row in frozen["requests"] if row["id"] == manifest["request_id"])
     identity = {key: old[key] for key in ("protocol_sha256", "model_configuration_sha256", "launcher_revision")}
     identity.update(runtime_identity=runtime_identity, recovery_audit_sha256=digest)
+    _check_runs(directory, ledger, old, frozen["requests"], previous, identity, failed_slot,
+                manifest["original_files_sha256"][failed_slot + "/result.json"], bounded=True)
+    ledger._authorize_verified_recovery(digest, current)
+    return previous, progress
+
+
+def _check_runs(directory, ledger, base, original_rows, previous, identity, failed_slot, original_sha,
+                *, bounded=False, check_directories=True):
+    current_rows = previous["budget"]["requests"]
+    by_id = {row["id"]: row for row in current_rows}
+    if len(by_id) != len(current_rows) or any(not _same(by_id.get(row["id"]), row) for row in original_rows):
+        raise ValueError("A frozen request changed after reconciliation")
+    labels = _labels(json.loads(_read(directory, "plan.json")))
+    runs = previous["runs"]
+    if (not _same(runs[:len(base["runs"])], base["runs"])
+            or [run["run"] for run in runs] != labels[:len(runs)]):
+        raise ValueError("Recovery progress violates the frozen run order")
+    new_runs = runs[len(base["runs"]):]
+    original_ids = {row["id"] for row in original_rows}
+    resumed_requests = [row for row in current_rows if row["id"] not in original_ids]
     extra = []
     for field, label in (("revalidation", "revalidation"), ("retest", "retest-" + failed_slot)):
+        if field in base:
+            if not _same(base[field], previous.get(field)):
+                raise ValueError("An inherited post-repair result changed")
+            continue
         if field not in previous:
-            if os.path.lexists(directory / label):
+            if check_directories and os.path.lexists(directory / label):
                 raise ValueError("An incomplete post-repair record requires inspection")
             continue
         record = previous[field]
@@ -193,17 +216,22 @@ def open_recovery(campaign, ledger, runtime_identity):
         if field == "retest":
             if record.get("retest_of") != failed_slot:
                 raise ValueError("Retest does not identify the original failed slot")
-            expected = {**identity, "original_result_sha256": manifest["original_files_sha256"][failed_slot + "/result.json"]}
+            expected = {**identity, "original_result_sha256": original_sha}
         else:
             from acceptance_revalidation import verify_revalidation
             expected = identity
             old_preflight = json.loads(_read(directory, "preflight.json"))
-            verify_revalidation(record, ledger.wire_attempts(label), old["models"],
-                                require_embedding=old_preflight.get("embedding") == "passed")
+            attempts = ledger.wire_attempts(label)
+            if bounded or record.get("status") != "failed":
+                verify_revalidation(record, attempts, base["models"],
+                                    require_embedding=old_preflight.get("embedding") == "passed")
+            elif (not record.get("final_stop_reason") or previous.get("stop_reason") != record["final_stop_reason"]
+                  or not _same(record.get("wire_attempts"), attempts)):
+                raise ValueError("Failed preflight evidence is inconsistent with its recorded stop")
         if not _same(record.get("identity"), expected):
             raise ValueError("Post-repair evidence identity changed")
         extra.append(record)
-    if (new_runs or "retest" in previous) and "revalidation" not in previous:
+    if (new_runs or "retest" in previous) and previous.get("revalidation", {}).get("status") != "passed":
         raise ValueError("No verified post-repair preflight for the recorded samples")
     completed = [*extra, *new_runs]
     completed_labels = {run["run"] for run in completed}
@@ -215,11 +243,72 @@ def open_recovery(campaign, ledger, runtime_identity):
                 or run.get("reported_tokens") != sum(row["charged"] or 0 for row in calls if row["estimated"] == 0)
                 or run.get("estimated_tokens") != sum(row["charged"] or 0 for row in calls if row["estimated"] == 1)):
             raise ValueError("Recorded identity or usage is inconsistent with the request ledger")
-        if (sample_stopped_on_budget(run)
+        if (bounded and sample_stopped_on_budget(run)
                 or len(calls) != run["network_requests"] or any(row["charged"] is None for row in calls)
+                or not _same(run.get("wire_attempts", []), ledger.wire_attempts(run["run"]))
                 or not _same(run, json.loads(_read(directory, run["run"] + "/result.json")))):
             raise ValueError("Recovered run stopped on budget or does not match its result")
-    if any((directory / label).exists() for label in labels[len(runs):]):
+    if check_directories and any(os.path.lexists(directory / label) for label in labels[len(runs):]):
         raise ValueError("An incomplete run directory requires inspection")
-    ledger._authorize_verified_recovery(digest, current)
+
+
+def open_continuation(campaign, ledger, runtime_identity):
+    """Resume the original fixed slots, retaining legacy estimates and completed evidence."""
+    directory = campaign.resolve(strict=True)
+    current = ledger.snapshot()
+    old = json.loads(_read(directory, "summary.json"))
+    if old.get("stop_reason") != "shared_budget_exhausted":
+        raise ValueError("Missing original stopped campaign evidence")
+    anchors = capture_stop(directory)
+    failed_slot = anchors["held_request"]["label"]
+    original_sha = anchors["files"][failed_slot + "/result.json"]
+    original_rows = anchors["original_requests"]
+    base = old
+    fields = ("protocol_sha256", "model_configuration_sha256", "launcher_revision", "planned_runs", "models")
+    identity = {key: old[key] for key in fields[:3]}
+    origin = {"files": anchors["files"]}
+    audits = ledger.reconciliation_audits()
+    if audits:
+        audit_runtime = audits[0]["runtime_identity"]
+        manifest = _derive(directory, ledger, audit_runtime)
+        audit_id = manifest["audit_sha256"]
+        origin["audit"] = audit_id
+        original_rows = manifest["budget_after_reconciliation"]["requests"]
+        legacy_name = f"progress-{audit_id}.json"
+        if os.path.lexists(directory / legacy_name):
+            raw = _read(directory, legacy_name)
+            legacy = json.loads(raw)
+            legacy_identity = {**identity, "runtime_identity": audit_runtime, "recovery_audit_sha256": audit_id}
+            if (any(not _same(legacy.get(k), old.get(k)) for k in fields)
+                    or any(not _same(legacy.get(k), v) for k, v in legacy_identity.items())):
+                raise ValueError("Legacy progress identity differs from its reconciliation")
+            _check_runs(directory, ledger, old, original_rows, legacy, legacy_identity, failed_slot, original_sha,
+                        check_directories=False)
+            base, original_rows = legacy, legacy["budget"]["requests"]
+            origin["legacy_progress"] = hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(json.dumps(origin, sort_keys=True).encode()).hexdigest()
+    identity.update(runtime_identity=runtime_identity, continuation_id=digest)
+    progress = directory / "progress-continuation.json"
+    binding = {**identity, "failed_slot": failed_slot, "original_result_sha256": original_sha}
+    has_progress = os.path.lexists(progress)
+    if has_progress:
+        previous = json.loads(_read(directory, progress.name))
+        if (any(not _same(previous.get(k), v) for k, v in binding.items())
+                or any(not _same(previous.get(k), old.get(k)) for k in fields)
+                or not _same(previous["budget"], current)):
+            raise ValueError("Continuation progress differs from the original identity, runtime or ledger")
+    else:
+        previous = {**base, **binding, "budget": current}
+        previous.pop("recovery_audit_sha256", None)
+    _check_runs(directory, ledger, base, original_rows, previous, identity, failed_slot, original_sha)
+    preflight = previous.get("revalidation", {})
+    stop = preflight.get("final_stop_reason") if preflight.get("status") == "failed" else None
+    for record in [*previous["runs"][len(old["runs"]):], previous.get("retest", {})]:
+        stop = stop or provider_contract_failure(record)
+    if has_progress and previous.get("stop_reason") != stop:
+        raise ValueError("Recorded stop differs from the preflight or provider evidence")
+    if stop:
+        previous["stop_reason"] = stop
+    else:
+        previous.pop("stop_reason", None)
     return previous, progress

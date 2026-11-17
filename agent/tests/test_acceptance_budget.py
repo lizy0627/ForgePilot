@@ -31,31 +31,33 @@ async def test_paid_entry_rejects_another_directory_before_credentials_or_ledger
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("held,stop_reason", [(True, "unknown_usage_campaign_hold"),
-                                               (False, "shared_budget_exhausted")])
-async def test_held_entry_preserves_failure_summary_without_loading_credentials(tmp_path, monkeypatch, held, stop_reason):
+async def test_original_held_campaign_can_run_preflight_before_reconciliation(tmp_path, monkeypatch):
     import run_product_acceptance as acceptance
+    from reconciliation_support import mock_revalidation_network
+    from test_acceptance_resume_entry import fixture_inputs, offline_configuration, original_files
 
     monkeypatch.setattr(acceptance, "PAID_CAMPAIGN", tmp_path)
-    original = (json.dumps({"stop_reason": stop_reason, "incident": "original failure",
-                            "runs": [{"run": "bug-negative-clamp-r1", "status": "failed"}]}) + "\n").encode()
-    (tmp_path / "summary.json").write_bytes(original)
-    ledger = RequestBudget(tmp_path / "budget.sqlite3")
-    ledger.reserve(100, "original")
-    with ledger.transaction():
-        ledger.db.execute("UPDATE campaign SET held=?", (int(held),))
-    before = ledger.snapshot()
-    ledger.close()
-    def forbidden_configuration():
-        pytest.fail("Held campaign must stop before configuration, credentials or network")
-    monkeypatch.setattr(acceptance, "saved_configuration", forbidden_configuration)
-    await acceptance.execute(tmp_path)
-    assert (tmp_path / "summary.json").read_bytes() == original
-    reopened = RequestBudget(tmp_path / "budget.sqlite3")
+    fixture_inputs(tmp_path)
+    originals = original_files(tmp_path)
+    offline_configuration(monkeypatch, tmp_path)
+    sent = mock_revalidation_network(monkeypatch)
+    monkeypatch.setattr(acceptance, "load_saved_key", lambda _: "fixture")
+    path = tmp_path / "budget.sqlite3"
+    ledger = RequestBudget(path, existing_only=True)
     try:
-        assert reopened.snapshot() == before
+        before = ledger.snapshot()
+        assert before["held"] and before["charged_or_reserved"] == before["limit"]
+        await acceptance.execute(tmp_path, revalidate_only=True)
+        await acceptance.execute(tmp_path, revalidate_only=True)
+        after = ledger.snapshot()
+        assert after["held"] and after["charged_or_reserved"] == before["limit"] + 24
+        assert all(row in after["requests"] for row in before["requests"])
+        assert len(sent) == len(ledger.wire_attempts("revalidation")) == 4
+        assert len(after["requests"]) == len(before["requests"]) + 4
+        assert ledger.reconciliation_audits() == []
+        assert original_files(tmp_path) == originals
     finally:
-        reopened.close()
+        ledger.close()
 
 
 def test_concurrent_reservations_and_crash_reopen_keep_shared_cap(tmp_path):

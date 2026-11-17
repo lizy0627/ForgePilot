@@ -88,7 +88,7 @@ def make_fixture(campaign, actual=123):
     from run_product_acceptance import plan
 
     campaign.mkdir(exist_ok=True)
-    frozen_plan = plan()
+    frozen_plan = plan(historical=True)
     (campaign / "plan.json").write_text(json.dumps(frozen_plan))
     (campaign / "preflight.json").write_text(json.dumps({
         "connections": [{"profile": "synthetic", "ok": True}], "chat": "passed", "summary": "passed"

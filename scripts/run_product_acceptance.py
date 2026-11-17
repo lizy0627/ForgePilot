@@ -1,4 +1,4 @@
-"""Fixed 2 Bug Fix + 2 Feature acceptance, three rounds, one 300k token ledger.
+"""Fixed 2 Bug Fix + 2 Feature acceptance, three rounds, one request-usage ledger.
 
 Preparation is offline by default. --execute uses existing saved credentials;
 every real model/embedding HTTP attempt goes through BudgetTransport. This does
@@ -28,7 +28,7 @@ import httpx
 
 from acceptance_budget import BudgetTransport, RequestBudget
 from acceptance_reconciliation import runtime_identity
-from acceptance_recovery import capture_stop, materialize_recovery, open_recovery, sample_stopped_on_budget
+from acceptance_recovery import capture_stop, materialize_recovery, open_continuation, provider_contract_failure
 from acceptance_revalidation import verify_revalidation
 from forgepilot.api import create_app
 from forgepilot.desktop_configuration import (
@@ -84,8 +84,9 @@ def save(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def plan():
-    return {"protocol": "product-readiness-v1", "formal_ab": False, "token_cap": 300_000,
+def plan(*, historical=False):
+    # Only the original protocol, whose hash is frozen, includes a campaign cap.
+    return {"protocol": "product-readiness-v1", "formal_ab": False, "token_cap": 300_000 if historical else None,
             "rounds": 3, "planned_runs": 12, "order": "round then task order",
             "tasks": TASKS, "allowed_changed_files": ["src/value.cpp"],
             "success": ["actual CMake/CTest/Protected Oracle passed", "scope and integrity passed",
@@ -470,7 +471,7 @@ async def _run_sample_workflow(task, configuration, key, ledger, evidence, resul
             raise ForgePilotError("acceptance_source", "Source repository changed")
 
 
-def campaign_ledger(output):
+def campaign_ledger(output, *, enforce_limit=True):
     if output.absolute() != PAID_CAMPAIGN.absolute() or output.resolve() != PAID_CAMPAIGN.absolute():
         raise ValueError("Paid acceptance must use the existing stage-six campaign directory")
     path = PAID_CAMPAIGN / "budget.sqlite3"
@@ -480,12 +481,12 @@ def campaign_ledger(output):
                  path.with_suffix(".sqlite3-journal")):
         if file.is_symlink() or file.exists() and (file.resolve() != file or file.stat().st_nlink != 1):
             raise ValueError("Unexpected linked acceptance ledger")
-    return RequestBudget(path, existing_only=True)
+    return RequestBudget(path, existing_only=True, enforce_limit=enforce_limit)
 
 
 def verify_plan(output):
     persisted = json.loads((output / "plan.json").read_bytes())
-    if json.dumps(persisted, sort_keys=True) != json.dumps(plan(), sort_keys=True):
+    if json.dumps(persisted, sort_keys=True) != json.dumps(plan(historical=True), sort_keys=True):
         raise ValueError("Fixed acceptance plan changed; cannot resume this campaign")
 
 
@@ -503,18 +504,8 @@ def reconcile_offline(output, inputs):
 
 async def execute(output, *, revalidate_only=False, retest=None):
     output = output.absolute()
-    ledger = campaign_ledger(output)
+    ledger = campaign_ledger(output, enforce_limit=False)
     try:
-        original = json.loads((output / "summary.json").read_bytes())
-        audits = ledger.reconciliation_audits()
-        if ledger.snapshot()["held"] or (original.get("stop_reason") == "shared_budget_exhausted" and not audits):
-            print("Shared acceptance budget is held; existing evidence is unchanged.", flush=True)
-            return
-        if not audits or original.get("stop_reason") != "shared_budget_exhausted":
-            raise ValueError("Missing the original stop or its request-level reconciliation")
-        failed_slot = audits[0]["before"]["label"]
-        if retest is not None and retest != failed_slot:
-            raise ValueError("Retest must identify the original reconciled failure")
         verify_plan(output)
         identity = runtime_identity()
         # Serialize progress checkpoints across harness processes. This uses a
@@ -524,7 +515,13 @@ async def execute(output, *, revalidate_only=False, retest=None):
                 writer.path.resolve() != writer.path or writer.path.stat().st_nlink != 1):
             raise ValueError("Unexpected linked campaign writer lock")
         with writer:
-            previous, progress = open_recovery(output, ledger, identity)
+            previous, progress = open_continuation(output, ledger, identity)
+            failed_slot = previous["failed_slot"]
+            if retest is not None and retest != failed_slot:
+                raise ValueError("Retest must identify the original failed slot")
+            if previous.get("stop_reason"):
+                print("Acceptance stopped:", previous["stop_reason"], flush=True)
+                return
             await _execute_available(output, ledger, previous, progress, identity,
                                      failed_slot=failed_slot, revalidate_only=revalidate_only, retest=retest)
     finally:
@@ -540,10 +537,9 @@ async def _execute_available(output, ledger, previous, progress, runtime, *, fai
         raise ValueError("Acceptance model configuration or credential identity changed; cannot resume")
     runs = list(previous["runs"])
     identity.update(protocol_sha256=previous["protocol_sha256"], runtime_identity=runtime,
-                    recovery_audit_sha256=previous["recovery_audit_sha256"])
+                    continuation_id=previous["continuation_id"])
     summary = {**previous, **identity, "runs": runs}
-    # open_recovery checked these records against the original ledger and the
-    # per-slot evidence before permitting this connection to reserve tokens.
+    # The continuation has verified each recorded slot against its saved evidence.
     if previous.get("revalidation") and (revalidate_only or (retest and previous.get("retest"))
                                          or not retest and len(runs) == previous["planned_runs"]):
         return
@@ -561,70 +557,58 @@ async def _execute_available(output, ledger, previous, progress, runtime, *, fai
         raise ValueError("Existing model credential unavailable")
     if configuration_revision(config_path) != identity["launcher_revision"]:
         raise ValueError("Acceptance credential identity changed during key load")
-    try:
-        if not summary.get("revalidation"):
-            label = "revalidation"
-            directory = output / label
-            directory.mkdir()
-            result = await run_revalidation(config_path, configuration, key, ledger, label=label, identity=identity)
-            if result["status"] == "passed":
-                old_preflight = json.loads((output / "preflight.json").read_bytes())
-                try:
-                    verify_revalidation(result, ledger.wire_attempts(label), previous["models"],
-                                        require_embedding=old_preflight.get("embedding") == "passed")
-                except ValueError:
-                    result.update(status="failed", first_failure_reason="invalid_revalidation_evidence",
-                                  final_stop_reason="invalid_revalidation_evidence")
-            save(directory / "result.json", result)
-            summary[label] = result
-            if result["status"] != "passed":
-                summary["stop_reason"] = result["final_stop_reason"] or "revalidation_failed"
-                if not ledger.snapshot()["held"]:
-                    ledger.stop_recovery()
+    if not summary.get("revalidation"):
+        label = "revalidation"
+        directory = output / label
+        directory.mkdir()
+        result = await run_revalidation(config_path, configuration, key, ledger, label=label, identity=identity)
+        if result["status"] == "passed":
+            old_preflight = json.loads((output / "preflight.json").read_bytes())
+            try:
+                verify_revalidation(result, ledger.wire_attempts(label), previous["models"],
+                                    require_embedding=old_preflight.get("embedding") == "passed")
+            except ValueError:
+                result.update(status="failed", first_failure_reason="invalid_revalidation_evidence",
+                              final_stop_reason="invalid_revalidation_evidence")
+        save(directory / "result.json", result)
+        summary[label] = result
+        if result["status"] != "passed":
+            summary["stop_reason"] = result["final_stop_reason"] or "revalidation_failed"
+        checkpoint()
+        if summary.get("stop_reason"):
+            return
+    if revalidate_only:
+        return
+    if retest:
+        original = next(r for r in runs if r["run"] == failed_slot)
+        task = next(t for t in TASKS if failed_slot.rsplit("-r", 1)[0] == t["id"])
+        repeat = int(failed_slot.rsplit("-r", 1)[1])
+        retest_identity = {**identity, "original_result_sha256": previous["original_result_sha256"]}
+        result = await run_sample(task, repeat, configuration, key, ledger, output,
+                                  identity=retest_identity, retest_of=original["run"])
+        summary["retest"] = result
+        stop = provider_contract_failure(result)
+        if stop:
+            summary["stop_reason"] = stop
+        checkpoint()
+        return
+    for repeat in range(1, 4):
+        for task in TASKS:
+            label = task["id"] + "-r" + str(repeat)
+            if any(run["run"] == label for run in runs):
+                continue
+            if (output / label).exists():
+                raise ValueError("An incomplete run directory requires inspection; never overwrite paid evidence")
+            print("RUN", task["id"], repeat, flush=True)
+            result = await run_sample(task, repeat, configuration, key, ledger, output, identity=identity)
+            runs.append(result)
+            stop = provider_contract_failure(result)
+            if stop:
+                summary["stop_reason"] = stop
             checkpoint()
+            print("RESULT", result["run"], result["status"], result["tokens"], flush=True)
             if summary.get("stop_reason"):
                 return
-        if revalidate_only:
-            return
-        if retest:
-            original = next(r for r in runs if r["run"] == failed_slot)
-            task = next(t for t in TASKS if failed_slot.rsplit("-r", 1)[0] == t["id"])
-            repeat = int(failed_slot.rsplit("-r", 1)[1])
-            audit = ledger.reconciliation_audits()[0]
-            retest_identity = {**identity, "original_result_sha256": audit["result_sha256"]}
-            result = await run_sample(task, repeat, configuration, key, ledger, output,
-                                      identity=retest_identity, retest_of=original["run"])
-            summary["retest"] = result
-            if ledger.snapshot()["held"] or sample_stopped_on_budget(result):
-                if not ledger.snapshot()["held"]:
-                    ledger.stop_recovery()
-                summary["stop_reason"] = result.get("final_stop_reason") or "shared_budget_exhausted"
-            checkpoint()
-            return
-        for repeat in range(1, 4):
-            for task in TASKS:
-                label = task["id"] + "-r" + str(repeat)
-                if any(run["run"] == label for run in runs):
-                    continue
-                if (output / label).exists():
-                    raise ValueError("An incomplete run directory requires inspection; never overwrite paid evidence")
-                print("RUN", task["id"], repeat, flush=True)
-                result = await run_sample(task, repeat, configuration, key, ledger, output, identity=identity)
-                runs.append(result)
-                if ledger.snapshot()["held"] or sample_stopped_on_budget(result):
-                    if not ledger.snapshot()["held"]:
-                        ledger.stop_recovery()
-                    summary["stop_reason"] = "shared_budget_exhausted"
-                checkpoint()
-                print("RESULT", result["run"], result["status"], result["tokens"], flush=True)
-                if summary.get("stop_reason"):
-                    return
-    except BaseException:
-        # A partial run or a failed progress write needs inspection before any
-        # further paid work, including from another process.
-        if not ledger.snapshot()["held"]:
-            ledger.stop_recovery()
-        raise
 
 
 def main():
@@ -633,7 +617,7 @@ def main():
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--runtime-identity", action="store_true",
                         help="print the current source fingerprints for an offline reconciliation manifest")
-    action.add_argument("--execute", action="store_true", help="send budgeted real requests using existing configuration")
+    action.add_argument("--execute", action="store_true", help="send real requests with usage accounting and no campaign token cap")
     action.add_argument("--reconcile", type=Path, nargs=2, metavar=("MANIFEST", "PROVIDER_RECORD"),
                         help="reconcile one held request offline and publish its recovery record")
     action.add_argument("--rebuild-recovery", action="store_true",
@@ -641,7 +625,7 @@ def main():
     parser.add_argument("--resume", action="store_true", help="continue remaining planned runs using the same ledger and evidence")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--revalidate-only", action="store_true", help="only check the post-repair provider contracts")
-    mode.add_argument("--retest", metavar="ORIGINAL_RUN", help="one separate post-repair run of the reconciled failure")
+    mode.add_argument("--retest", metavar="ORIGINAL_RUN", help="one separate post-repair run of the original failure")
     args = parser.parse_args()
     if args.execute != args.resume:
         parser.error("paid acceptance requires --execute --resume and the existing stage-six campaign")

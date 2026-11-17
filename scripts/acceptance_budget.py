@@ -1,4 +1,4 @@
-"""Request-level ledger for the bounded product acceptance run, not formal A/B.
+"""Request-level ledger for the product acceptance run, not formal A/B.
 
 All real clients use BudgetTransport. Pending requests keep their full reservation
 after a crash; missing usage and transport errors also charge that bound.
@@ -23,15 +23,18 @@ from forgepilot.models.openai import OpenAICompatibleClient
 
 
 class RequestBudget:
-    def __init__(self, path: Path, limit: int = 300_000, *, existing_only: bool = False):
+    def __init__(self, path: Path, limit: int = 300_000, *, existing_only: bool = False, enforce_limit: bool = True):
         if type(limit) is not int or limit < 1:
             raise ValueError("Invalid acceptance token limit")
+        if type(enforce_limit) is not bool:
+            raise ValueError("Invalid acceptance budget enforcement mode")
         self.path = Path(path).resolve()
         if existing_only and (Path(path).absolute() != self.path or not self.path.is_file()
                               or self.path.stat().st_nlink != 1):
             raise ValueError("Existing campaign ledger must be a regular file at its original path")
         self.lock = RLock()
         self.limit = limit
+        self.enforce_limit = enforce_limit
         self._requires_recovery = existing_only
         self._authorized_audit = None
         target = self.path.as_uri() + "?mode=rw" if existing_only else self.path
@@ -48,17 +51,19 @@ class RequestBudget:
                         id TEXT PRIMARY KEY, label TEXT, reserved INTEGER, charged INTEGER,
                         estimated INTEGER, status TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
                     self.db.execute("INSERT OR IGNORE INTO campaign VALUES(1,?,0)", (limit,))
-                self._held()
+                self._campaign()
                 self.db.execute("SELECT id,label,reserved,charged,estimated,status,created_at FROM requests LIMIT 0")
         except BaseException:
             self.db.close()
             raise
 
-    def _held(self):
+    def _campaign(self):
         rows = self.db.execute("SELECT id,cap,held FROM campaign").fetchall()
-        if len(rows) != 1 or tuple(rows[0]) not in ((1, self.limit, 0), (1, self.limit, 1)):
+        if (len(rows) != 1 or rows[0]["id"] != 1 or rows[0]["held"] not in (0, 1)
+                or type(rows[0]["cap"]) is not int or rows[0]["cap"] < 1
+                or self.enforce_limit and rows[0]["cap"] != self.limit):
             raise ValueError("Missing or inconsistent acceptance campaign or token limit")
-        return bool(rows[0]["held"])
+        return rows[0]
 
     @contextmanager
     def transaction(self, *, read_only=False):
@@ -180,15 +185,16 @@ class RequestBudget:
         if type(amount) is not int or amount < 1:
             raise ValueError("Invalid request reservation")
         with self.transaction():
-            if self._held():
-                raise ForgePilotError("llm_budget", "Acceptance ledger is held; paid requests are disabled")
-            latest = self._latest_audit()
-            if ((self._requires_recovery and not latest) or latest != self._authorized_audit
-                    or (latest and self._recovery_stopped(latest))):
-                raise ForgePilotError("llm_budget", "Acceptance recovery summary has not authorized this connection")
-            used = self.db.execute("SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM requests").fetchone()[0]
-            if used + amount > self.limit:
-                raise ForgePilotError("llm_budget", "Shared acceptance token allowance cannot cover the next request")
+            if self.enforce_limit:
+                if self._campaign()["held"]:
+                    raise ForgePilotError("llm_budget", "Acceptance ledger is held; paid requests are disabled")
+                latest = self._latest_audit()
+                if ((self._requires_recovery and not latest) or latest != self._authorized_audit
+                        or (latest and self._recovery_stopped(latest))):
+                    raise ForgePilotError("llm_budget", "Acceptance recovery summary has not authorized this connection")
+                used = self.db.execute("SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM requests").fetchone()[0]
+                if used + amount > self.limit:
+                    raise ForgePilotError("llm_budget", "Shared acceptance token allowance cannot cover the next request")
             token = uuid4().hex
             self.db.execute("INSERT INTO requests(id,label,reserved,status) VALUES(?,?,?,'pending')",
                             (token, label, amount))
@@ -226,13 +232,17 @@ class RequestBudget:
                     # reservation or discard a larger provider-reported count.
                     amount = max(row["reserved"], wire["observed_charge_bound"])
                     estimated = True
-                if amount > row["reserved"] and not wire["failure_reason"]:
+                if self.enforce_limit and amount > row["reserved"] and not wire["failure_reason"]:
                     wire["failure_reason"] = "reservation_exceeded"
                 self.db.execute("""CREATE TABLE IF NOT EXISTS wire_attempts (
                     request_id TEXT PRIMARY KEY, evidence TEXT NOT NULL)""")
                 self.db.execute("INSERT INTO wire_attempts VALUES(?,?)", (token, json.dumps(wire)))
             self.db.execute("UPDATE requests SET charged=?,estimated=?,status=? WHERE id=?",
                             (amount, int(estimated), status, token))
+            if not self.enforce_limit:
+                # Usage anomalies remain visible to the probe verifier. A confirmed
+                # output-limit violation also rejects this response at the transport.
+                return wire is None or wire["failure_reason"] != "output_limit_exceeded"
             if amount > row["reserved"] or wire is not None and wire["failure_reason"]:
                 self.db.execute("UPDATE campaign SET held=1")
                 latest = self._latest_audit()
@@ -244,9 +254,14 @@ class RequestBudget:
 
     def _snapshot(self):
         rows = [dict(row) for row in self.db.execute("SELECT * FROM requests ORDER BY created_at,id")]
-        return {"limit": self.limit, "charged_or_reserved": sum(
+        campaign = self._campaign()
+        snapshot = {"limit": campaign["cap"], "charged_or_reserved": sum(
             row["reserved"] if row["charged"] is None else row["charged"] for row in rows),
-            "held": self._held(), "requests": rows}
+            "held": bool(campaign["held"]), "requests": rows}
+        if not self.enforce_limit:
+            snapshot.update(enforce_limit=False, historical_limit=campaign["cap"], historical_held=snapshot["held"],
+                            limit=None, held=False)
+        return snapshot
 
     def snapshot(self):
         with self.transaction(read_only=True):
@@ -354,7 +369,7 @@ class BudgetTransport(httpx.AsyncBaseTransport):
             raise ValueError("Unverified total-output parameter")
         self.ledger, self.label = ledger, label
         self.total_output_parameter = total_output_parameter
-        self.verify_usage = verify_usage or ledger._requires_recovery
+        self.verify_usage = verify_usage or ledger._requires_recovery or not ledger.enforce_limit
         self.expected_model = expected_model
         self.output_ceiling = output_ceiling
         self.allowed_urls = ()
@@ -422,7 +437,7 @@ class BudgetTransport(httpx.AsyncBaseTransport):
                           else "request_error")
                 self._settle_wire(token, payload, embedding, body, response, started, reason,
                                   type(exc).__name__ if isinstance(exc, httpx.TransportError) else None)
-                if isinstance(exc, Exception):
+                if self.ledger.enforce_limit and isinstance(exc, Exception):
                     raise ForgePilotError("llm_budget", "Verified acceptance request failed; campaign held") from None
             else:
                 self.ledger.settle(token, None, "request_error")
@@ -432,6 +447,8 @@ class BudgetTransport(httpx.AsyncBaseTransport):
         else:
             accepted = self.ledger.settle(token, usage, "response_" + str(response.status_code))
         if not accepted:
+            if not self.ledger.enforce_limit:
+                raise ForgePilotError("llm_response_limit", "Acceptance response exceeded the configured output limit")
             raise ForgePilotError("llm_budget", "Acceptance wire or budget contract failed; campaign held")
         headers = [(key, value) for key, value in response.headers.multi_items()
                    if key.lower() not in {"content-length", "content-encoding", "transfer-encoding"}]
