@@ -160,6 +160,33 @@ async def test_wrong_total_parameter_produces_no_dispatched_attempt(ledger):
 
 
 @pytest.mark.asyncio
+async def test_provider_default_output_tracks_usage_and_rejects_any_local_wire_limit(tmp_path):
+    ledger = RequestBudget(tmp_path / "test.sqlite3", enforce_limit=False)
+    payload = {key: value for key, value in PAYLOAD.items() if key != "max_completion_tokens"}
+    responses = iter(({"usage": units(5, 80_000)}, {}))
+    transport = BudgetTransport(ledger, lambda: "sample",
+        httpx.MockTransport(lambda _: httpx.Response(200, json=next(responses))),
+        total_output_parameter="max_completion_tokens", expected_model=payload["model"],
+        api_root="https://example.invalid", request_kind="chat")
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="https://example.invalid") as sdk:
+            for name in ("max_tokens", "max_completion_tokens"):
+                with pytest.raises(ForgePilotError, match="default output"):
+                    await sdk.post("/chat/completions", json={**payload, name: None})
+            with pytest.raises(ForgePilotError, match="model or endpoint"):
+                await sdk.post("/another-route", json=payload)
+            for _ in range(2):
+                await sdk.post("/chat/completions", json=payload)
+        measured, unknown = ledger.wire_attempts("sample")
+        assert measured["reported_tokens"] == 80_005 and measured["failure_reason"] is None
+        assert measured["output_parameter"] is measured["output_limit"] is None
+        assert unknown["actual_usage_unknown"] and unknown["failure_reason"] == "invalid_usage"
+        assert unknown["estimated_tokens"] > 0 and unknown["reported_tokens"] == 0
+    finally:
+        ledger.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind,url,payload", [
     ("chat", "/v1/chat/completions", {**PAYLOAD, "model": "different-model"}),
     ("chat", "/v1/chat/completions", {**PAYLOAD, "max_completion_tokens": 11}),

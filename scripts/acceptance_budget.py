@@ -372,10 +372,12 @@ class BudgetTransport(httpx.AsyncBaseTransport):
         self.verify_usage = verify_usage or ledger._requires_recovery or not ledger.enforce_limit
         self.expected_model = expected_model
         self.output_ceiling = output_ceiling
+        self.provider_default_output = not ledger.enforce_limit and request_kind == "chat" and output_ceiling is None
         self.allowed_urls = ()
         if ledger._requires_recovery or any(x is not None for x in (expected_model, api_root, request_kind, output_ceiling)):
             if (not expected_model or not api_root or request_kind not in ("chat", "embedding")
-                    or request_kind == "chat" and (type(output_ceiling) is not int or output_ceiling < 1)
+                    or request_kind == "chat" and not self.provider_default_output
+                    and (type(output_ceiling) is not int or output_ceiling < 1)
                     or request_kind == "embedding" and output_ceiling is not None):
                 raise ValueError("Incomplete acceptance transport profile")
             root = str(httpx.URL(api_root)).rstrip("/")
@@ -396,14 +398,17 @@ class BudgetTransport(httpx.AsyncBaseTransport):
             bound = len(request.content) + 64
         else:
             maximum = payload.get(self.total_output_parameter)
-            if (type(maximum) is not int or maximum < 1
+            if self.provider_default_output:
+                if "max_tokens" in payload or "max_completion_tokens" in payload:
+                    raise ForgePilotError("llm_config", "Acceptance sample must use the provider's default output length")
+            elif (type(maximum) is not int or maximum < 1
                     or self.output_ceiling is not None and maximum > self.output_ceiling
                     or "max_tokens" in payload and "max_completion_tokens" in payload):
                 raise ForgePilotError("llm_budget", "Acceptance requests require a prospective output limit")
             tools = [ToolSpec(name=t["function"]["name"], description=t["function"].get("description", ""),
                               input_schema=t["function"]["parameters"]) for t in payload.get("tools", [])]
             bound = max(input_reservation(payload["messages"], tools),
-                        len(request.content) + 16 * (len(payload["messages"]) + 1)) + maximum
+                        len(request.content) + 16 * (len(payload["messages"]) + 1)) + (maximum or 0)
         token = self.ledger.reserve(bound, self.label())
         response = None
         body = bytearray()
@@ -461,18 +466,21 @@ class BudgetTransport(httpx.AsyncBaseTransport):
         # billed usage) even though the successful response would be SSE.
         stream = bool(payload.get("stream")) and (success or not body.lstrip().startswith(b"{"))
         usage = _wire_usage(body, stream, embedding, success)
-        maximum = None if embedding else payload[self.total_output_parameter]
+        maximum = None if embedding else payload.get(self.total_output_parameter)
         if reason is None and not success:
             reason = f"http_{code}"
-        if reason is None and not embedding and any(
+        if reason is None and maximum is not None and any(
                 max(item.get("completion_tokens", 0), item.get("reasoning_tokens", 0)) > maximum
                 for item in usage["observed_usage"]):
             reason = "output_limit_exceeded"
         wire = {**usage, "kind": "embedding" if embedding else "chat", "model": payload.get("model"),
-                "output_parameter": None if embedding else self.total_output_parameter, "output_limit": maximum,
+                "output_parameter": self.total_output_parameter if maximum is not None else None, "output_limit": maximum,
                 "status_code": code, "failure_reason": reason or usage["usage_issue"],
                 "transport_error": transport_error,
                 "duration_ms": int((monotonic() - started) * 1000)}
+        if self.provider_default_output and usage["usage_issue"]:
+            # The input estimate and any observed counters cannot bound the unknown output.
+            wire["actual_usage_unknown"] = True
         counters = {key: n for key, n in usage.items() if key in
                     ("total_tokens", "completion_tokens", "prompt_tokens") and n is not None}
         status = "request_error" if code is None else "response_" + str(code)

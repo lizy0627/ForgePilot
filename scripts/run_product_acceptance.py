@@ -102,7 +102,8 @@ def saved_configuration():
     args = data["server_args"]
     if "--model-config" not in args:
         raise ValueError("Acceptance requires existing complete trusted Mission model routes")
-    configuration = ModelConfiguration.from_json(Path(args[args.index("--model-config") + 1]).read_bytes())
+    configuration = ModelConfiguration.from_json(Path(args[args.index("--model-config") + 1]).read_bytes(),
+                                                 preserve_output_limits=True)
     # Enforce existing role/family checks before a paid request.
     from forgepilot.agents.registry import AgentRegistry
     AgentRegistry(router=configuration.router())
@@ -113,10 +114,12 @@ def profile_limits(configuration):
     return {p.profile_id: p.max_output_tokens for p in configuration.profiles}
 
 
-def gateway(configuration, key, ledger, label, *, check=False, verify_usage=False):
-    if check:
+def gateway(configuration, key, ledger, label, *, probe_output_limit=None, verify_usage=False):
+    if probe_output_limit is not None or not ledger.enforce_limit:
+        # The probe specifies its frozen limit. Samples use the provider default
+        # even when the archived configuration used for identity contains a limit.
         configuration = configuration.model_copy(update={"profiles": tuple(
-            profile.model_copy(update={"max_output_tokens": min(1024, profile.max_output_tokens)})
+            profile.model_copy(update={"max_output_tokens": probe_output_limit})
             for profile in configuration.profiles)})
     def transport(profile):
         host = urlsplit(profile.base_url).hostname or ""
@@ -171,7 +174,7 @@ async def run_revalidation(config_path, configuration, key, ledger, *, label, id
         for name, profile, prompt in planned:
             output_limit = None
             if profile:
-                output_limit = profile.max_output_tokens if configured else min(1024, profile.max_output_tokens)
+                output_limit = profile.max_output_tokens if configured else min(1024, profile.max_output_tokens or 1024)
             check = {"name": name, "kind": "chat" if profile else "embedding", "status": "failed",
                      "model": profile.model if profile else fields["embedding_model"],
                      "profile": profile.profile_id if profile else None,
@@ -180,7 +183,7 @@ async def run_revalidation(config_path, configuration, key, ledger, *, label, id
             if profile:
                 route = ModelRoute(route_id="connection-check", primary=profile.profile_id)
                 config = configuration.model_copy(update={"routes": (route,), "enforce_review_family_separation": False})
-                async with gateway(config, key, ledger, label, check=not configured, verify_usage=True) as models:
+                async with gateway(config, key, ledger, label, probe_output_limit=output_limit, verify_usage=True) as models:
                     client = models.for_route(route.route_id, budget=ModelBudget(max_model_calls=1))
                     reply = await client.chat([{"role": "user", "content": prompt}])
                     content = (reply.message.content or "").strip()

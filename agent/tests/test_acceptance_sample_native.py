@@ -76,6 +76,7 @@ async def test_corrected_retest_exports_validated_patch_without_replacing_failur
             return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"},
                                                            "finish_reason": "stop"}],
                                              "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5}})
+        assert "max_tokens" not in payload and "max_completion_tokens" not in payload
         reply = await providers[profile.profile_id].chat(payload["messages"])
         message = reply.message.model_dump(exclude_none=True)
         if profile.profile_id == "analysis":
