@@ -639,8 +639,8 @@ class MissionHost:
     async def _cancel(self, task_id, expected_revision):
         async with self._control(task_id):
             self._check_revision(task_id, expected_revision)
-            workflow = self._workflow(task_id)
-            workflow.cancel(task_id, expected_revision=expected_revision)
+            # An unloaded mission can be cancelled without restoring its frozen tools.
+            self._services.get(task_id, self.graphs).cancel(task_id, expected_revision=expected_revision)
             running = self._running.get(task_id)
             if running is not None and not running.done():
                 running.cancel()

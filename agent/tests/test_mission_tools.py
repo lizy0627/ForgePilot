@@ -71,21 +71,41 @@ async def test_production_http_model_tools_fallback_and_frozen_restore(tmp_path,
                 assert len(case.provider.seen) == model_count
                 reread = (await client.get(path)).json()
                 assert reread["tool_context"] == context
-                if failure is None:
-                    service = case.app.state.task_host.mcp_service
-                    saved = service.get(sid)
-                    candidate = {key: saved[key] for key in (
-                        "name", "transport", "modes", "selected_tools", "effect", "enabled", "connection")}
-                    candidate["name"] = "Changed after task admission"
-                    await service.save(sid, candidate, base_revision=saved["revision"],
-                                       catalog_hash=saved["catalog_hash"])
-                    case.app.state.mission_host._services.clear()
-                    blocked = await client.post(path + "/resume", json={"expected_revision": reread["current_revision"]})
-                    assert blocked.status_code == 409, blocked.text
-                    assert blocked.json()["error"]["code"] == "mcp_catalog_changed"
-                    assert len(case.provider.seen) == model_count
+                if failure is not None:
+                    return
+                service = case.app.state.task_host.mcp_service
+                saved = service.get(sid)
+                candidate = {key: saved[key] for key in (
+                    "name", "transport", "modes", "selected_tools", "effect", "enabled", "connection")}
+                candidate["name"] = "Changed after task admission"
+                await service.save(sid, candidate, base_revision=saved["revision"],
+                                   catalog_hash=saved["catalog_hash"])
     finally:
         case.store.close()
+
+    reopened = MissionToolsCase(tmp_path, git_exe=git_exe, rg_exe=rg_exe)
+    try:
+        async with reopened.app.router.lifespan_context(reopened.app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=reopened.app), base_url="http://127.0.0.1") as client:
+            current = (await client.get(path)).json()
+            assert current["status"] == "awaiting_human"
+            revision = current["current_revision"]
+            blocked = await client.post(path + "/resume", json={"expected_revision": revision})
+            assert blocked.status_code == 409, blocked.text
+            assert blocked.json()["error"]["code"] == "mcp_catalog_changed"
+            stale = await client.post(path + "/cancel", json={"expected_revision": revision - 1})
+            assert stale.status_code == 409, stale.text
+            assert stale.json()["error"]["code"] == "mission_revision_conflict"
+            assert (await client.get("/api/v2/runtime/status")).json()["active_count"] == 1
+            cancelled = await client.post(path + "/cancel", json={"expected_revision": revision})
+            assert cancelled.status_code == 200, cancelled.text
+            assert cancelled.json()["status"] == "cancelled"
+            assert (await client.get("/api/v2/runtime/status")).json()["active_count"] == 0
+            events = await client.get(path + "/events", headers={"Last-Event-ID": current["last_event_id"]})
+            assert events.text.count("event: task.cancelled\n") == 1
+            assert not reopened.provider.seen
+    finally:
+        reopened.store.close()
 
 
 @pytest.mark.asyncio
