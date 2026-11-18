@@ -113,7 +113,7 @@ Dialog {
                 }
                 RowLayout {
                     Label { text: "使用范围"; color: Theme.secondary }
-                    CheckBox { id: chatScope; objectName: "mcpChatScope"; text: "问答"; checked: (root.draft.modes || []).indexOf("chat") >= 0; enabled: !root.locked; onClicked: root.modes() }
+                    CheckBox { id: chatScope; objectName: "mcpChatScope"; text: "问答"; visible: mcp.kind !== 2; checked: (root.draft.modes || []).indexOf("chat") >= 0; enabled: !root.locked; onClicked: root.modes() }
                     CheckBox { id: taskScope; objectName: "mcpTaskScope"; text: "工作"; checked: (root.draft.modes || []).indexOf("task") >= 0; enabled: !root.locked; onClicked: root.modes() }
                 }
                 Label { text: "仅启用读取和查询工具；修改、发送类工具暂不支持。请根据可信服务说明选择，行为提示不自动授予权限。"; color: Theme.secondary; wrapMode: Text.Wrap; Layout.fillWidth: true }

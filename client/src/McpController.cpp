@@ -9,6 +9,10 @@
 #include <QUuid>
 
 namespace {
+QJsonArray stdioModes(const QJsonObject &draft)
+{
+    return draft.value("modes").toArray().contains("task") ? QJsonArray{"task"} : QJsonArray{};
+}
 QJsonArray credentialScope(const QJsonObject &config)
 {
     if(config.value("transport")!="streamable_http") return {"stdio"};
@@ -222,6 +226,7 @@ void McpController::loadDetail(const QJsonObject &body)
     m_draft={};
     for(const auto &key:{"name","transport","connection","modes","selected_tools","effect","enabled"}) m_draft[key]=body.value(key);
     if(m_draft.value("transport")=="stdio") {
+        m_draft["modes"] = stdioModes(m_draft);
         auto c=m_draft.value("connection").toObject();
         if(!c.contains("public_env_names")) c["public_env_names"]=QJsonArray{};
         m_draft["connection"]=c;
@@ -242,6 +247,7 @@ void McpController::setKind(int value)
     if(!m_editorOpen || editorBusy() || m_disabled || m_uncertain || m_pending || m_recoveryConflict || m_state=="load_failed" || value<0 || value>2) return;
     if(value==0 && m_preset.isEmpty()) { m_editorError="搜索预设未加载，请刷新列表。"; emit editorChanged(); return; }
     m_draft["transport"]=value==2?"stdio":"streamable_http";
+    if(value==2) m_draft["modes"] = stdioModes(m_draft);
     m_draft["connection"]=value==0?m_preset.value("connection").toObject():value==1?
         QJsonObject{{"endpoint",""},{"auth_type","none"},{"header_name",QJsonValue::Null},{"preset_id",QJsonValue::Null}}:
         QJsonObject{{"command",""},{"args",QJsonArray{}},{"cwd",QJsonValue::Null},{"env_names",QJsonArray{}},{"public_env_names",QJsonArray{}}};
@@ -316,7 +322,7 @@ QString McpController::validation() const
 {
     const auto name=m_draft.value("name").toString();
     if(name.trimmed().isEmpty() || name.size()>40) return "请填写 1–40 字的名称。";
-    if(m_draft.value("modes").toArray().isEmpty()) return "请至少选择问答或工作范围。";
+    if(m_draft.value("modes").toArray().isEmpty()) return kind()==2 ? "请选择工作范围。" : "请至少选择问答或工作范围。";
     const auto c=m_draft.value("connection").toObject();
     QStringList required;
     if(kind()==2) {

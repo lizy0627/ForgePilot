@@ -731,6 +731,40 @@ print(json.dumps(result))
         QCOMPARE(runtime.fields().value("task_model").toString(), "offline-task");
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void mcpEditorOffersScopesSupportedByTransport()
+    {
+        Fixture fixture;
+        fixture.intercept = [](const Request &request) {
+            if (request.path != "/api/v1/mcp/servers/" + McpId.toUtf8()) return false;
+            Source::json(request, {{"name", "旧本地服务"}, {"transport", "stdio"}, {"revision", 1},
+                {"connection", QJsonObject{{"command", QCoreApplication::applicationFilePath()}}},
+                {"modes", QJsonArray{"chat"}}, {"catalog_hash", "test-catalog"}, {"enabled", true},
+                {"selected_tools", QJsonArray{"lookup"}}});
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("settingsButton"));
+        QTRY_VERIFY(!ui.mcp.disabled() && !ui.mcp.loading());
+        ui.mcp.edit();
+        auto *chat = ui.find("mcpChatScope"); QVERIFY(chat);
+        auto *work = ui.find("mcpTaskScope"); QVERIFY(work);
+        QTRY_VERIFY(chat->isVisible() && work->isVisible());
+        QVERIFY(chat->property("checked").toBool() && work->property("checked").toBool());
+        ui.mcp.setKind(2);
+        QVERIFY(!chat->isVisible() && work->isVisible());
+        QCOMPARE(ui.mcp.draft().value("modes").toList(), QVariantList{"task"});
+
+        ui.mcp.closeEditor();
+        ui.mcp.edit(McpId);
+        QTRY_VERIFY(ui.mcp.existing());
+        QVERIFY(!chat->isVisible() && work->isVisible());
+        QVERIFY(!work->property("checked").toBool());
+        QVERIFY(!ui.mcp.canSave());
+        QVERIFY(ui.click(work));
+        QCOMPARE(ui.mcp.draft().value("modes").toList(), QVariantList{"task"});
+        QVERIFY(ui.mcp.canSave());
+    }
     void missionMcpChoicesRequireExplicitReadOnlyAnnotation()
     {
         Fixture fixture; Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
