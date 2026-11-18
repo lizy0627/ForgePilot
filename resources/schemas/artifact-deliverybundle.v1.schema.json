@@ -1,0 +1,182 @@
+{
+  "$defs": {
+    "DeliveryBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "build_test_summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Build Test Summary",
+          "type": "string"
+        },
+        "change_set_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Change Set Artifact Id",
+          "type": "string"
+        },
+        "changed_files": {
+          "items": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Changed Files",
+          "type": "array"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{7,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "patch_path": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Patch Path"
+        },
+        "review_report_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Review Report Artifact Id",
+          "type": "string"
+        },
+        "reviewer_conclusion": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Reviewer Conclusion",
+          "type": "string"
+        },
+        "risks": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Risks",
+          "type": "array"
+        },
+        "rollback": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Rollback",
+          "type": "string"
+        },
+        "usage_instructions": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Usage Instructions",
+          "type": "string"
+        },
+        "validation_report_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Validation Report Artifact Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "change_set_artifact_id",
+        "validation_report_artifact_id",
+        "review_report_artifact_id",
+        "build_test_summary",
+        "reviewer_conclusion",
+        "changed_files",
+        "usage_instructions",
+        "rollback"
+      ],
+      "title": "DeliveryBundle",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/artifact-deliverybundle.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "DeliveryBundle",
+      "default": "DeliveryBundle",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "content": {
+      "$ref": "#/$defs/DeliveryBundle"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "maxLength": 64,
+      "title": "Created At",
+      "type": "string"
+    },
+    "parent_artifact_ids": {
+      "default": [],
+      "items": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Parent Artifact Ids",
+      "type": "array"
+    },
+    "producer": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_node": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer Node",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "producer",
+    "producer_node",
+    "created_at",
+    "content_sha256",
+    "content"
+  ],
+  "title": "DeliveryBundleArtifact",
+  "type": "object"
+}

@@ -1,0 +1,113 @@
+{
+  "label": "OFFLINE EVALUATOR FIXTURES ONLY; never real-model results",
+  "solutions": {
+    "cpp-compile-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint add(int a, int b) { return a + b; }\n"
+      }
+    },
+    "cpp-compile-02": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint square(int value) { return value * value; }\n"
+      }
+    },
+    "cpp-compile-03": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nnamespace math { int twice(int value) { return value * 2; } }\n"
+      }
+    },
+    "cpp-logic-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint clamp_level(int value) { if (value < 0) return 0; if (value > 10) return 10; return value; }\n"
+      }
+    },
+    "cpp-logic-02": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint max_of_three(int a, int b, int c) { int m=a; if(b>m)m=b; if(c>m)m=c; return m; }\n"
+      }
+    },
+    "cpp-logic-03": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint discounted(int cents, int percent) { return cents * (100-percent) / 100; }\n"
+      }
+    },
+    "qt-signal-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nCounter::Counter(QObject* parent) : QObject(parent) { connect(this, &Counter::pressed, this, &Counter::onPressed); }\nvoid Counter::click() { emit pressed(); }\nvoid Counter::onPressed() { ++value_; emit changed(value_); }\n"
+      }
+    },
+    "qt-signal-02": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nCounter::Counter(QObject* parent) : QObject(parent) { connect(this, &Counter::pressed, this, &Counter::onPressed); }\nvoid Counter::click() { emit pressed(); }\nvoid Counter::onPressed() { ++value_; emit changed(value_); }\n"
+      }
+    },
+    "cmake-01": {
+      "files": {
+        "cmake/Subject.cmake": "add_library(subject STATIC src/subject.cpp src/subject.h src/helper.cpp)\ntarget_include_directories(subject PUBLIC \"${CMAKE_CURRENT_SOURCE_DIR}/src\")\n"
+      }
+    },
+    "cmake-02": {
+      "files": {
+        "cmake/Subject.cmake": "add_library(subject STATIC src/subject.cpp src/subject.h)\ntarget_include_directories(subject PUBLIC \"${CMAKE_CURRENT_SOURCE_DIR}/src\")\n"
+      }
+    },
+    "unit-test-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint parse_count(const std::string& text) { if(text.empty())return -1; for(char c:text)if(c<'0'||c>'9')return -1; try { return std::stoi(text); } catch (...) { return -1; } }\n"
+      }
+    },
+    "unit-test-02": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nbool leap_year(int year) { return year % 400 == 0 || (year % 4 == 0 && year % 100 != 0); }\n"
+      }
+    },
+    "analysis-01": {
+      "files": {},
+      "answer": {
+        "files": [
+          "src/main.cpp",
+          "src/controller.h",
+          "src/controller.cpp",
+          "src/ui.cpp",
+          "src/counter.h",
+          "src/counter.cpp"
+        ],
+        "symbols": [
+          "main",
+          "onClicked",
+          "Controller::increment",
+          "Counter::increment"
+        ],
+        "relations": [
+          {
+            "caller": "main",
+            "callee": "onClicked"
+          },
+          {
+            "caller": "onClicked",
+            "callee": "Controller::increment"
+          },
+          {
+            "caller": "Controller::increment",
+            "callee": "Counter::increment"
+          }
+        ]
+      }
+    },
+    "cross-file-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint subtotal(int unit, int quantity) { return unit * quantity; }\n",
+        "src/subject.h": "#pragma once\nint subtotal(int unit, int quantity);\nint order_total(int unit, int quantity);\n",
+        "src/app.cpp": "#include \"subject.h\"\nint order_total(int unit, int quantity) { return subtotal(unit, quantity); }\n"
+      }
+    },
+    "repair-01": {
+      "files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint positive_part(int value) { return value < 0 ? 0 : value; }\n"
+      },
+      "initial_files": {
+        "src/subject.cpp": "#include \"subject.h\"\nint positive_part(int value) { return value; }\n"
+      }
+    }
+  }
+}

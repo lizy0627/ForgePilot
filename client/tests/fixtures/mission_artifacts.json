@@ -1,0 +1,273 @@
+{
+  "task_id": "10000000-0000-4000-a000-000000000001",
+  "items": [
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000002",
+      "artifact_type": "TaskSpec",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "9fd569da0e5b677f83514e0686aa3fdc6e820114e1151a4bb596eff1f313c780",
+      "content": {
+        "task_type": "bug_fix",
+        "title": "Stop background worker",
+        "objective": "Cancel work before teardown.",
+        "repository": {
+          "base_ref": "HEAD",
+          "toolchain_profile": "windows-msvc-qt6"
+        },
+        "problem": {
+          "observed_behavior": "Worker continues after close.",
+          "expected_behavior": "Worker stops safely.",
+          "reproduction_steps": [
+            "Start work",
+            "Close window"
+          ]
+        },
+        "acceptance_criteria": [
+          {
+            "id": "AC-1",
+            "description": "Worker stops.",
+            "verification": "protected_test"
+          },
+          {
+            "id": "AC-2",
+            "description": "Build remains green.",
+            "verification": "build"
+          }
+        ],
+        "allowed_scope": {
+          "path_patterns": [
+            "src/**",
+            "tests/**"
+          ],
+          "max_changed_files": 8
+        },
+        "forbidden_scope": [
+          ".git/**"
+        ],
+        "test_policy": {
+          "existing_tests_read_only": true,
+          "allow_new_tests": true,
+          "modifiable_existing_test_patterns": []
+        },
+        "data_policy": {
+          "cloud_model_allowed": false,
+          "external_mcp_allowed": false
+        },
+        "assumptions": [],
+        "risk_level": "medium"
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000007",
+      "artifact_type": "EvidenceBundle",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "0670f64151ad1f835ce49c4ea3aa2cfa479ccd08599fdf397f9a5e2fc79eb727",
+      "content": {
+        "items": [
+          {
+            "evidence_id": "EV-1",
+            "claim": "No cancellation call.",
+            "path": "src/window.cpp",
+            "start_line": 10,
+            "end_line": 20,
+            "file_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "symbol": "Window::~Window",
+            "source": "local_repository",
+            "confidence": 0.9,
+            "reason": "Only UI cleanup is present."
+          }
+        ],
+        "summary": "Destructor omits cancellation."
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000003",
+      "artifact_type": "ExecutionPlan",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "03269415282d13e6398ed62bf973c5c0708e6694a09b168b28862864cfb69f9b",
+      "content": {
+        "task_spec_artifact_id": "10000000-0000-4000-a000-000000000002",
+        "steps": [
+          {
+            "step_id": "STEP-1",
+            "owner": "implementer.v1",
+            "depends_on": [],
+            "expected_files": [
+              "src/window.cpp"
+            ],
+            "action": "Cancel worker during teardown.",
+            "verification": [
+              "protected_test"
+            ],
+            "risk": "Shutdown ordering.",
+            "adds_tests": true,
+            "acceptance_criteria_ids": [
+              "AC-1"
+            ]
+          },
+          {
+            "step_id": "STEP-2",
+            "owner": "implementer.v1",
+            "depends_on": [
+              "STEP-1"
+            ],
+            "expected_files": [
+              "tests/window_test.cpp"
+            ],
+            "action": "Build and run regression tests.",
+            "verification": [
+              "build",
+              "ctest"
+            ],
+            "risk": "Test timing.",
+            "adds_tests": true,
+            "acceptance_criteria_ids": [
+              "AC-2"
+            ]
+          }
+        ],
+        "summary": "Cancel, then verify."
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000004",
+      "artifact_type": "ChangeSet",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "ed6400c3e830d050e2b8b75b24e01890882010546625547abd68ceffd799fa54",
+      "content": {
+        "execution_plan_artifact_id": "10000000-0000-4000-a000-000000000003",
+        "files": [
+          {
+            "path": "src/window.cpp",
+            "change_type": "modified",
+            "unified_diff": "@@ -1 +1 @@\n-old\n+new",
+            "before_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "after_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "plan_step_ids": [
+              "STEP-1"
+            ],
+            "acceptance_criteria_ids": [
+              "AC-1"
+            ],
+            "test_change": "none"
+          }
+        ],
+        "requires_additional_approval": false,
+        "summary": "Cancel worker and test it."
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000005",
+      "artifact_type": "ValidationReport",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "3abb560510585d17d8b58e1c32db61a5b2aeecb1e2cb9d929e67433c7ab47248",
+      "content": {
+        "toolchain_profile": "windows-msvc-qt6",
+        "commands": [
+          {
+            "kind": "test",
+            "command_summary": "ctest",
+            "started_at": "2026-10-19T01:00:00Z",
+            "finished_at": "2026-10-19T01:01:00Z",
+            "exit_code": 0,
+            "output_summary": "All passed."
+          }
+        ],
+        "status": "passed",
+        "compile_errors": [],
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "hidden_oracle": "passed",
+        "test_integrity": "passed",
+        "failure_classification": "none",
+        "log_artifact_ids": [],
+        "summary": "Validation passed."
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000006",
+      "artifact_type": "ReviewReport",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "1621df7a69d6938946de9c2f037c11fbedc9d952e3f02ace62d75686db0d63f7",
+      "content": {
+        "verdict": "approve",
+        "acceptance_criteria": [
+          {
+            "criterion_id": "AC-1",
+            "status": "met",
+            "evidence": "Protected test passes."
+          },
+          {
+            "criterion_id": "AC-2",
+            "status": "met",
+            "evidence": "Build passes."
+          }
+        ],
+        "blocking_issues": [],
+        "non_blocking_suggestions": [],
+        "test_review": "Tests are intact.",
+        "security_review": "No new privilege.",
+        "recommend_delivery": true,
+        "summary": "Ready."
+      }
+    },
+    {
+      "artifact_id": "10000000-0000-4000-a000-000000000008",
+      "artifact_type": "DeliveryBundle",
+      "schema_version": "1.0",
+      "task_id": "10000000-0000-4000-a000-000000000001",
+      "producer": "orchestrator.v1",
+      "producer_node": "test-node",
+      "created_at": "2026-10-27T08:00:00Z",
+      "parent_artifact_ids": [],
+      "content_sha256": "5aa12b7f80b03681521b4845b21d816ee0bfe9e02dfc7754b52c477e55b5ef32",
+      "content": {
+        "change_set_artifact_id": "10000000-0000-4000-a000-000000000004",
+        "validation_report_artifact_id": "10000000-0000-4000-a000-000000000005",
+        "review_report_artifact_id": "10000000-0000-4000-a000-000000000006",
+        "commit": null,
+        "build_test_summary": "All passed.",
+        "reviewer_conclusion": "Approved.",
+        "changed_files": [
+          "src/window.cpp"
+        ],
+        "usage_instructions": "Build and run normally.",
+        "risks": [
+          "Shutdown timing."
+        ],
+        "rollback": "Revert the patch.",
+        "patch_path": null
+      }
+    }
+  ]
+}

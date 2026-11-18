@@ -1,0 +1,51 @@
+{
+  "files": {
+    "init/init_repository.py": "05499613c929964755315eb862af54732830a3c2767f212b4c2735f8b82e7144",
+    "protected_oracles/bug_float_trailing.py": "bec58d6834444a57c47464abd98f71bf0d3fe5653ca7809fc9e316bac7fa2007",
+    "protected_oracles/bug_pkgconfig_absolute.py": "1428abdbedae8d20c0f4e9ff282ab73eb5dffc6ca0dc65f8f89f00fbd39c6014",
+    "protected_oracles/bug_unmatched_short.py": "3ed6fba100100f108b434230495d4f367f5ceea20e7406a3e681d11728003557",
+    "protected_oracles/common.py": "cbc3e375ff7e7f71230e25a42c8fc9e8d6e277c8b6cb7037bd2147534c83c4a0",
+    "protected_oracles/feature_ordered_arguments.py": "c1e7f47d92e76a803b02fe05e1e79ee61305999709e77036dff37aa875ed0a2b",
+    "protected_oracles/feature_string_view.py": "f49f3bd6ed99ddc1d910bb63587475a311820aa4116dcc78f6ef61ed6490f8e5",
+    "tasks.json": "f9265997771cc1904c1cc4c58aa0b508e14ff74df4ff4d1ed48d1cd3193ad6a5"
+  },
+  "sha256": "6380aa6b28545c61fa9a2a52db8eca6b11ceba52d7f0bab87ad57e5b22e06811",
+  "tasks": [
+    {
+      "base_commit": "a150450486700ae28a44f0667cf83f65de2d258b",
+      "id": "real-bug-01",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/312",
+      "kind": "bug",
+      "repository_url": "https://github.com/jarro2783/cxxopts"
+    },
+    {
+      "base_commit": "ac6d4702b6d28fe662ea537eb92f7286aa088e21",
+      "id": "real-bug-02",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/332",
+      "kind": "bug",
+      "repository_url": "https://github.com/jarro2783/cxxopts"
+    },
+    {
+      "base_commit": "639cdbad93d45e74fd781e4cf6b0ac798eeec2aa",
+      "id": "real-bug-03",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/506",
+      "kind": "bug",
+      "repository_url": "https://github.com/jarro2783/cxxopts"
+    },
+    {
+      "base_commit": "f0406578bde4a942556a5f09168b9662287926af",
+      "id": "real-feature-01",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/74",
+      "kind": "feature",
+      "repository_url": "https://github.com/jarro2783/cxxopts"
+    },
+    {
+      "base_commit": "781e2dbe5d0aadaac9223ba35d3280f66e047761",
+      "id": "real-feature-02",
+      "issue_url": "https://github.com/zeux/pugixml/issues/640",
+      "kind": "feature",
+      "repository_url": "https://github.com/zeux/pugixml"
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,367 @@
+{
+  "$defs": {
+    "AllowedScope": {
+      "additionalProperties": false,
+      "properties": {
+        "max_changed_files": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Changed Files",
+          "type": "integer"
+        },
+        "path_patterns": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Path Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path_patterns",
+        "max_changed_files"
+      ],
+      "title": "AllowedScope",
+      "type": "object"
+    },
+    "AnalysisCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 2048,
+          "minLength": 8,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 32,
+          "pattern": "^AC-[1-9][0-9]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "verification": {
+          "enum": [
+            "build",
+            "test",
+            "ctest",
+            "protected_test",
+            "static_analysis",
+            "inspection",
+            "manual"
+          ],
+          "title": "Verification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "verification"
+      ],
+      "title": "AnalysisCriterion",
+      "type": "object"
+    },
+    "DataPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_model_allowed": {
+          "default": false,
+          "title": "Cloud Model Allowed",
+          "type": "boolean"
+        },
+        "external_mcp_allowed": {
+          "default": false,
+          "title": "External Mcp Allowed",
+          "type": "boolean"
+        }
+      },
+      "title": "DataPolicy",
+      "type": "object"
+    },
+    "RepositorySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "base_ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Base Ref",
+          "type": "string"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_ref",
+        "toolchain_profile"
+      ],
+      "title": "RepositorySpec",
+      "type": "object"
+    },
+    "TaskProblem": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Expected Behavior",
+          "type": "string"
+        },
+        "observed_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Observed Behavior",
+          "type": "string"
+        },
+        "reproduction_steps": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Reproduction Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "observed_behavior",
+        "expected_behavior"
+      ],
+      "title": "TaskProblem",
+      "type": "object"
+    },
+    "TestPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_new_tests": {
+          "default": true,
+          "title": "Allow New Tests",
+          "type": "boolean"
+        },
+        "existing_tests_read_only": {
+          "default": true,
+          "title": "Existing Tests Read Only",
+          "type": "boolean"
+        },
+        "modifiable_existing_test_patterns": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Modifiable Existing Test Patterns",
+          "type": "array"
+        }
+      },
+      "title": "TestPolicy",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/agent-draft-task-spec-output.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "task_type": {
+            "const": "bug_fix"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "acceptance_criteria": {
+            "contains": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "verification": {
+                      "const": "protected_test"
+                    }
+                  },
+                  "required": [
+                    "verification"
+                  ]
+                },
+                {
+                  "properties": {
+                    "description": {
+                      "pattern": "[Rr][Ee][Gg][Rr][Ee][Ss][Ss][Ii][Oo][Nn]|回归"
+                    },
+                    "verification": {
+                      "enum": [
+                        "test",
+                        "ctest"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "verification",
+                    "description"
+                  ]
+                }
+              ]
+            }
+          },
+          "problem": {
+            "properties": {
+              "reproduction_steps": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "reproduction_steps"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "acceptance_criteria": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "verification": {
+                "const": "build"
+              }
+            },
+            "required": [
+              "verification"
+            ]
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "verification": {
+                "enum": [
+                  "test",
+                  "ctest",
+                  "protected_test"
+                ]
+              }
+            },
+            "required": [
+              "verification"
+            ]
+          }
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/AnalysisCriterion"
+      },
+      "maxItems": 64,
+      "minItems": 2,
+      "title": "Acceptance Criteria",
+      "type": "array"
+    },
+    "allowed_scope": {
+      "$ref": "#/$defs/AllowedScope"
+    },
+    "assumptions": {
+      "items": {
+        "maxLength": 8192,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "data_policy": {
+      "$ref": "#/$defs/DataPolicy"
+    },
+    "forbidden_scope": {
+      "items": {
+        "maxLength": 512,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Forbidden Scope",
+      "type": "array"
+    },
+    "objective": {
+      "maxLength": 8192,
+      "minLength": 1,
+      "title": "Objective",
+      "type": "string"
+    },
+    "problem": {
+      "$ref": "#/$defs/TaskProblem"
+    },
+    "repository": {
+      "$ref": "#/$defs/RepositorySpec"
+    },
+    "risk_level": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "title": "Risk Level",
+      "type": "string"
+    },
+    "risks": {
+      "items": {
+        "maxLength": 8192,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Risks",
+      "type": "array"
+    },
+    "task_type": {
+      "enum": [
+        "bug_fix",
+        "feature"
+      ],
+      "title": "Task Type",
+      "type": "string"
+    },
+    "test_policy": {
+      "$ref": "#/$defs/TestPolicy"
+    },
+    "title": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_type",
+    "title",
+    "objective",
+    "repository",
+    "problem",
+    "acceptance_criteria",
+    "allowed_scope",
+    "forbidden_scope",
+    "test_policy",
+    "data_policy",
+    "assumptions",
+    "risks",
+    "risk_level"
+  ],
+  "title": "AnalysisTaskSpec",
+  "type": "object"
+}

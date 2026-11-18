@@ -1,0 +1,1684 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "verification": {
+          "enum": [
+            "build",
+            "test",
+            "ctest",
+            "protected_test",
+            "static_analysis",
+            "inspection",
+            "manual"
+          ],
+          "title": "Verification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "verification"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "AllowedScope": {
+      "additionalProperties": false,
+      "properties": {
+        "max_changed_files": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Changed Files",
+          "type": "integer"
+        },
+        "path_patterns": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Path Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path_patterns",
+        "max_changed_files"
+      ],
+      "title": "AllowedScope",
+      "type": "object"
+    },
+    "ChangeSet": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_plan_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Execution Plan Artifact Id",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ChangedFile"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Files",
+          "type": "array"
+        },
+        "requires_additional_approval": {
+          "default": false,
+          "title": "Requires Additional Approval",
+          "type": "boolean"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution_plan_artifact_id",
+        "files",
+        "summary"
+      ],
+      "title": "ChangeSet",
+      "type": "object"
+    },
+    "ChangeSetArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "ChangeSet",
+          "default": "ChangeSet",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ChangeSet"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "ChangeSetArtifact",
+      "type": "object"
+    },
+    "ChangedFile": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria_ids": {
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria Ids",
+          "type": "array"
+        },
+        "after_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After Sha256"
+        },
+        "before_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Sha256"
+        },
+        "change_type": {
+          "enum": [
+            "added",
+            "modified",
+            "deleted"
+          ],
+          "title": "Change Type",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "plan_step_ids": {
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Plan Step Ids",
+          "type": "array"
+        },
+        "test_change": {
+          "default": "none",
+          "enum": [
+            "none",
+            "new_test",
+            "existing_test",
+            "production_and_test"
+          ],
+          "title": "Test Change",
+          "type": "string"
+        },
+        "unified_diff": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "title": "Unified Diff",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change_type",
+        "unified_diff",
+        "plan_step_ids",
+        "acceptance_criteria_ids"
+      ],
+      "title": "ChangedFile",
+      "type": "object"
+    },
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command_summary": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Command Summary",
+          "type": "string"
+        },
+        "exit_code": {
+          "maximum": 2147483647,
+          "minimum": -2147483648,
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "finished_at": {
+          "maxLength": 64,
+          "title": "Finished At",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "configure",
+            "build",
+            "test",
+            "protected_test",
+            "integrity",
+            "custom"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "output_summary": {
+          "default": "",
+          "maxLength": 8192,
+          "title": "Output Summary",
+          "type": "string"
+        },
+        "started_at": {
+          "maxLength": 64,
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "command_summary",
+        "started_at",
+        "finished_at",
+        "exit_code"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "CriterionReview": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "evidence": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Evidence",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "met",
+            "not_met",
+            "not_verified"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "status",
+        "evidence"
+      ],
+      "title": "CriterionReview",
+      "type": "object"
+    },
+    "DataPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_model_allowed": {
+          "default": false,
+          "title": "Cloud Model Allowed",
+          "type": "boolean"
+        },
+        "external_mcp_allowed": {
+          "default": false,
+          "title": "External Mcp Allowed",
+          "type": "boolean"
+        }
+      },
+      "title": "DataPolicy",
+      "type": "object"
+    },
+    "DeliveryBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "build_test_summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Build Test Summary",
+          "type": "string"
+        },
+        "change_set_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Change Set Artifact Id",
+          "type": "string"
+        },
+        "changed_files": {
+          "items": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Changed Files",
+          "type": "array"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{7,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "patch_path": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Patch Path"
+        },
+        "review_report_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Review Report Artifact Id",
+          "type": "string"
+        },
+        "reviewer_conclusion": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Reviewer Conclusion",
+          "type": "string"
+        },
+        "risks": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Risks",
+          "type": "array"
+        },
+        "rollback": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Rollback",
+          "type": "string"
+        },
+        "usage_instructions": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Usage Instructions",
+          "type": "string"
+        },
+        "validation_report_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Validation Report Artifact Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "change_set_artifact_id",
+        "validation_report_artifact_id",
+        "review_report_artifact_id",
+        "build_test_summary",
+        "reviewer_conclusion",
+        "changed_files",
+        "usage_instructions",
+        "rollback"
+      ],
+      "title": "DeliveryBundle",
+      "type": "object"
+    },
+    "DeliveryBundleArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "DeliveryBundle",
+          "default": "DeliveryBundle",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/DeliveryBundle"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "DeliveryBundleArtifact",
+      "type": "object"
+    },
+    "EvidenceBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EvidenceItem"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "summary"
+      ],
+      "title": "EvidenceBundle",
+      "type": "object"
+    },
+    "EvidenceBundleArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "EvidenceBundle",
+          "default": "EvidenceBundle",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/EvidenceBundle"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "EvidenceBundleArtifact",
+      "type": "object"
+    },
+    "EvidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "end_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Line"
+        },
+        "evidence_id": {
+          "maxLength": 32,
+          "pattern": "^EV-[1-9][0-9]*$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "file_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Hash"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "reason": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "local_repository",
+            "rag",
+            "external",
+            "user",
+            "approved_mcp",
+            "tool_output"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "start_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Line"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Symbol"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "claim",
+        "source",
+        "confidence",
+        "reason"
+      ],
+      "title": "EvidenceItem",
+      "type": "object"
+    },
+    "ExecutionPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Steps",
+          "type": "array"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "task_spec_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Spec Artifact Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_spec_artifact_id",
+        "steps",
+        "summary"
+      ],
+      "title": "ExecutionPlan",
+      "type": "object"
+    },
+    "ExecutionPlanArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "ExecutionPlan",
+          "default": "ExecutionPlan",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ExecutionPlan"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "ExecutionPlanArtifact",
+      "type": "object"
+    },
+    "PlanStep": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria_ids": {
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria Ids",
+          "type": "array"
+        },
+        "action": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Action",
+          "type": "string"
+        },
+        "adds_tests": {
+          "title": "Adds Tests",
+          "type": "boolean"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Depends On",
+          "type": "array"
+        },
+        "expected_files": {
+          "default": [],
+          "items": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Expected Files",
+          "type": "array"
+        },
+        "owner": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Owner",
+          "type": "string"
+        },
+        "risk": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Risk",
+          "type": "string"
+        },
+        "step_id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "verification": {
+          "items": {
+            "enum": [
+              "build",
+              "test",
+              "ctest",
+              "protected_test",
+              "static_analysis",
+              "inspection",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Verification",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "owner",
+        "action",
+        "verification",
+        "risk",
+        "adds_tests",
+        "acceptance_criteria_ids"
+      ],
+      "title": "PlanStep",
+      "type": "object"
+    },
+    "RepositorySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "base_ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Base Ref",
+          "type": "string"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_ref",
+        "toolchain_profile"
+      ],
+      "title": "RepositorySpec",
+      "type": "object"
+    },
+    "ReviewIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "issue_id": {
+          "maxLength": 32,
+          "pattern": "^RI-[1-9][0-9]*$",
+          "title": "Issue Id",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "required": [
+        "issue_id",
+        "description"
+      ],
+      "title": "ReviewIssue",
+      "type": "object"
+    },
+    "ReviewReport": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/CriterionReview"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "blocking_issues": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReviewIssue"
+          },
+          "maxItems": 128,
+          "title": "Blocking Issues",
+          "type": "array"
+        },
+        "non_blocking_suggestions": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Non Blocking Suggestions",
+          "type": "array"
+        },
+        "recommend_delivery": {
+          "title": "Recommend Delivery",
+          "type": "boolean"
+        },
+        "security_review": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Security Review",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "test_review": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Test Review",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "approve",
+            "request_changes",
+            "reject"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "acceptance_criteria",
+        "test_review",
+        "security_review",
+        "recommend_delivery",
+        "summary"
+      ],
+      "title": "ReviewReport",
+      "type": "object"
+    },
+    "ReviewReportArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "ReviewReport",
+          "default": "ReviewReport",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ReviewReport"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "ReviewReportArtifact",
+      "type": "object"
+    },
+    "TaskProblem": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Expected Behavior",
+          "type": "string"
+        },
+        "observed_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Observed Behavior",
+          "type": "string"
+        },
+        "reproduction_steps": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Reproduction Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "observed_behavior",
+        "expected_behavior"
+      ],
+      "title": "TaskProblem",
+      "type": "object"
+    },
+    "TaskSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterion"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "allowed_scope": {
+          "$ref": "#/$defs/AllowedScope"
+        },
+        "assumptions": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "data_policy": {
+          "$ref": "#/$defs/DataPolicy",
+          "default": {
+            "cloud_model_allowed": false,
+            "external_mcp_allowed": false
+          }
+        },
+        "forbidden_scope": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Forbidden Scope",
+          "type": "array"
+        },
+        "objective": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Objective",
+          "type": "string"
+        },
+        "problem": {
+          "$ref": "#/$defs/TaskProblem"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositorySpec"
+        },
+        "risk_level": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "risks": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Risks",
+          "type": "array"
+        },
+        "task_type": {
+          "enum": [
+            "bug_fix",
+            "feature",
+            "maintenance"
+          ],
+          "title": "Task Type",
+          "type": "string"
+        },
+        "test_policy": {
+          "$ref": "#/$defs/TestPolicy",
+          "default": {
+            "allow_new_tests": true,
+            "existing_tests_read_only": true,
+            "modifiable_existing_test_patterns": []
+          }
+        },
+        "title": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_type",
+        "title",
+        "objective",
+        "repository",
+        "problem",
+        "acceptance_criteria",
+        "allowed_scope",
+        "risk_level"
+      ],
+      "title": "TaskSpec",
+      "type": "object"
+    },
+    "TaskSpecArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "TaskSpec",
+          "default": "TaskSpec",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/TaskSpec"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "TaskSpecArtifact",
+      "type": "object"
+    },
+    "TestPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_new_tests": {
+          "default": true,
+          "title": "Allow New Tests",
+          "type": "boolean"
+        },
+        "existing_tests_read_only": {
+          "default": true,
+          "title": "Existing Tests Read Only",
+          "type": "boolean"
+        },
+        "modifiable_existing_test_patterns": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Modifiable Existing Test Patterns",
+          "type": "array"
+        }
+      },
+      "title": "TestPolicy",
+      "type": "object"
+    },
+    "ValidationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/CommandResult"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Commands",
+          "type": "array"
+        },
+        "compile_errors": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Compile Errors",
+          "type": "array"
+        },
+        "diff_scope": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Diff Scope",
+          "type": "string"
+        },
+        "failure_classification": {
+          "default": "none",
+          "enum": [
+            "none",
+            "compile",
+            "test",
+            "timeout",
+            "policy",
+            "infrastructure",
+            "cancelled",
+            "unknown",
+            "code_failure",
+            "infrastructure_failure",
+            "policy_failure"
+          ],
+          "title": "Failure Classification",
+          "type": "string"
+        },
+        "hidden_oracle": {
+          "default": "not_run",
+          "enum": [
+            "not_run",
+            "passed",
+            "failed"
+          ],
+          "title": "Hidden Oracle",
+          "type": "string"
+        },
+        "log_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Log Artifact Ids",
+          "type": "array"
+        },
+        "pipeline_stages": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Pipeline Stages",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "test_integrity": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Test Integrity",
+          "type": "string"
+        },
+        "tests_failed": {
+          "minimum": 0,
+          "title": "Tests Failed",
+          "type": "integer"
+        },
+        "tests_passed": {
+          "minimum": 0,
+          "title": "Tests Passed",
+          "type": "integer"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        },
+        "workspace_integrity": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Workspace Integrity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "toolchain_profile",
+        "commands",
+        "status",
+        "tests_passed",
+        "tests_failed",
+        "summary"
+      ],
+      "title": "ValidationReport",
+      "type": "object"
+    },
+    "ValidationReportArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "ValidationReport",
+          "default": "ValidationReport",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ValidationReport"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "ValidationReportArtifact",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/artifact-envelope.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "ChangeSet": "#/$defs/ChangeSetArtifact",
+      "DeliveryBundle": "#/$defs/DeliveryBundleArtifact",
+      "EvidenceBundle": "#/$defs/EvidenceBundleArtifact",
+      "ExecutionPlan": "#/$defs/ExecutionPlanArtifact",
+      "ReviewReport": "#/$defs/ReviewReportArtifact",
+      "TaskSpec": "#/$defs/TaskSpecArtifact",
+      "ValidationReport": "#/$defs/ValidationReportArtifact"
+    },
+    "propertyName": "artifact_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/TaskSpecArtifact"
+    },
+    {
+      "$ref": "#/$defs/EvidenceBundleArtifact"
+    },
+    {
+      "$ref": "#/$defs/ExecutionPlanArtifact"
+    },
+    {
+      "$ref": "#/$defs/ChangeSetArtifact"
+    },
+    {
+      "$ref": "#/$defs/ValidationReportArtifact"
+    },
+    {
+      "$ref": "#/$defs/ReviewReportArtifact"
+    },
+    {
+      "$ref": "#/$defs/DeliveryBundleArtifact"
+    }
+  ]
+}

@@ -1,0 +1,1095 @@
+"""Schema-8 persistence repositories for future graph orchestration.
+
+This module deliberately contains persistence only.  It does not schedule or run graph
+nodes; callers use the repository methods instead of embedding SQL in orchestration code.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
+import os
+import re
+import sqlite3
+from typing import Any, Mapping
+
+from .artifacts.canonical import canonical_json_bytes
+from .errors import ForgePilotError
+from .history_cursor import decode_cursor, encode_cursor
+from .mission_events import append_mission_event
+from .path_identity import path_key
+
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+
+
+def create_mission_schema(db: sqlite3.Connection) -> None:
+    """Create the schema-8 graph/artifact persistence surface."""
+    statements = (
+        """CREATE TABLE task_graph_runs(
+            task_id TEXT PRIMARY KEY,
+            graph_id TEXT NOT NULL,
+            graph_version INTEGER NOT NULL CHECK(graph_version >= 1),
+            status TEXT NOT NULL,
+            current_revision INTEGER NOT NULL DEFAULT 1 CHECK(current_revision >= 1),
+            task_spec_artifact_id TEXT,
+            plan_artifact_id TEXT,
+            scope_hash TEXT CHECK(scope_hash IS NULL OR length(scope_hash) = 64),
+            workspace_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            finished_at TEXT)""",
+        """CREATE TABLE task_node_attempts(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id),
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK(attempt >= 1),
+            node_type TEXT NOT NULL,
+            agent_id TEXT,
+            status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) = 64),
+            input_hash TEXT NOT NULL CHECK(length(input_hash) = 64),
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0),
+            error_code TEXT,
+            error_summary TEXT,
+            checkpoint_id TEXT,
+            PRIMARY KEY(task_id,node_id,attempt))""",
+        """CREATE TABLE artifacts(
+            artifact_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            producer TEXT NOT NULL,
+            producer_node TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+            payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+            storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline','external')),
+            inline_json BLOB,
+            relative_path TEXT,
+            size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+            CHECK((storage_kind='inline' AND inline_json IS NOT NULL AND relative_path IS NULL)
+               OR (storage_kind='external' AND inline_json IS NULL AND relative_path IS NOT NULL)))""",
+        "CREATE INDEX artifacts_task_created ON artifacts(task_id,created_at,artifact_id)",
+        """CREATE TABLE artifact_relations(
+            parent_artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE RESTRICT,
+            child_artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE RESTRICT,
+            relation TEXT NOT NULL CHECK(relation IN ('derived_from','revision_of')),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(parent_artifact_id,child_artifact_id,relation),
+            CHECK(parent_artifact_id <> child_artifact_id))""",
+        "CREATE INDEX artifact_relations_child ON artifact_relations(child_artifact_id,parent_artifact_id)",
+        """CREATE TABLE approvals(
+            approval_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id),
+            approval_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('approved','rejected','invalidated')),
+            task_spec_artifact_id TEXT NOT NULL,
+            task_spec_hash TEXT NOT NULL CHECK(length(task_spec_hash) = 64),
+            plan_artifact_id TEXT NOT NULL,
+            plan_hash TEXT NOT NULL CHECK(length(plan_hash) = 64),
+            scope_hash TEXT NOT NULL CHECK(length(scope_hash) = 64),
+            approved_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            invalidated_at TEXT,
+            invalidation_reason TEXT)""",
+        "CREATE INDEX approvals_task_created ON approvals(task_id,created_at,approval_id)",
+        """CREATE TABLE model_calls(
+            call_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            node_id TEXT,
+            role TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL CHECK(length(input_hash) = 64),
+            tool_schema_json TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+            input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+            output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+            total_tokens INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0),
+            error_code TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+            fallback_model TEXT,
+            response_hash TEXT CHECK(response_hash IS NULL OR length(response_hash) = 64),
+            created_at TEXT NOT NULL)""",
+        "CREATE INDEX model_calls_task_created ON model_calls(task_id,created_at,call_id)",
+        """CREATE TABLE checkpoints(
+            checkpoint_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            workspace_id TEXT,
+            commit_hash TEXT,
+            artifact_id TEXT,
+            created_at TEXT NOT NULL,
+            error_code TEXT)""",
+        "CREATE INDEX checkpoints_task_created ON checkpoints(task_id,created_at,checkpoint_id)",
+        """CREATE TABLE workspace_records(
+            workspace_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            repository_path TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_ref TEXT NOT NULL,
+            head_commit TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            released_at TEXT)""",
+        "CREATE UNIQUE INDEX workspace_records_task ON workspace_records(task_id)",
+        """CREATE TABLE validation_runs(
+            validation_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK(attempt >= 1),
+            status TEXT NOT NULL,
+            report_artifact_id TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0),
+            error_code TEXT,
+            UNIQUE(task_id,attempt))""",
+        """CREATE TABLE security_events(
+            event_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            event_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            attributes_json TEXT NOT NULL)""",
+        "CREATE INDEX security_events_task_time ON security_events(task_id,occurred_at,event_id)",
+        """CREATE TRIGGER approvals_stale_after_graph_change
+            AFTER UPDATE OF task_spec_artifact_id,plan_artifact_id,scope_hash ON task_graph_runs
+            WHEN OLD.task_spec_artifact_id IS NOT NEW.task_spec_artifact_id
+              OR OLD.plan_artifact_id IS NOT NEW.plan_artifact_id
+              OR OLD.scope_hash IS NOT NEW.scope_hash
+            BEGIN
+                UPDATE approvals SET status='invalidated',invalidated_at=CURRENT_TIMESTAMP,
+                    invalidation_reason='approved_objects_changed'
+                WHERE task_id=NEW.task_id AND status='approved';
+            END""",
+        """CREATE TRIGGER approvals_stale_after_artifact_change
+            AFTER UPDATE OF content_sha256 ON artifacts
+            WHEN OLD.content_sha256 <> NEW.content_sha256
+            BEGIN
+                UPDATE approvals SET status='invalidated',invalidated_at=CURRENT_TIMESTAMP,
+                    invalidation_reason='approved_artifact_changed'
+                WHERE status='approved' AND
+                    (task_spec_artifact_id=NEW.artifact_id OR plan_artifact_id=NEW.artifact_id);
+            END""",
+    )
+    for statement in statements:
+        db.execute(statement)
+
+
+def create_graph_orchestrator_schema(db: sqlite3.Connection) -> None:
+    """Add the durable state/event boundary used by the serial GraphRunner.
+
+    Schema 8 shipped the mission and Artifact records. These tables are kept
+    intact; schema 9 adds the runtime projection and its ordered event log.
+    """
+    statements = (
+        """ALTER TABLE task_graph_runs ADD COLUMN definition_hash TEXT
+            CHECK(definition_hash IS NULL OR length(definition_hash) = 64)""",
+        """CREATE TABLE graph_node_states(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+            result_json TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,node_id))""",
+        """CREATE TABLE graph_run_inputs(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+            artifact_id TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+            PRIMARY KEY(task_id,ordinal),
+            UNIQUE(task_id,artifact_id))""",
+        """CREATE TABLE graph_node_results(
+            task_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) = 64),
+            status TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            policy_action TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,node_id,attempt),
+            FOREIGN KEY(task_id,node_id,attempt)
+                REFERENCES task_node_attempts(task_id,node_id,attempt) ON DELETE CASCADE)""",
+        """CREATE UNIQUE INDEX graph_successful_idempotency_key
+            ON graph_node_results(idempotency_key) WHERE status='succeeded'""",
+        """CREATE TABLE graph_events(
+            task_id TEXT NOT NULL REFERENCES task_graph_runs(task_id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL CHECK(sequence >= 1),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            event_type TEXT NOT NULL,
+            node_id TEXT,
+            attempt INTEGER,
+            state TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,sequence),
+            UNIQUE(task_id,revision))""",
+        "CREATE INDEX graph_events_task_revision ON graph_events(task_id,revision)",
+    )
+    for statement in statements:
+        db.execute(statement)
+
+
+def create_graph_checkpoint_schema(db: sqlite3.Connection) -> None:
+    """Schema 10: immutable node snapshots and explicit startup recovery gates.
+
+    The ordinal is allocated by SQLite, independently of wall-clock timestamps.
+    Legacy checkpoint records remain inspectable but have no node snapshot and
+    therefore cannot authorize recovery.
+    """
+    statements = (
+        """ALTER TABLE task_graph_runs ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0
+            CHECK(recovery_required IN (0,1))""",
+        "ALTER TABLE task_graph_runs ADD COLUMN recovery_plan_json TEXT",
+        "ALTER TABLE task_graph_runs ADD COLUMN definition_json TEXT",
+        """ALTER TABLE task_graph_runs ADD COLUMN policy_hash TEXT
+            CHECK(policy_hash IS NULL OR length(policy_hash) = 64)""",
+        "ALTER TABLE task_node_attempts ADD COLUMN input_artifacts_json TEXT",
+        "ALTER TABLE checkpoints RENAME TO checkpoints_legacy",
+        "DROP INDEX checkpoints_task_created",
+        """CREATE TABLE checkpoints(
+            ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkpoint_id TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            workspace_id TEXT,
+            commit_hash TEXT,
+            artifact_id TEXT,
+            created_at TEXT NOT NULL,
+            error_code TEXT,
+            node_id TEXT,
+            attempt INTEGER CHECK(attempt IS NULL OR attempt >= 1),
+            result_json TEXT,
+            file_hashes_json TEXT,
+            input_artifacts_json TEXT,
+            output_artifacts_json TEXT,
+            idempotency_key TEXT CHECK(idempotency_key IS NULL OR length(idempotency_key) = 64),
+            data_sha256 TEXT CHECK(data_sha256 IS NULL OR length(data_sha256) = 64),
+            UNIQUE(task_id,node_id,attempt),
+            CHECK((node_id IS NULL AND attempt IS NULL AND result_json IS NULL
+                   AND file_hashes_json IS NULL AND input_artifacts_json IS NULL
+                   AND output_artifacts_json IS NULL AND idempotency_key IS NULL
+                   AND data_sha256 IS NULL)
+               OR (node_id IS NOT NULL AND attempt IS NOT NULL AND result_json IS NOT NULL
+                   AND file_hashes_json IS NOT NULL AND input_artifacts_json IS NOT NULL
+                   AND output_artifacts_json IS NOT NULL AND idempotency_key IS NOT NULL
+                   AND data_sha256 IS NOT NULL)))""",
+        """INSERT INTO checkpoints(checkpoint_id,task_id,checkpoint_type,status,workspace_id,
+                   commit_hash,artifact_id,created_at,error_code)
+            SELECT checkpoint_id,task_id,checkpoint_type,status,workspace_id,
+                   commit_hash,artifact_id,created_at,error_code FROM checkpoints_legacy ORDER BY rowid""",
+        "DROP TABLE checkpoints_legacy",
+        "CREATE INDEX checkpoints_task_created ON checkpoints(task_id,created_at,checkpoint_id)",
+        "CREATE INDEX checkpoints_task_ordinal ON checkpoints(task_id,ordinal)",
+        """CREATE TABLE checkpoint_intents(
+            checkpoint_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK(attempt >= 1),
+            payload_json TEXT NOT NULL,
+            data_sha256 TEXT NOT NULL CHECK(length(data_sha256) = 64),
+            UNIQUE(task_id,node_id,attempt),
+            FOREIGN KEY(task_id,node_id,attempt)
+                REFERENCES task_node_attempts(task_id,node_id,attempt))""",
+    )
+    for statement in statements:
+        db.execute(statement)
+
+
+def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
+    """Make abandoned running nodes explicit; execution is never silently resumed."""
+    stamp = stamp or _now()
+    # Existing graph protocols keep their original revisions. V2 missions must
+    # expose the recovery gate even if the process stopped at an idle human gate
+    # and therefore no running-node interruption event will be generated below.
+    v2_recovery = db.execute("""SELECT task_id FROM task_graph_runs g
+        WHERE recovery_required=0 AND status NOT IN ('succeeded','failed','cancelled','skipped','completed')
+        AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchall()
+    # A process may stop between nodes, with no running node at all. Every
+    # unfinished graph still needs a newly reviewed recovery plan on startup.
+    db.execute(
+        """UPDATE task_graph_runs SET recovery_required=1,recovery_plan_json=NULL
+           WHERE status NOT IN ('succeeded','failed','cancelled','skipped','completed')"""
+    )
+    tasks = db.execute(
+        """SELECT DISTINCT n.task_id FROM graph_node_states n
+           JOIN task_graph_runs g ON g.task_id=n.task_id
+           WHERE n.status='running' AND g.status NOT IN
+           ('succeeded','failed','cancelled','skipped','completed') ORDER BY n.task_id"""
+    ).fetchall()
+    for task_row in tasks:
+        task_id = task_row[0]
+        running = db.execute(
+            "SELECT node_id,attempt FROM graph_node_states WHERE task_id=? AND status='running' ORDER BY node_id",
+            (task_id,),
+        ).fetchall()
+        run = db.execute(
+            "SELECT current_revision FROM task_graph_runs WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if run is None:
+            continue
+        revision = run[0]
+        sequence = db.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)
+        ).fetchone()[0]
+        for node_id, attempt in running:
+            revision += 1
+            sequence += 1
+            payload = json.dumps(
+                {"from": "running", "to": "interrupted", "failure_kind": "application_interrupted"},
+                sort_keys=True, separators=(",", ":"),
+            )
+            db.execute(
+                "UPDATE graph_node_states SET status='interrupted',updated_at=? WHERE task_id=? AND node_id=?",
+                (stamp, task_id, node_id),
+            )
+            db.execute(
+                """UPDATE task_node_attempts SET status='interrupted',finished_at=?,error_code=?,error_summary=?
+                   WHERE task_id=? AND node_id=? AND attempt=? AND finished_at IS NULL""",
+                (stamp, "application_interrupted", "Previous process stopped during node execution",
+                 task_id, node_id, attempt),
+            )
+            db.execute(
+                """INSERT INTO graph_events(task_id,sequence,revision,event_type,node_id,attempt,state,payload_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (task_id, sequence, revision, "node_state_changed", node_id, attempt,
+                 "interrupted", payload, stamp),
+            )
+        db.execute(
+            "UPDATE task_graph_runs SET status='interrupted',current_revision=?,updated_at=? WHERE task_id=?",
+            (revision, stamp, task_id),
+        )
+    for task in v2_recovery:
+        task_id = task[0]
+        revision = db.execute("SELECT current_revision+1 FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()[0]
+        sequence = db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+        db.execute("""INSERT INTO graph_events(task_id,sequence,revision,event_type,payload_json,created_at)
+            VALUES(?,?,?,'task.recovery_required',?,?)""", (task_id, sequence, revision,
+            '{"_actor":"system","reason":"application_interrupted","recovery_required":true}', stamp))
+        db.execute("UPDATE task_graph_runs SET current_revision=?,updated_at=? WHERE task_id=?", (revision, stamp, task_id))
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _identifier(value: str, label: str) -> str:
+    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
+        raise ForgePilotError("storage_record", f"Invalid {label}")
+    return value
+
+
+def _hash(value: str | None, label: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise ForgePilotError("storage_record", f"Invalid {label}")
+    return value
+
+
+def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+class MissionRepository:
+    """Typed write/read boundary for schema-8 orchestration records."""
+
+    _GRAPH_FIELDS = {
+        "status", "task_spec_artifact_id", "plan_artifact_id", "scope_hash",
+        "workspace_id", "finished_at",
+    }
+
+    def __init__(self, event_store) -> None:
+        self.events = event_store
+
+    @contextmanager
+    def consistent_view(self):
+        """Serialize cross-repository checks without nesting their transactions.
+
+        Artifact and checkpoint methods retain their own durable commit points;
+        callers must not interpret this consistency boundary as a transaction.
+        """
+        with self.events._lock:
+            yield
+
+    def metadata(self, task_id):
+        with self.events._lock:
+            row = self.events._db.execute("SELECT payload_json FROM graph_events WHERE task_id=? "
+                "AND event_type='task.created' ORDER BY sequence LIMIT 1", (task_id,)).fetchone()
+            if row is None:
+                raise ForgePilotError("unknown_mission", "Mission does not exist")
+            return json.loads(row[0])
+
+    def tool_context(self, task_id, metadata):
+        """Read durable capability observations without starting services or tools."""
+        context = {key: dict(value) for key, value in metadata.get("tool_context", {}).items()}
+        with self.events._lock:
+            for component in ("rag", "clangd", "mcp"):
+                row = self.events._db.execute("SELECT payload_json FROM graph_events WHERE task_id=? "
+                    "AND event_type='task.tools_updated' AND json_extract(payload_json,'$.component')=? "
+                    "ORDER BY sequence DESC LIMIT 1", (task_id, component)).fetchone()
+                if row:
+                    context.setdefault(component, {}).update(json.loads(row[0])["status"])
+                    context[component]["used"] = bool(self.events._db.execute(
+                        "SELECT 1 FROM graph_events WHERE task_id=? AND event_type='task.tools_updated' "
+                        "AND json_extract(payload_json,'$.component')=? "
+                        "AND json_extract(payload_json,'$.status.used')=1 LIMIT 1", (task_id, component)).fetchone())
+        return context
+
+    def list_page(self, limit: int = 20, before: str | None = None, *,
+                  repository_path: str | None = None, status: str | None = None) -> dict[str, Any]:
+        """Read admitted Missions in immutable creation order, without resuming them."""
+        normalized_repository = path_key(repository_path) if repository_path is not None else None
+        filter_hash = sha256(canonical_json_bytes([normalized_repository, status])).hexdigest()
+        boundary = None
+        if before is not None:
+            parts = before.split(".", 2)
+            if len(parts) != 3 or parts[:2] != ["m1", filter_hash]:
+                raise ForgePilotError("invalid_page", "Mission history filters changed; refresh the list")
+            boundary = decode_cursor(parts[2])
+            if boundary is None:
+                raise ForgePilotError("invalid_page", "Mission history cursor is invalid; refresh the list")
+        with self.events._lock:
+            # The admission event is the authority boundary: internal Graph runs
+            # and legacy tasks must never appear as user-created Missions.
+            source = """FROM task_graph_runs g JOIN graph_events e ON e.task_id=g.task_id
+                AND e.sequence=(SELECT MIN(sequence) FROM graph_events
+                    WHERE task_id=g.task_id AND event_type='task.created')"""
+            conditions, params = [], []
+            if repository_path is not None:
+                # A history filter must keep working after a repository moves or
+                # disappears. Normalize spelling, without touching the filesystem.
+                collation = " COLLATE NOCASE" if os.name == "nt" else ""
+                conditions.append("REPLACE(json_extract(e.payload_json,'$.repository_path'),"
+                                  "char(92),'/')" + collation + "=?")
+                params.append(normalized_repository)
+            if status is not None:
+                conditions.append("g.status=?")
+                params.append(status)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            total = self.events._db.execute("SELECT COUNT(*) " + source + where, params).fetchone()[0]
+            if boundary is not None:
+                where += (" AND " if where else " WHERE ") + "(g.created_at,g.task_id)<(?,?)"
+                params.extend(boundary)
+            rows = self.events._db.execute("SELECT g.*,e.payload_json AS metadata_json " + source + where
+                + " ORDER BY g.created_at DESC,g.task_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+            items = []
+            for row in rows[:limit]:
+                metadata = json.loads(row["metadata_json"])
+                item = {key: row[key] for key in ("task_id", "status", "current_revision",
+                    "created_at", "updated_at", "finished_at")}
+                item.update({key: metadata[key] for key in ("repository_path", "request", "task_type",
+                    "orchestration_mode")})
+                item["recovery_required"] = bool(row["recovery_required"])
+                items.append(item)
+            return {"items": items, "total": total,
+                "next_cursor": "m1." + filter_hash + "." + encode_cursor(items[-1]["created_at"], items[-1]["task_id"])
+                    if len(rows) > limit else None}
+
+    def is_admitted(self, task_id):
+        from .mission_events import is_v2_mission
+        with self.events._lock:
+            return is_v2_mission(self.events, task_id)
+
+    def record_observation(self, task_id, kind, data, *, node_id, actor):
+        from .mission_events import append_record_event
+        with self.events._transaction():
+            return append_record_event(self.events, task_id, kind, data, node_id=node_id, actor=actor)
+
+    def mission_view(self, task_id):
+        from .orchestration.analysis_review import AnalysisReviewStore
+        with self.events._lock:
+            metadata = self.metadata(task_id)
+            run = self.get_graph_run(task_id)
+            sequence = self.events._db.execute("SELECT MAX(sequence) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+            review = (AnalysisReviewStore(self.events).get(task_id)
+                      if run["task_spec_artifact_id"] and run["plan_artifact_id"] else None)
+            return metadata, run, sequence, review
+
+    def graph_view(self, task_id):
+        from .orchestration.store import GraphStore
+        with self.events._lock:
+            self.metadata(task_id)
+            return GraphStore(self.events).snapshot(task_id), json.loads(self.get_graph_run(task_id)["definition_json"])
+
+    def owned_artifact(self, task_id, artifact_id):
+        with self.events._lock:
+            owner = self.events._db.execute("SELECT task_id FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+            if owner is None or owner[0] != task_id:
+                raise ForgePilotError("unknown_artifact", "Artifact does not belong to this mission")
+            return self.events.artifacts.get(artifact_id)
+
+    @contextmanager
+    def delivery_reconciliation(self, task_id):
+        """Hold the outcome inspection/publication boundary; never repeat Git."""
+        with self.events._lock:
+            row = self.events._db.execute("""SELECT sequence,event_type,payload_json FROM graph_events
+                WHERE task_id=? AND event_type IN ('workspace.delivery_requested','workspace.delivered',
+                'workspace.delivery_failed') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
+            yield dict(row) if row is not None else None
+
+    def admit_mission(self, task_id, workspace_record, fields):
+        """Commit workspace binding and both admission events as one unit."""
+        record = workspace_record
+        with self.events._transaction():
+            stamp = _now()
+            self.events._db.execute("""INSERT INTO workspace_records(workspace_id,task_id,
+                repository_path,worktree_path,base_ref,head_commit,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""", tuple(record[key] for key in (
+                "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
+            self.events._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
+                                   (record["workspace_id"], task_id))
+            append_mission_event(self.events, task_id, "task.created", fields, actor="user")
+            append_mission_event(self.events, task_id, "workspace.created", {
+                "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
+                "head_commit": record["head_commit"]}, actor="workspace-manager")
+
+    def discard_unadmitted_graph(self, task_id):
+        with self.events._transaction():
+            self.events._db.execute("DELETE FROM task_graph_runs WHERE task_id=?", (task_id,))
+
+    def fail_background(self, task_id, code):
+        with self.events._transaction():
+            row = self.events._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if row is not None and row[0] not in {"cancelled", "failed", "succeeded"}:
+                self.events._db.execute("UPDATE task_graph_runs SET status='failed',finished_at=? WHERE task_id=?", (_now(), task_id))
+                append_mission_event(self.events, task_id, "task.failed", {"error_code": code})
+
+    def _check_mission_revision(self, task_id, revision):
+        from .orchestration.store import GraphStore
+        self.metadata(task_id)
+        if GraphStore(self.events).snapshot(task_id).revision != revision:
+            raise ForgePilotError("mission_revision_conflict", "Mission revision changed; refresh the mission before retrying")
+
+    def request_recovery(self, task_id, expected_revision):
+        with self.events._transaction():
+            self._check_mission_revision(task_id, expected_revision)
+            self.events._db.execute("UPDATE task_graph_runs SET recovery_required=1 WHERE task_id=?", (task_id,))
+            append_mission_event(self.events, task_id, "task.recovery_requested", {}, actor="user")
+
+    def request_delivery(self, task_id, expected_revision, mode, operation_id):
+        with self.events._transaction():
+            self._check_mission_revision(task_id, expected_revision)
+            append_mission_event(self.events, task_id, "workspace.delivery_requested", {
+                "mode": mode, "operation_id": operation_id}, actor="user")
+
+    def record_delivery_outcome(self, task_id, event_type, mode, *, result=None, error_code=None, recovered=False):
+        if event_type not in {"workspace.delivered", "workspace.delivery_failed"}:
+            raise ValueError("Unknown delivery outcome")
+        data = {"mode": mode}
+        if event_type == "workspace.delivery_failed":
+            data["error_code"] = error_code
+        else:
+            data["result"] = result
+        if recovered:
+            data["recovered"] = True
+        with self.events._transaction():
+            append_mission_event(self.events, task_id, event_type, data, actor="user")
+
+    def event_high_water(self, task_id):
+        with self.events._lock:
+            if self.events._db.execute("SELECT 1 FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone() is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            return self.events._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+
+    def event_page(self, task_id, after, limit):
+        with self.events._lock:
+            run = self.events._db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if run is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            rows = self.events._db.execute("""SELECT e.*,a.agent_id FROM graph_events e
+                LEFT JOIN task_node_attempts a ON a.task_id=e.task_id AND a.node_id=e.node_id AND a.attempt=e.attempt
+                WHERE e.task_id=? AND e.sequence>? ORDER BY e.sequence LIMIT ?""", (task_id, after, limit)).fetchall()
+            maximum = self.events._db.execute("SELECT COALESCE(MAX(sequence),0) FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]
+            return dict(run), tuple(dict(row) for row in rows), maximum
+
+    def active_count(self) -> int:
+        """Count admitted, nonterminal Missions, including unloaded recovery runs."""
+        with self.events._lock:
+            return self.events._db.execute("""SELECT count(*) FROM task_graph_runs g
+                WHERE status NOT IN ('succeeded','failed','cancelled','completed','skipped')
+                AND EXISTS(SELECT 1 FROM graph_events e WHERE e.task_id=g.task_id AND e.event_type='task.created')""").fetchone()[0]
+
+    def create_graph_run(self, *, task_id: str, graph_id: str, graph_version: int,
+                         status: str = "pending", task_spec_artifact_id: str | None = None,
+                         plan_artifact_id: str | None = None, scope_hash: str | None = None,
+                         workspace_id: str | None = None, created_at: str | None = None) -> dict[str, Any]:
+        task_id = _identifier(task_id, "task ID")
+        graph_id = _identifier(graph_id, "graph ID")
+        status = _identifier(status, "graph status")
+        if type(graph_version) is not int or graph_version < 1:
+            raise ForgePilotError("storage_record", "Invalid graph version")
+        _hash(scope_hash, "scope hash", optional=True)
+        stamp = created_at or _now()
+        try:
+            with self.events._transaction():
+                self.events._db.execute("""INSERT INTO task_graph_runs(
+                    task_id,graph_id,graph_version,status,current_revision,
+                    task_spec_artifact_id,plan_artifact_id,scope_hash,workspace_id,created_at,updated_at)
+                    VALUES(?,?,?,?,1,?,?,?,?,?,?)""", (
+                    task_id, graph_id, graph_version, status, task_spec_artifact_id,
+                    plan_artifact_id, scope_hash, workspace_id, stamp, stamp,
+                ))
+            return self.get_graph_run(task_id)
+        except sqlite3.IntegrityError:
+            raise ForgePilotError("graph_conflict", "Graph run already exists or is invalid") from None
+
+    def get_graph_run(self, task_id: str) -> dict[str, Any]:
+        task_id = _identifier(task_id, "task ID")
+        with self.events._lock:
+            result = _row(self.events._db.execute(
+                "SELECT * FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone())
+        if result is None:
+            raise ForgePilotError("unknown_graph", "Graph run does not exist")
+        return result
+
+    def update_graph_run(self, task_id: str, *, previous_revision: int, **changes) -> dict[str, Any]:
+        task_id = _identifier(task_id, "task ID")
+        if not changes or set(changes) - self._GRAPH_FIELDS:
+            raise ForgePilotError("storage_record", "Graph update contains unsupported fields")
+        if "status" in changes:
+            _identifier(changes["status"], "graph status")
+        if "scope_hash" in changes:
+            _hash(changes["scope_hash"], "scope hash", optional=True)
+        assignments = ",".join(f"{field}=?" for field in changes)
+        values = [changes[field] for field in changes]
+        try:
+            with self.events._transaction():
+                changed = self.events._db.execute(
+                    f"UPDATE task_graph_runs SET {assignments},current_revision=current_revision+1,updated_at=? "
+                    "WHERE task_id=? AND current_revision=?",
+                    (*values, _now(), task_id, previous_revision),
+                ).rowcount
+                if changed != 1:
+                    raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
+            return self.get_graph_run(task_id)
+        except sqlite3.Error:
+            raise ForgePilotError("graph_storage", "Graph run was not saved") from None
+
+    def start_node_attempt(self, *, task_id: str, node_id: str, attempt: int,
+                           node_type: str, status: str, idempotency_key: str,
+                           input_hash: str, agent_id: str | None = None,
+                           started_at: str | None = None) -> dict[str, Any]:
+        for value, label in ((task_id, "task ID"), (node_id, "node ID"),
+                             (node_type, "node type"), (status, "node status")):
+            _identifier(value, label)
+        _hash(input_hash, "input hash")
+        _hash(idempotency_key, "idempotency key")
+        if type(attempt) is not int or attempt < 1:
+            raise ForgePilotError("storage_record", "Invalid node attempt")
+        try:
+            with self.events._transaction():
+                self.events._db.execute("""INSERT INTO task_node_attempts(
+                    task_id,node_id,attempt,node_type,agent_id,status,idempotency_key,input_hash,started_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (
+                    task_id, node_id, attempt, node_type, agent_id, status,
+                    idempotency_key, input_hash, started_at or _now(),
+                ))
+            return self.get_node_attempt(task_id, node_id, attempt)
+        except sqlite3.IntegrityError:
+            raise ForgePilotError("node_conflict", "Node attempt already exists or has no graph run") from None
+
+    def get_node_attempt(self, task_id: str, node_id: str, attempt: int) -> dict[str, Any]:
+        with self.events._lock:
+            result = _row(self.events._db.execute(
+                "SELECT * FROM task_node_attempts WHERE task_id=? AND node_id=? AND attempt=?",
+                (task_id, node_id, attempt),).fetchone())
+        if result is None:
+            raise ForgePilotError("unknown_node_attempt", "Node attempt does not exist")
+        return result
+
+    def finish_node_attempt(self, task_id: str, node_id: str, attempt: int, *, status: str,
+                            duration_ms: int, error_code: str | None = None,
+                            error_summary: str | None = None, checkpoint_id: str | None = None,
+                            finished_at: str | None = None) -> dict[str, Any]:
+        _identifier(status, "node status")
+        if type(duration_ms) is not int or duration_ms < 0:
+            raise ForgePilotError("storage_record", "Invalid node duration")
+        summary = self.events.redactor.text(error_summary)[:2_048] if error_summary else None
+        with self.events._transaction():
+            changed = self.events._db.execute("""UPDATE task_node_attempts SET
+                status=?,finished_at=?,duration_ms=?,error_code=?,error_summary=?,checkpoint_id=?
+                WHERE task_id=? AND node_id=? AND attempt=? AND finished_at IS NULL""", (
+                status, finished_at or _now(), duration_ms, error_code, summary, checkpoint_id,
+                task_id, node_id, attempt,
+            )).rowcount
+            if changed != 1:
+                raise ForgePilotError("node_conflict", "Node attempt is missing or already finished")
+        return self.get_node_attempt(task_id, node_id, attempt)
+
+    def save_approval(self, *, approval_id: str, task_id: str, task_spec_artifact_id: str,
+                      plan_artifact_id: str, scope_hash: str, approved_by: str,
+                      approval_type: str = "execution", created_at: str | None = None,
+                      audit_event: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        for value, label in ((approval_id, "approval ID"), (task_id, "task ID"),
+                             (approved_by, "approver"), (approval_type, "approval type")):
+            _identifier(value, label)
+        _hash(scope_hash, "scope hash")
+        try:
+            with self.events._transaction():
+                graph = self.events._db.execute(
+                    "SELECT task_spec_artifact_id,plan_artifact_id,scope_hash FROM task_graph_runs WHERE task_id=?",
+                    (task_id,),).fetchone()
+                artifacts = self.events._db.execute("""SELECT artifact_id,artifact_type,content_sha256
+                    FROM artifacts WHERE artifact_id IN (?,?) AND task_id=?""",
+                    (task_spec_artifact_id, plan_artifact_id, task_id),).fetchall()
+                by_id = {item["artifact_id"]: item for item in artifacts}
+                if (graph is None or graph["task_spec_artifact_id"] != task_spec_artifact_id
+                        or graph["plan_artifact_id"] != plan_artifact_id or graph["scope_hash"] != scope_hash
+                        or task_spec_artifact_id not in by_id or plan_artifact_id not in by_id
+                        or by_id[task_spec_artifact_id]["artifact_type"] != "TaskSpec"
+                        or by_id[plan_artifact_id]["artifact_type"] != "ExecutionPlan"):
+                    raise ForgePilotError("approval_stale", "Approval objects are not the current graph objects")
+                self.events._db.execute("""INSERT INTO approvals(
+                    approval_id,task_id,approval_type,status,task_spec_artifact_id,task_spec_hash,
+                    plan_artifact_id,plan_hash,scope_hash,approved_by,created_at)
+                    VALUES(?,?,?,'approved',?,?,?,?,?,?,?)""", (
+                    approval_id, task_id, approval_type, task_spec_artifact_id,
+                    by_id[task_spec_artifact_id]["content_sha256"], plan_artifact_id,
+                    by_id[plan_artifact_id]["content_sha256"], scope_hash, approved_by,
+                    created_at or _now(),
+                ))
+                if audit_event is not None:
+                    from .mission_events import append_mission_event
+                    append_mission_event(self.events, task_id, audit_event["event_type"],
+                        {**audit_event["data"], "approval_id": approval_id},
+                        actor=audit_event.get("actor"))
+            return self.get_approval(approval_id)
+        except sqlite3.IntegrityError:
+            raise ForgePilotError("approval_conflict", "Approval already exists or is invalid") from None
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        _identifier(approval_id, "approval ID")
+        with self.events._transaction():
+            row = self.events._db.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+            if row is None:
+                raise ForgePilotError("unknown_approval", "Approval does not exist")
+            if row["status"] == "approved":
+                current = self.events._db.execute("""SELECT g.task_spec_artifact_id,g.plan_artifact_id,g.scope_hash,
+                    ts.content_sha256 AS task_spec_hash,p.content_sha256 AS plan_hash
+                    FROM task_graph_runs g
+                    LEFT JOIN artifacts ts ON ts.artifact_id=g.task_spec_artifact_id
+                    LEFT JOIN artifacts p ON p.artifact_id=g.plan_artifact_id WHERE g.task_id=?""",
+                    (row["task_id"],),).fetchone()
+                valid = current is not None and all((
+                    current["task_spec_artifact_id"] == row["task_spec_artifact_id"],
+                    current["plan_artifact_id"] == row["plan_artifact_id"],
+                    current["scope_hash"] == row["scope_hash"],
+                    current["task_spec_hash"] == row["task_spec_hash"],
+                    current["plan_hash"] == row["plan_hash"],
+                ))
+                if not valid:
+                    self.events._db.execute("""UPDATE approvals SET status='invalidated',
+                        invalidated_at=?,invalidation_reason='approved_objects_changed'
+                        WHERE approval_id=? AND status='approved'""", (_now(), approval_id))
+                    row = self.events._db.execute(
+                        "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+            result = dict(row)
+        result["valid"] = result["status"] == "approved"
+        return result
+
+    def is_approval_valid(self, approval_id: str) -> bool:
+        return bool(self.get_approval(approval_id)["valid"])
+
+    @staticmethod
+    def _safe_schema(value: Mapping[str, Any], redactor) -> str:
+        forbidden = {
+            "reasoning", "chain_of_thought", "hidden_thoughts", "thoughts",
+            "dpapi", "dpapi_plaintext", "api_key", "apikey", "password",
+            "authorization", "access_token", "refresh_token", "client_secret",
+        }
+
+        def clean(item):
+            if isinstance(item, Mapping):
+                result = {}
+                for key, content in item.items():
+                    name = str(key)
+                    normalized = name.casefold().replace("-", "_")
+                    sensitive = normalized in forbidden or "dpapi" in normalized
+                    result[name] = "[REDACTED]" if sensitive else clean(content)
+                return result
+            if isinstance(item, (list, tuple)):
+                return [clean(content) for content in item]
+            return item
+
+        try:
+            redacted = redactor.data(clean(value))
+            encoded = canonical_json_bytes(redacted)
+        except (TypeError, ValueError, RecursionError):
+            raise ForgePilotError("model_call_record", "Tool schema is not valid JSON") from None
+        if len(encoded) > 1_048_576:
+            raise ForgePilotError("model_call_record", "Tool schema is too large")
+        return encoded.decode("utf-8")
+
+    def record_model_call(self, *, call_id: str, task_id: str, role: str, model: str,
+                          prompt_version: str, input_hash: str, tool_schema: Mapping[str, Any],
+                          duration_ms: int, input_tokens: int | None = None,
+                          output_tokens: int | None = None, total_tokens: int | None = None,
+                          error_code: str | None = None, retry_count: int = 0,
+                          fallback_model: str | None = None, response_hash: str | None = None,
+                          node_id: str | None = None, created_at: str | None = None) -> dict[str, Any]:
+        for value, label in ((call_id, "model call ID"), (task_id, "task ID"),
+                             (role, "model role"), (model, "model"),
+                             (prompt_version, "prompt version")):
+            _identifier(value, label)
+            if self.events.redactor.text(value) != value:
+                raise ForgePilotError("model_call_record", f"{label} contains sensitive data")
+        if fallback_model is not None:
+            _identifier(fallback_model, "fallback model")
+            if self.events.redactor.text(fallback_model) != fallback_model:
+                raise ForgePilotError("model_call_record", "fallback model contains sensitive data")
+        if error_code is not None:
+            safe_error = self.events.redactor.text(error_code)
+            error_code = "redacted_error" if safe_error != error_code else _identifier(error_code, "error code")
+        _hash(input_hash, "input hash")
+        _hash(response_hash, "response hash", optional=True)
+        counts = (duration_ms, retry_count, input_tokens, output_tokens, total_tokens)
+        if any(value is not None and (type(value) is not int or value < 0) for value in counts):
+            raise ForgePilotError("model_call_record", "Model timing and token counts must be non-negative integers")
+        schema_json = self._safe_schema(tool_schema, self.events.redactor)
+        try:
+            with self.events._transaction():
+                self.events._db.execute("""INSERT INTO model_calls(
+                    call_id,task_id,node_id,role,model,prompt_version,input_hash,tool_schema_json,
+                    duration_ms,input_tokens,output_tokens,total_tokens,error_code,retry_count,
+                    fallback_model,response_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    call_id, task_id, node_id, role, model, prompt_version, input_hash,
+                    schema_json, duration_ms, input_tokens, output_tokens, total_tokens,
+                    error_code, retry_count, fallback_model, response_hash, created_at or _now(),
+                ))
+                from .mission_events import append_record_event
+                append_record_event(self.events, task_id, "model.failed" if error_code else "model.completed", {
+                    "call_id": call_id, "role": role, "model": model,
+                    "prompt_version": prompt_version, "input_hash": input_hash,
+                    "duration_ms": duration_ms, "input_tokens": input_tokens,
+                    "output_tokens": output_tokens, "total_tokens": total_tokens,
+                    "error_code": error_code, "retry_count": retry_count,
+                    "fallback_model": fallback_model, "response_hash": response_hash,
+                }, node_id=node_id, actor=role)
+            return self.get_model_call(call_id)
+        except sqlite3.IntegrityError:
+            raise ForgePilotError("model_call_conflict", "Model call already exists or is invalid") from None
+
+    def get_model_call(self, call_id: str) -> dict[str, Any]:
+        with self.events._lock:
+            result = _row(self.events._db.execute(
+                "SELECT * FROM model_calls WHERE call_id=?", (call_id,)).fetchone())
+        if result is None:
+            raise ForgePilotError("unknown_model_call", "Model call does not exist")
+        result["tool_schema"] = json.loads(result.pop("tool_schema_json"))
+        return result
+
+    def record_checkpoint(self, *, checkpoint_id: str, task_id: str, checkpoint_type: str,
+                          status: str, workspace_id: str | None = None,
+                          commit_hash: str | None = None, artifact_id: str | None = None,
+                          error_code: str | None = None, created_at: str | None = None) -> dict[str, Any]:
+        return self._insert_record("checkpoints", "checkpoint_id", checkpoint_id, {
+            "checkpoint_id": checkpoint_id, "task_id": task_id, "checkpoint_type": checkpoint_type,
+            "status": status, "workspace_id": workspace_id, "commit_hash": commit_hash,
+            "artifact_id": artifact_id, "created_at": created_at or _now(), "error_code": error_code,
+        })
+
+    def save_workspace(self, *, workspace_id: str, task_id: str, repository_path: str,
+                       worktree_path: str, base_ref: str, status: str,
+                       head_commit: str | None = None, created_at: str | None = None) -> dict[str, Any]:
+        stamp = created_at or _now()
+        return self._insert_record("workspace_records", "workspace_id", workspace_id, {
+            "workspace_id": workspace_id, "task_id": task_id, "repository_path": repository_path,
+            "worktree_path": worktree_path, "base_ref": base_ref, "head_commit": head_commit,
+            "status": status, "created_at": stamp, "updated_at": stamp, "released_at": None,
+        })
+
+    def record_validation(self, *, validation_id: str, task_id: str, attempt: int, status: str,
+                          started_at: str | None = None, finished_at: str | None = None,
+                          duration_ms: int | None = None, report_artifact_id: str | None = None,
+                          error_code: str | None = None) -> dict[str, Any]:
+        return self._insert_record("validation_runs", "validation_id", validation_id, {
+            "validation_id": validation_id, "task_id": task_id, "attempt": attempt,
+            "status": status, "report_artifact_id": report_artifact_id,
+            "started_at": started_at or _now(), "finished_at": finished_at,
+            "duration_ms": duration_ms, "error_code": error_code,
+        })
+
+    def record_security_event(self, *, event_id: str, event_type: str, severity: str,
+                              attributes: Mapping[str, Any] | None = None,
+                              task_id: str | None = None, occurred_at: str | None = None,
+                              publish_event: bool = True) -> dict[str, Any]:
+        # Never copy request payloads, even if the caller passes arbitrary keys.
+        if (event_type not in {"tool_denied", "approval_denied", "permission_denied",
+                "path_denied", "mcp_denied", "api_denied", "artifact_denied", "memory_denied"}
+                or severity not in {"info", "warning", "error", "critical"}):
+            raise ForgePilotError("security_event_record", "Invalid security event classification")
+        if task_id is not None:
+            _identifier(task_id, "task ID")
+        allowed = {"code", "boundary", "path_hash", "decision"}
+        controlled_values = {
+            "code": {"policy_denied", "path_escape", "file_denied", "scope_approval_required",
+                     "test_approval_required", "unknown_tool", "invalid_arguments", "tool_denied",
+                     "tool_error", "mission_approval_conflict", "approval_stale",
+                     "artifact_scope", "unknown_artifact", "mcp_denied", "other_denial"},
+            "boundary": {"tool_validation", "tool_execution", "execution_approval",
+                         "workspace", "mcp", "api", "artifact", "memory"},
+            "decision": {"approved", "rejected", "denied"},
+        }
+        safe_attributes = {}
+        for key, value in (attributes or {}).items():
+            if key not in allowed or not isinstance(value, str):
+                continue
+            if key == "path_hash":
+                if not SHA256_RE.fullmatch(value):
+                    continue
+            elif value not in controlled_values[key]:
+                continue
+            if self.events.redactor.text(value) == value:
+                safe_attributes[key] = value
+        attributes_json = json.dumps(safe_attributes, ensure_ascii=False,
+                                     sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return self._insert_record("security_events", "event_id", event_id, {
+            "event_id": event_id, "task_id": task_id, "event_type": event_type,
+            "severity": severity, "occurred_at": occurred_at or _now(),
+            "attributes_json": attributes_json,
+        }, json_field="attributes_json", publish_event=publish_event)
+
+    def observability(self, task_id: str) -> dict[str, Any]:
+        """Return task-bound provenance without model or Artifact payloads."""
+        from .mission_events import safe_event_data
+        from .tools.change_tools import WRITE_TOOLS
+
+        task_id = _identifier(task_id, "task ID")
+        with self.events._lock:
+            db = self.events._db
+            run = db.execute("SELECT status FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if run is None:
+                raise ForgePilotError("unknown_graph", "Mission does not exist")
+            attempts = [dict(row) for row in db.execute("""SELECT node_id,attempt,node_type,agent_id,
+                status,started_at,finished_at,duration_ms,error_code,checkpoint_id,input_artifacts_json
+                FROM task_node_attempts WHERE task_id=? ORDER BY started_at,node_id,attempt""", (task_id,))]
+            models = [dict(row) for row in db.execute("""SELECT call_id,node_id,role,model,
+                prompt_version,input_hash,response_hash,duration_ms,input_tokens,output_tokens,
+                total_tokens,retry_count,fallback_model,error_code,created_at FROM model_calls
+                WHERE task_id=? ORDER BY created_at,call_id""", (task_id,))]
+            event_rows = [dict(row) for row in db.execute("""SELECT event_type,node_id,attempt,
+                payload_json,created_at FROM graph_events WHERE task_id=? AND event_type IN
+                ('tool.completed','node_finished','node_started','node.finished','node.started')
+                ORDER BY sequence""", (task_id,))]
+            artifacts = [dict(row) for row in db.execute("""SELECT artifact_id,artifact_type,
+                producer,producer_node,content_sha256,created_at,size_bytes FROM artifacts
+                WHERE task_id=? ORDER BY created_at,artifact_id""", (task_id,))]
+            approvals = [dict(row) for row in db.execute("""SELECT approval_id,approval_type,
+                status,task_spec_artifact_id,task_spec_hash,plan_artifact_id,plan_hash,
+                scope_hash,approved_by,created_at,invalidated_at,invalidation_reason FROM approvals
+                WHERE task_id=? ORDER BY created_at,approval_id""", (task_id,))]
+            validations = [dict(row) for row in db.execute("""SELECT validation_id,attempt,status,
+                report_artifact_id,started_at,finished_at,duration_ms,error_code FROM validation_runs
+                WHERE task_id=? ORDER BY attempt""", (task_id,))]
+            checkpoints = [dict(row) for row in db.execute("""SELECT checkpoint_id,node_id,attempt,
+                checkpoint_type,commit_hash,created_at FROM checkpoints WHERE task_id=?
+                ORDER BY created_at,checkpoint_id""", (task_id,))]
+            security = [dict(row) for row in db.execute("""SELECT event_id,event_type,severity,
+                occurred_at,attributes_json FROM security_events WHERE task_id=?
+                ORDER BY occurred_at,event_id""", (task_id,))]
+        nodes = []
+        for row in attempts:
+            frozen = json.loads(row.pop("input_artifacts_json") or "[]")
+            row["input_artifact_ids"] = [item[0] for item in frozen]
+            row["executor"] = row["agent_id"] or "orchestrator"
+            nodes.append(row)
+        tools, read_files, modified_files, pauses, repairs = [], set(), set(), [], []
+        pending_repair_reason = None
+        for row in event_rows:
+            payload = safe_event_data(self.events.redactor, json.loads(row["payload_json"]))
+            if row["event_type"] == "tool.completed":
+                item = {key: payload.get(key) for key in ("tool", "operation", "path",
+                    "arguments_hash", "success", "duration_ms", "error_code")}
+                item.update(node_id=row["node_id"], occurred_at=row["created_at"])
+                tools.append(item)
+                path = item["path"]
+                if item["success"] and isinstance(path, str):
+                    if item["tool"] in {"read_file", "repository_read_range", "repository_read_cmake_target"}:
+                        read_files.add(path)
+                    elif item["tool"] in WRITE_TOOLS:
+                        modified_files.add(path)
+            elif row["event_type"] in {"node_finished", "node.finished"}:
+                if payload.get("next_route") == "repair":
+                    pending_repair_reason = ("validation_code_failure" if str(row["node_id"]).startswith("validation")
+                        else "review_blockers" if str(row["node_id"]).startswith("review")
+                        else "node_requested_repair")
+                if payload.get("to") in {"retryable", "awaiting_human"}:
+                    pauses.append({"node_id": row["node_id"], "attempt": row["attempt"],
+                                   "reason": "human_approval_required" if payload["to"] == "awaiting_human"
+                                             else payload.get("failure_kind"),
+                                   "policy_action": payload.get("policy_action"),
+                                   "occurred_at": row["created_at"]})
+            elif row["event_type"] in {"node_started", "node.started"} and str(row["node_id"]).startswith("repair_"):
+                repairs.append({"node_id": row["node_id"], "attempt": row["attempt"],
+                                "reason": pending_repair_reason or "repair_route",
+                                "occurred_at": row["created_at"]})
+                pending_repair_reason = None
+        for artifact in artifacts:
+            if artifact["artifact_type"] == "ChangeSet":
+                change = self.events.artifacts.get(artifact["artifact_id"])
+                modified_files.update(item.path for item in change.content.files)
+            elif artifact["artifact_type"] == "EvidenceBundle":
+                evidence = self.events.artifacts.get(artifact["artifact_id"])
+                read_files.update(item.path for item in evidence.content.items
+                                  if item.path and item.source in {"local_repository", "rag", "tool_output"})
+        validation_commit = next((item["commit_hash"] for item in reversed(checkpoints)
+                                  if item["checkpoint_type"] == "validated" and item["commit_hash"]), None)
+        for item in security:
+            item["attributes"] = json.loads(item.pop("attributes_json"))
+        return safe_event_data(self.events.redactor, {
+            "task_id": task_id, "status": run["status"], "nodes": nodes,
+            "model_calls": models, "tools": tools, "artifacts": artifacts,
+            "files_read": sorted(read_files), "files_modified": sorted(modified_files),
+            "pauses": pauses, "repairs": repairs, "approvals": approvals,
+            "validations": validations, "validation_commit": validation_commit,
+            "security_events": security,
+        })
+
+    def _insert_record(self, table: str, key_name: str, key_value: str,
+                       values: dict[str, Any], *, json_field: str | None = None,
+                       publish_event: bool = True) -> dict[str, Any]:
+        allowed = {"checkpoints", "workspace_records", "validation_runs", "security_events"}
+        if table not in allowed:
+            raise AssertionError("unsupported repository table")
+        _identifier(key_value, key_name)
+        columns = tuple(values)
+        try:
+            with self.events._transaction():
+                self.events._db.execute(
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                    tuple(values[column] for column in columns),
+                )
+                from .mission_events import append_record_event
+                event_types = {"workspace_records": "workspace.created",
+                               "validation_runs": "validation.completed",
+                               "security_events": "security.recorded"}
+                if publish_event and table in event_types:
+                    attributes = dict(values)
+                    if json_field:
+                        attributes[json_field.removesuffix("_json")] = json.loads(attributes.pop(json_field))
+                    append_record_event(self.events, values.get("task_id"), event_types[table], attributes)
+            with self.events._lock:
+                result = dict(self.events._db.execute(
+                    f"SELECT * FROM {table} WHERE {key_name}=?", (key_value,)).fetchone())
+            if json_field:
+                result[json_field.removesuffix("_json")] = json.loads(result.pop(json_field))
+            return result
+        except (sqlite3.IntegrityError, TypeError, ValueError):
+            raise ForgePilotError("storage_record", f"Invalid or duplicate {table} record") from None
+
+
+__all__ = [
+    "MissionRepository", "create_graph_checkpoint_schema", "create_graph_orchestrator_schema", "create_mission_schema",
+    "recover_graph_runs",
+]

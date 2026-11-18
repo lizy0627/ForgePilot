@@ -1,0 +1,371 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "verification": {
+          "enum": [
+            "build",
+            "test",
+            "ctest",
+            "protected_test",
+            "static_analysis",
+            "inspection",
+            "manual"
+          ],
+          "title": "Verification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "verification"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "AllowedScope": {
+      "additionalProperties": false,
+      "properties": {
+        "max_changed_files": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Changed Files",
+          "type": "integer"
+        },
+        "path_patterns": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Path Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path_patterns",
+        "max_changed_files"
+      ],
+      "title": "AllowedScope",
+      "type": "object"
+    },
+    "DataPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_model_allowed": {
+          "default": false,
+          "title": "Cloud Model Allowed",
+          "type": "boolean"
+        },
+        "external_mcp_allowed": {
+          "default": false,
+          "title": "External Mcp Allowed",
+          "type": "boolean"
+        }
+      },
+      "title": "DataPolicy",
+      "type": "object"
+    },
+    "RepositorySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "base_ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Base Ref",
+          "type": "string"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_ref",
+        "toolchain_profile"
+      ],
+      "title": "RepositorySpec",
+      "type": "object"
+    },
+    "TaskProblem": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Expected Behavior",
+          "type": "string"
+        },
+        "observed_behavior": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Observed Behavior",
+          "type": "string"
+        },
+        "reproduction_steps": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Reproduction Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "observed_behavior",
+        "expected_behavior"
+      ],
+      "title": "TaskProblem",
+      "type": "object"
+    },
+    "TaskSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterion"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "allowed_scope": {
+          "$ref": "#/$defs/AllowedScope"
+        },
+        "assumptions": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "data_policy": {
+          "$ref": "#/$defs/DataPolicy",
+          "default": {
+            "cloud_model_allowed": false,
+            "external_mcp_allowed": false
+          }
+        },
+        "forbidden_scope": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Forbidden Scope",
+          "type": "array"
+        },
+        "objective": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Objective",
+          "type": "string"
+        },
+        "problem": {
+          "$ref": "#/$defs/TaskProblem"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositorySpec"
+        },
+        "risk_level": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "risks": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Risks",
+          "type": "array"
+        },
+        "task_type": {
+          "enum": [
+            "bug_fix",
+            "feature",
+            "maintenance"
+          ],
+          "title": "Task Type",
+          "type": "string"
+        },
+        "test_policy": {
+          "$ref": "#/$defs/TestPolicy",
+          "default": {
+            "allow_new_tests": true,
+            "existing_tests_read_only": true,
+            "modifiable_existing_test_patterns": []
+          }
+        },
+        "title": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_type",
+        "title",
+        "objective",
+        "repository",
+        "problem",
+        "acceptance_criteria",
+        "allowed_scope",
+        "risk_level"
+      ],
+      "title": "TaskSpec",
+      "type": "object"
+    },
+    "TaskSpecArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "TaskSpec",
+          "default": "TaskSpec",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/TaskSpec"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 64,
+          "title": "Created At",
+          "type": "string"
+        },
+        "parent_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Parent Artifact Ids",
+          "type": "array"
+        },
+        "producer": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer",
+          "type": "string"
+        },
+        "producer_node": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Producer Node",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "producer",
+        "producer_node",
+        "created_at",
+        "content_sha256",
+        "content"
+      ],
+      "title": "TaskSpecArtifact",
+      "type": "object"
+    },
+    "TestPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_new_tests": {
+          "default": true,
+          "title": "Allow New Tests",
+          "type": "boolean"
+        },
+        "existing_tests_read_only": {
+          "default": true,
+          "title": "Existing Tests Read Only",
+          "type": "boolean"
+        },
+        "modifiable_existing_test_patterns": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Modifiable Existing Test Patterns",
+          "type": "array"
+        }
+      },
+      "title": "TestPolicy",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/agent-impact-test-analysis-input.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "task_spec": {
+      "$ref": "#/$defs/TaskSpecArtifact"
+    }
+  },
+  "required": [
+    "task_spec"
+  ],
+  "title": "AnalystInput",
+  "type": "object"
+}

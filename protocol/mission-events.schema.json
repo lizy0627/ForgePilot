@@ -1,0 +1,74 @@
+{
+  "additionalProperties": false,
+  "description": "Wire-only v2 envelope; no dependency on the v1 EventPayload model.",
+  "properties": {
+    "actor": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Actor"
+    },
+    "data": {
+      "additionalProperties": true,
+      "title": "Data",
+      "type": "object"
+    },
+    "event_id": {
+      "maxLength": 300,
+      "minLength": 3,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "pattern": "^(task|node|artifact|approval|tool|model|validation|workspace|security)\\.[a-z][a-z0-9_.]{0,95}$",
+      "title": "Event Type",
+      "type": "string"
+    },
+    "node_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Node Id"
+    },
+    "task_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "task_revision": {
+      "minimum": 1,
+      "title": "Task Revision",
+      "type": "integer"
+    },
+    "timestamp": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "task_id",
+    "task_revision",
+    "timestamp",
+    "event_type"
+  ],
+  "title": "MissionEvent",
+  "type": "object"
+}

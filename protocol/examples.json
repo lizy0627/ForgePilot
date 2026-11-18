@@ -1,0 +1,806 @@
+{
+  "approve_request": {
+    "plan_version": 1
+  },
+  "cancel_request": {},
+  "cancelled_event": {
+    "data": {
+      "error": "rejected: User rejected the plan",
+      "from": "waiting_approval",
+      "outcome": "rejected",
+      "repair_round": 0,
+      "state": "cancelled"
+    },
+    "event": "task_state_changed",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "timestamp": "2026-09-18T08:01:00+00:00"
+  },
+  "conversation_answer_completed": {
+    "content": "这是最终持久化回答。",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "message_id": 42,
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 19,
+    "segment_id": "segment-2",
+    "type": "answer_completed"
+  },
+  "conversation_answer_delta": {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "previous_revision": 1,
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 2,
+    "segment_id": "segment-1",
+    "text": "这是已经增量脱敏的回答。",
+    "type": "answer_delta"
+  },
+  "conversation_answer_snapshot": {
+    "content": "这是当前完整、安全的临时回答。",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "revision": 17,
+    "segment_id": "segment-2",
+    "status": "streaming",
+    "terminal": false,
+    "type": "answer_snapshot"
+  },
+  "conversation_mcp_cancelled": {
+    "context_notice": "",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "created_at": "2026-09-24T10:00:00+00:00",
+    "error": null,
+    "mode": "chat",
+    "prompt": "Search public Qt documentation and extract its introduction",
+    "repository_path": null,
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "status": "cancelled",
+    "task_id": null,
+    "tool_activity": {
+      "duration_ms": 1000,
+      "error_code": "cancelled",
+      "sequence": 2,
+      "server_name": "联网搜索",
+      "status": "cancelled",
+      "tool_name": "tavily-extract"
+    },
+    "updated_at": "2026-09-24T10:00:02+00:00"
+  },
+  "conversation_mcp_legacy_empty": {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "items": [],
+    "request_id": "22222222-2222-4222-8222-222222222222"
+  },
+  "conversation_mcp_running": {
+    "context_notice": "",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "created_at": "2026-09-24T10:00:00+00:00",
+    "error": null,
+    "mode": "chat",
+    "prompt": "Search public Qt documentation and extract its introduction",
+    "repository_path": null,
+    "request_id": "22222222-2222-4222-8222-222222222222",
+    "status": "running",
+    "task_id": null,
+    "tool_activity": {
+      "duration_ms": 0,
+      "error_code": null,
+      "sequence": 2,
+      "server_name": "联网搜索",
+      "status": "running",
+      "tool_name": "tavily-extract"
+    },
+    "updated_at": "2026-09-24T10:00:01+00:00"
+  },
+  "conversation_mcp_tools": {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "items": [
+      {
+        "arguments_excerpt": "{\"query\":\"Qt documentation\"}",
+        "duration_ms": 180,
+        "error_code": null,
+        "result_excerpt": "Qt 6 documentation",
+        "sequence": 1,
+        "server_id": "33333333-3333-4333-8333-333333333333",
+        "server_name": "联网搜索",
+        "sources": [
+          {
+            "title": "Qt 6 文档",
+            "url": "https://doc.qt.io/qt-6/"
+          }
+        ],
+        "status": "succeeded",
+        "tool_call_id": "search_1",
+        "tool_name": "tavily-search"
+      },
+      {
+        "arguments_excerpt": "{\"urls\":[\"https://doc.qt.io/qt-6/\"]}",
+        "duration_ms": 210,
+        "error_code": null,
+        "result_excerpt": "Qt 6 extracted text (illustrative fixture, not a live result)",
+        "sequence": 2,
+        "server_id": "33333333-3333-4333-8333-333333333333",
+        "server_name": "联网搜索",
+        "sources": [
+          {
+            "title": "Qt 6 文档",
+            "url": "https://doc.qt.io/qt-6/"
+          }
+        ],
+        "status": "succeeded",
+        "tool_call_id": "extract_2",
+        "tool_name": "tavily-extract"
+      }
+    ],
+    "request_id": "22222222-2222-4222-8222-222222222222"
+  },
+  "conversation_stream_cursor_error": {
+    "error": {
+      "code": "event_cursor_ahead",
+      "details": [],
+      "message": "Conversation event cursor is ahead of the current revision",
+      "task_id": null
+    }
+  },
+  "conversation_stream_unavailable_error": {
+    "error": {
+      "code": "conversation_stream_unavailable",
+      "details": [],
+      "message": "Conversation stream is unavailable; query request state",
+      "task_id": null
+    }
+  },
+  "create_or_query_response": {
+    "analysis_result": null,
+    "approved_files": [],
+    "approved_plan_version": null,
+    "build_result": null,
+    "cancel_requested": false,
+    "created_at": "2026-09-18T08:00:00+00:00",
+    "diff_summary": [],
+    "duration_complete": true,
+    "duration_ms": 0,
+    "error": null,
+    "error_code": null,
+    "failure_kind": null,
+    "final_result": null,
+    "finished_at": null,
+    "last_event_id": null,
+    "last_validation_error": null,
+    "max_repair_rounds": 3,
+    "outcome": null,
+    "plan": null,
+    "plan_version": 0,
+    "prompt": "修复 Counter 的边界问题并验证",
+    "read_only": false,
+    "repair_records": [],
+    "repair_round": 0,
+    "repository_path": "D:/Workspace/Counter",
+    "state": "created",
+    "steps": 0,
+    "task_diff": null,
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "tool_calls": 0,
+    "updated_at": "2026-09-18T08:00:00+00:00",
+    "usage": {
+      "completion_tokens": null,
+      "prompt_tokens": null,
+      "total_tokens": null
+    },
+    "validation_errors": [],
+    "validation_history": []
+  },
+  "create_request": {
+    "prompt": "修复 Counter 的边界问题并验证",
+    "repository_path": "D:/Workspace/Counter"
+  },
+  "failed_event": {
+    "data": {
+      "error": "llm_http: HTTP 401. Check credentials",
+      "error_code": "llm_http",
+      "final_result": null,
+      "state": "failed"
+    },
+    "event": "task_failed",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "timestamp": "2026-09-18T08:01:00+00:00"
+  },
+  "feedback_busy_error": {
+    "error": {
+      "code": "task_busy",
+      "details": [],
+      "message": "Task is still executing or cleaning up",
+      "task_id": null
+    }
+  },
+  "feedback_invalid_request_error": {
+    "error": {
+      "code": "invalid_request",
+      "details": [
+        {
+          "field": "body.feedback",
+          "type": "value_error"
+        }
+      ],
+      "message": "Request must match the API schema",
+      "task_id": null
+    }
+  },
+  "feedback_request": {
+    "feedback": "保留 Counter 的公开接口，只调整实现；补充边界条件的验证步骤。",
+    "plan_version": 1
+  },
+  "feedback_step_limit_error": {
+    "error": {
+      "code": "step_limit",
+      "details": [],
+      "message": "No model requests remain for replanning",
+      "task_id": null
+    }
+  },
+  "interrupted_event": {
+    "data": {
+      "error": "service_interrupted: Previous process stopped before final publication; execution is not resumed",
+      "error_code": "service_interrupted",
+      "outcome": "service_interrupted",
+      "state": "failed"
+    },
+    "event": "task_failed",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "timestamp": "2026-09-18T08:10:00+00:00"
+  },
+  "invalid_request_error": {
+    "error": {
+      "code": "invalid_request",
+      "details": [
+        {
+          "field": "body.plan_version",
+          "type": "int_type"
+        }
+      ],
+      "message": "Request does not match the v1 schema",
+      "task_id": null
+    }
+  },
+  "list_response": {
+    "items": [
+      {
+        "cancel_requested": false,
+        "created_at": "2026-09-18T08:00:00+00:00",
+        "error": null,
+        "error_code": null,
+        "finished_at": null,
+        "last_event_id": null,
+        "outcome": null,
+        "plan_version": 0,
+        "prompt": "修复 Counter 的边界问题并验证",
+        "repair_round": 0,
+        "repository_path": "D:/Workspace/Counter",
+        "state": "created",
+        "task_id": "11111111-1111-4111-8111-111111111111",
+        "updated_at": "2026-09-18T08:00:00+00:00"
+      }
+    ],
+    "next_cursor": null,
+    "total": 1
+  },
+  "mcp_clear_secret_request": {
+    "base_revision": 1,
+    "catalog_hash": "sha256:e1b25da8384d2136e7981b6e3dfd6abbcaf2447682013b358ce4e1a52b647301",
+    "connection": {
+      "auth_type": "none",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "effect": "read",
+    "enabled": true,
+    "modes": [
+      "chat",
+      "task"
+    ],
+    "name": "联网查询",
+    "secret_updates": {
+      "api_key": null
+    },
+    "selected_tools": [
+      "search"
+    ],
+    "transport": "streamable_http"
+  },
+  "mcp_conflict_error": {
+    "error": {
+      "code": "mcp_config_conflict",
+      "details": [],
+      "message": "MCP configuration changed; refresh before retrying",
+      "task_id": null
+    }
+  },
+  "mcp_deleted_response": {
+    "deleted": true,
+    "server_id": "12345678-1234-4234-9234-123456789abc"
+  },
+  "mcp_detail_response": {
+    "catalog_hash": "sha256:e1b25da8384d2136e7981b6e3dfd6abbcaf2447682013b358ce4e1a52b647301",
+    "connection": {
+      "auth_type": "bearer",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "created_at": "2026-09-24T10:00:00+00:00",
+    "effect": "read",
+    "enabled": true,
+    "has_secret": true,
+    "last_check_status": "success",
+    "last_checked_at": "2026-09-24T10:00:00+00:00",
+    "last_error_code": null,
+    "modes": [
+      "chat",
+      "task"
+    ],
+    "name": "联网查询",
+    "revision": 1,
+    "selected_tool_count": 1,
+    "selected_tools": [
+      "search"
+    ],
+    "server_id": "12345678-1234-4234-9234-123456789abc",
+    "tools": [
+      {
+        "annotations": {
+          "readOnlyHint": true
+        },
+        "compatible": true,
+        "description": "Search public documents",
+        "execution": {},
+        "fingerprint": "sha256:b5fd1a6caa9b8f2f1f2b9b504265f09317f2404717d3cf2ac8e686f1b44c404e",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search",
+        "output_schema": null,
+        "reason": null,
+        "title": null
+      }
+    ],
+    "transport": "streamable_http",
+    "updated_at": "2026-09-24T10:00:00+00:00"
+  },
+  "mcp_disable_request": {
+    "enabled": false,
+    "revision": 1
+  },
+  "mcp_disabled_error": {
+    "error": {
+      "code": "mcp_disabled",
+      "details": [],
+      "message": "MCP is disabled by the backend startup option",
+      "task_id": null
+    }
+  },
+  "mcp_edit_keep_secret_request": {
+    "base_revision": 1,
+    "catalog_hash": "sha256:e1b25da8384d2136e7981b6e3dfd6abbcaf2447682013b358ce4e1a52b647301",
+    "connection": {
+      "auth_type": "bearer",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "effect": "read",
+    "enabled": true,
+    "modes": [
+      "chat",
+      "task"
+    ],
+    "name": "仅改显示名称",
+    "selected_tools": [
+      "search"
+    ],
+    "transport": "streamable_http"
+  },
+  "mcp_list_response": {
+    "disabled": false,
+    "items": [
+      {
+        "created_at": "2026-09-24T10:00:00+00:00",
+        "enabled": true,
+        "last_check_status": "success",
+        "last_checked_at": "2026-09-24T10:00:00+00:00",
+        "last_error_code": null,
+        "name": "联网查询",
+        "revision": 1,
+        "selected_tool_count": 1,
+        "server_id": "12345678-1234-4234-9234-123456789abc",
+        "transport": "streamable_http",
+        "updated_at": "2026-09-24T10:00:00+00:00"
+      }
+    ]
+  },
+  "mcp_probe_request": {
+    "base_revision": 0,
+    "connection": {
+      "auth_type": "bearer",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "effect": "read",
+    "enabled": true,
+    "modes": [
+      "chat",
+      "task"
+    ],
+    "name": "联网查询",
+    "secret_updates": {
+      "api_key": "example-only-not-a-real-credential"
+    },
+    "selected_tools": [
+      "search"
+    ],
+    "transport": "streamable_http"
+  },
+  "mcp_probe_response": {
+    "catalog_hash": "sha256:e1b25da8384d2136e7981b6e3dfd6abbcaf2447682013b358ce4e1a52b647301",
+    "checked_at": "2026-09-24T10:00:00+00:00",
+    "connection": {
+      "auth_type": "bearer",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "default_selected_tools": [],
+    "server_info": {
+      "name": "Example MCP",
+      "version": "1"
+    },
+    "tools": [
+      {
+        "annotations": {
+          "readOnlyHint": true
+        },
+        "compatible": true,
+        "description": "Search public documents",
+        "execution": {},
+        "fingerprint": "sha256:b5fd1a6caa9b8f2f1f2b9b504265f09317f2404717d3cf2ac8e686f1b44c404e",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search",
+        "output_schema": null,
+        "reason": null,
+        "title": null
+      }
+    ]
+  },
+  "mcp_save_request": {
+    "base_revision": 0,
+    "catalog_hash": "sha256:e1b25da8384d2136e7981b6e3dfd6abbcaf2447682013b358ce4e1a52b647301",
+    "connection": {
+      "auth_type": "bearer",
+      "endpoint": "https://mcp.example.invalid/mcp",
+      "header_name": null,
+      "preset_id": null
+    },
+    "effect": "read",
+    "enabled": true,
+    "modes": [
+      "chat",
+      "task"
+    ],
+    "name": "联网查询",
+    "secret_updates": {
+      "api_key": "example-only-not-a-real-credential"
+    },
+    "selected_tools": [
+      "search"
+    ],
+    "transport": "streamable_http"
+  },
+  "mcp_stdio_public_env_probe_request": {
+    "connection": {
+      "args": [
+        "-I",
+        "C:/MCP/server.py"
+      ],
+      "command": "C:/Python312/python.exe",
+      "env_names": [
+        "DEBUG",
+        "PYTHONUNBUFFERED",
+        "SERVICE_TOKEN"
+      ],
+      "public_env_names": [
+        "DEBUG",
+        "PYTHONUNBUFFERED"
+      ]
+    },
+    "name": "本地普通开关示例",
+    "secret_updates": {
+      "env:DEBUG": "true",
+      "env:PYTHONUNBUFFERED": "1",
+      "env:SERVICE_TOKEN": "example-placeholder-only"
+    },
+    "transport": "stdio"
+  },
+  "mcp_test_request": {
+    "revision": 1
+  },
+  "mission_approval_conflict_error": {
+    "error": {
+      "code": "mission_approval_conflict",
+      "details": [],
+      "message": "TaskSpec, Plan or Scope changed; review the current approval package",
+      "task_id": "11111111-1111-4111-8111-111111111111"
+    }
+  },
+  "mission_approve_request": {
+    "approval_type": "execution",
+    "decision": "approved",
+    "expected_revision": 8,
+    "plan_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "scope_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "task_spec_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "mission_cancel_request": {
+    "expected_revision": 8
+  },
+  "mission_create_request": {
+    "base_ref": "HEAD",
+    "orchestration_mode": "multi_agent",
+    "repository_path": "D:/Projects/Example",
+    "request": "修复窗口关闭后 Worker 未停止的问题",
+    "task_type": "auto",
+    "toolchain_profile": "auto"
+  },
+  "mission_delivery_request": {
+    "expected_revision": 8,
+    "mode": "preview"
+  },
+  "mission_event_approval": {
+    "actor": "orchestrator.v1",
+    "data": {
+      "approval_type": "execution"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:4",
+    "event_type": "approval.required",
+    "node_id": "execution_approval",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 4,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_artifact": {
+    "actor": "root-cause-analyst.v1",
+    "data": {
+      "artifact_id": "22222222-2222-4222-8222-222222222222",
+      "artifact_type": "EvidenceBundle"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:3",
+    "event_type": "artifact.created",
+    "node_id": "root_cause_analysis",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 3,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_model": {
+    "actor": "root-cause-analyst.v1",
+    "data": {
+      "input_tokens": 1200,
+      "model": "configured-profile",
+      "output_tokens": 300,
+      "prompt_version": "1"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:6",
+    "event_type": "model.completed",
+    "node_id": "root_cause_analysis",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 6,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_node": {
+    "actor": "root-cause-analyst.v1",
+    "data": {
+      "artifact_ids": [
+        "22222222-2222-4222-8222-222222222222"
+      ],
+      "duration_ms": 10322
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:2",
+    "event_type": "node.completed",
+    "node_id": "root_cause_analysis",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 2,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_security": {
+    "actor": "policy-engine",
+    "data": {
+      "code": "permission_denied",
+      "severity": "warning"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:9",
+    "event_type": "security.recorded",
+    "node_id": null,
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 9,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_task": {
+    "actor": "mission-host",
+    "data": {
+      "status": "pending"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:1",
+    "event_type": "task.created",
+    "node_id": null,
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 1,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_tool": {
+    "actor": "root-cause-analyst.v1",
+    "data": {
+      "duration_ms": 12,
+      "name": "read_file"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:5",
+    "event_type": "tool.completed",
+    "node_id": "root_cause_analysis",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 5,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_validation": {
+    "actor": "validator.v1",
+    "data": {
+      "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "status": "passed"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:7",
+    "event_type": "validation.completed",
+    "node_id": "validation",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 7,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_event_workspace": {
+    "actor": "workspace-manager",
+    "data": {
+      "workspace_id": "workspace-example"
+    },
+    "event_id": "11111111-1111-4111-8111-111111111111:8",
+    "event_type": "workspace.created",
+    "node_id": null,
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_revision": 8,
+    "timestamp": "2026-10-27T08:00:00Z"
+  },
+  "mission_query_response": {
+    "base_ref": "HEAD",
+    "created_at": "2026-10-27T08:00:00Z",
+    "current_revision": 8,
+    "finished_at": null,
+    "graph_id": "task-analysis.v1",
+    "graph_version": 1,
+    "last_event_id": "11111111-1111-4111-8111-111111111111:8",
+    "orchestration_mode": "multi_agent",
+    "recovery_required": false,
+    "repository_path": "D:/Projects/Example",
+    "request": "修复窗口关闭后 Worker 未停止的问题",
+    "review": {
+      "plan_artifact_id": "33333333-3333-4333-8333-333333333333",
+      "plan_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "review_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "revision": 8,
+      "scope_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "task_id": "11111111-1111-4111-8111-111111111111",
+      "task_spec_artifact_id": "22222222-2222-4222-8222-222222222222",
+      "task_spec_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "status": "awaiting_human",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_type": "auto",
+    "toolchain_profile": "auto",
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "mission_reject_request": {
+    "approval_type": "execution",
+    "decision": "rejected",
+    "expected_revision": 8,
+    "plan_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "scope_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "task_spec_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "mission_resume_request": {
+    "expected_revision": 8,
+    "recovery_token": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "mission_retry_request": {
+    "expected_revision": 8,
+    "node_id": "root_cause_analysis"
+  },
+  "mission_revision_conflict_error": {
+    "error": {
+      "code": "mission_revision_conflict",
+      "details": [],
+      "message": "Mission revision changed; refresh the mission before retrying",
+      "task_id": "11111111-1111-4111-8111-111111111111"
+    }
+  },
+  "mission_sse_reconnect_request": {
+    "headers": {
+      "Accept": "text/event-stream",
+      "Last-Event-ID": "11111111-1111-4111-8111-111111111111:8"
+    },
+    "method": "GET",
+    "path": "/api/v2/missions/11111111-1111-4111-8111-111111111111/events"
+  },
+  "not_found_error": {
+    "error": {
+      "code": "unknown_task",
+      "details": [],
+      "message": "Task does not exist in this database",
+      "task_id": null
+    }
+  },
+  "note": "Illustrative v1 messages; IDs, paths, timestamps and model output are example data.",
+  "reject_via_cancel_request": {
+    "plan_version": 2,
+    "reason": "reject"
+  },
+  "repository_busy_error": {
+    "error": {
+      "code": "repository_busy",
+      "details": [],
+      "message": "Another task owns this repository",
+      "task_id": "11111111-1111-4111-8111-111111111111"
+    }
+  },
+  "stale_plan_error": {
+    "error": {
+      "code": "stale_plan",
+      "details": [],
+      "message": "Plan version changed; review the current plan before deciding",
+      "task_id": null
+    }
+  },
+  "trace_detail_response": {
+    "data": {
+      "prompt": "development example"
+    },
+    "kind": "task_created",
+    "sequence": 1,
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "timestamp": "2026-09-18T08:00:00+00:00",
+    "trace_sequence": 1
+  },
+  "trace_page_response": {
+    "items": [
+      {
+        "kind": "task_created",
+        "preview": "{\"prompt\":\"development example\"}",
+        "sequence": 1,
+        "size": 32,
+        "timestamp": "2026-09-18T08:00:00+00:00",
+        "trace_sequence": 1
+      }
+    ],
+    "next_cursor": null
+  }
+}

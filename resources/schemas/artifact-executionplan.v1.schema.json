@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "ExecutionPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Steps",
+          "type": "array"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "task_spec_artifact_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Task Spec Artifact Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_spec_artifact_id",
+        "steps",
+        "summary"
+      ],
+      "title": "ExecutionPlan",
+      "type": "object"
+    },
+    "PlanStep": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria_ids": {
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria Ids",
+          "type": "array"
+        },
+        "action": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Action",
+          "type": "string"
+        },
+        "adds_tests": {
+          "title": "Adds Tests",
+          "type": "boolean"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Depends On",
+          "type": "array"
+        },
+        "expected_files": {
+          "default": [],
+          "items": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Expected Files",
+          "type": "array"
+        },
+        "owner": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Owner",
+          "type": "string"
+        },
+        "risk": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Risk",
+          "type": "string"
+        },
+        "step_id": {
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "verification": {
+          "items": {
+            "enum": [
+              "build",
+              "test",
+              "ctest",
+              "protected_test",
+              "static_analysis",
+              "inspection",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Verification",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "owner",
+        "action",
+        "verification",
+        "risk",
+        "adds_tests",
+        "acceptance_criteria_ids"
+      ],
+      "title": "PlanStep",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/artifact-executionplan.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "ExecutionPlan",
+      "default": "ExecutionPlan",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "content": {
+      "$ref": "#/$defs/ExecutionPlan"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "maxLength": 64,
+      "title": "Created At",
+      "type": "string"
+    },
+    "parent_artifact_ids": {
+      "default": [],
+      "items": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Parent Artifact Ids",
+      "type": "array"
+    },
+    "producer": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_node": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer Node",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "producer",
+    "producer_node",
+    "created_at",
+    "content_sha256",
+    "content"
+  ],
+  "title": "ExecutionPlanArtifact",
+  "type": "object"
+}

@@ -1,0 +1,46 @@
+{
+  "properties": {
+    "data": {
+      "additionalProperties": true,
+      "title": "Data",
+      "type": "object"
+    },
+    "event": {
+      "enum": [
+        "task_state_changed",
+        "message",
+        "plan_created",
+        "approval_required",
+        "rag_usage",
+        "tool_started",
+        "tool_finished",
+        "file_changed",
+        "build_started",
+        "build_finished",
+        "test_started",
+        "test_finished",
+        "reflection",
+        "task_completed",
+        "task_failed"
+      ],
+      "title": "Event",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "timestamp": {
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event",
+    "task_id",
+    "timestamp",
+    "data"
+  ],
+  "title": "EventPayload",
+  "type": "object"
+}

@@ -1,0 +1,89 @@
+"""Deterministic public examples for both wire protocol versions.
+
+The v1 source is frozen separately so adding mission examples cannot rewrite a
+legacy message. Example paths, identifiers and hashes carry no authority.
+"""
+import json
+from pathlib import Path
+
+
+TASK_ID = "11111111-1111-4111-8111-111111111111"
+STAMP = "2026-10-27T08:00:00Z"
+
+
+def examples():
+    result = json.loads(Path(__file__).with_name("protocol_examples.v1.json").read_text(encoding="utf-8"))
+    result.update({
+        "mission_create_request": {
+            "repository_path": "D:/Projects/Example",
+            "request": "修复窗口关闭后 Worker 未停止的问题",
+            "task_type": "auto",
+            "orchestration_mode": "multi_agent",
+            "base_ref": "HEAD",
+            "toolchain_profile": "auto",
+        },
+        "mission_approve_request": {
+            "approval_type": "execution", "expected_revision": 8,
+            "task_spec_hash": "a" * 64, "plan_hash": "b" * 64,
+            "scope_hash": "c" * 64, "decision": "approved",
+        },
+        "mission_reject_request": {
+            "approval_type": "execution", "expected_revision": 8,
+            "task_spec_hash": "a" * 64, "plan_hash": "b" * 64,
+            "scope_hash": "c" * 64, "decision": "rejected",
+        },
+        "mission_cancel_request": {"expected_revision": 8},
+        "mission_retry_request": {"expected_revision": 8, "node_id": "root_cause_analysis"},
+        "mission_resume_request": {"expected_revision": 8, "recovery_token": "d" * 64},
+        "mission_delivery_request": {"expected_revision": 8, "mode": "preview"},
+        "mission_sse_reconnect_request": {
+            "method": "GET", "path": f"/api/v2/missions/{TASK_ID}/events",
+            "headers": {"Last-Event-ID": f"{TASK_ID}:8", "Accept": "text/event-stream"},
+        },
+        "mission_revision_conflict_error": {"error": {
+            "code": "mission_revision_conflict",
+            "message": "Mission revision changed; refresh the mission before retrying",
+            "details": [], "task_id": TASK_ID,
+        }},
+        "mission_approval_conflict_error": {"error": {
+            "code": "mission_approval_conflict",
+            "message": "TaskSpec, Plan or Scope changed; review the current approval package",
+            "details": [], "task_id": TASK_ID,
+        }},
+    })
+    result["mission_query_response"] = {
+        **result["mission_create_request"], "task_id": TASK_ID,
+        "status": "awaiting_human", "current_revision": 8,
+        "graph_id": "task-analysis.v1", "graph_version": 1,
+        "created_at": STAMP, "updated_at": STAMP, "finished_at": None,
+        "last_event_id": f"{TASK_ID}:8", "recovery_required": False,
+        "review": {
+            "task_id": TASK_ID, "revision": 8,
+            "task_spec_artifact_id": "22222222-2222-4222-8222-222222222222",
+            "task_spec_hash": "a" * 64,
+            "plan_artifact_id": "33333333-3333-4333-8333-333333333333",
+            "plan_hash": "b" * 64, "scope_hash": "c" * 64,
+            "review_hash": "d" * 64,
+        },
+    }
+    samples = (
+        ("task.created", None, "mission-host", {"status": "pending"}),
+        ("node.completed", "root_cause_analysis", "root-cause-analyst.v1",
+         {"artifact_ids": ["22222222-2222-4222-8222-222222222222"], "duration_ms": 10322}),
+        ("artifact.created", "root_cause_analysis", "root-cause-analyst.v1",
+         {"artifact_id": "22222222-2222-4222-8222-222222222222", "artifact_type": "EvidenceBundle"}),
+        ("approval.required", "execution_approval", "orchestrator.v1", {"approval_type": "execution"}),
+        ("tool.completed", "root_cause_analysis", "root-cause-analyst.v1", {"name": "read_file", "duration_ms": 12}),
+        ("model.completed", "root_cause_analysis", "root-cause-analyst.v1",
+         {"model": "configured-profile", "prompt_version": "1", "input_tokens": 1200, "output_tokens": 300}),
+        ("validation.completed", "validation", "validator.v1", {"status": "passed", "commit": "e" * 40}),
+        ("workspace.created", None, "workspace-manager", {"workspace_id": "workspace-example"}),
+        ("security.recorded", None, "policy-engine", {"code": "permission_denied", "severity": "warning"}),
+    )
+    for sequence, (event_type, node_id, actor, data) in enumerate(samples, start=1):
+        result[f"mission_event_{event_type.split('.')[0]}"] = {
+            "event_id": f"{TASK_ID}:{sequence}", "task_id": TASK_ID,
+            "task_revision": sequence, "timestamp": STAMP, "event_type": event_type,
+            "node_id": node_id, "actor": actor, "data": data,
+        }
+    return result

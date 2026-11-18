@@ -1,0 +1,27 @@
+[project]
+name = "forgepilot-agent"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "mcp>=1.26,<2",
+    "jsonschema>=4.26,<5",
+    "pydantic>=2.13.5",
+    "uvicorn>=0.53.0",
+    "qdrant-client>=1.15,<2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../eval"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[dependency-groups]
+dev = [
+    "coverage==7.17.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff==0.14.6",
+]

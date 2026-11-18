@@ -1,0 +1,277 @@
+{
+  "$defs": {
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command_summary": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Command Summary",
+          "type": "string"
+        },
+        "exit_code": {
+          "maximum": 2147483647,
+          "minimum": -2147483648,
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "finished_at": {
+          "maxLength": 64,
+          "title": "Finished At",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "configure",
+            "build",
+            "test",
+            "protected_test",
+            "integrity",
+            "custom"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "output_summary": {
+          "default": "",
+          "maxLength": 8192,
+          "title": "Output Summary",
+          "type": "string"
+        },
+        "started_at": {
+          "maxLength": 64,
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "command_summary",
+        "started_at",
+        "finished_at",
+        "exit_code"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "ValidationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/CommandResult"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Commands",
+          "type": "array"
+        },
+        "compile_errors": {
+          "default": [],
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Compile Errors",
+          "type": "array"
+        },
+        "diff_scope": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Diff Scope",
+          "type": "string"
+        },
+        "failure_classification": {
+          "default": "none",
+          "enum": [
+            "none",
+            "compile",
+            "test",
+            "timeout",
+            "policy",
+            "infrastructure",
+            "cancelled",
+            "unknown",
+            "code_failure",
+            "infrastructure_failure",
+            "policy_failure"
+          ],
+          "title": "Failure Classification",
+          "type": "string"
+        },
+        "hidden_oracle": {
+          "default": "not_run",
+          "enum": [
+            "not_run",
+            "passed",
+            "failed"
+          ],
+          "title": "Hidden Oracle",
+          "type": "string"
+        },
+        "log_artifact_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Log Artifact Ids",
+          "type": "array"
+        },
+        "pipeline_stages": {
+          "default": [],
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Pipeline Stages",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "test_integrity": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Test Integrity",
+          "type": "string"
+        },
+        "tests_failed": {
+          "minimum": 0,
+          "title": "Tests Failed",
+          "type": "integer"
+        },
+        "tests_passed": {
+          "minimum": 0,
+          "title": "Tests Passed",
+          "type": "integer"
+        },
+        "toolchain_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "title": "Toolchain Profile",
+          "type": "string"
+        },
+        "workspace_integrity": {
+          "default": "not_checked",
+          "enum": [
+            "not_checked",
+            "passed",
+            "failed"
+          ],
+          "title": "Workspace Integrity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "toolchain_profile",
+        "commands",
+        "status",
+        "tests_passed",
+        "tests_failed",
+        "summary"
+      ],
+      "title": "ValidationReport",
+      "type": "object"
+    }
+  },
+  "$id": "https://forgepilot.local/schemas/artifact-validationreport.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "ValidationReport",
+      "default": "ValidationReport",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "content": {
+      "$ref": "#/$defs/ValidationReport"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "maxLength": 64,
+      "title": "Created At",
+      "type": "string"
+    },
+    "parent_artifact_ids": {
+      "default": [],
+      "items": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Parent Artifact Ids",
+      "type": "array"
+    },
+    "producer": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer",
+      "type": "string"
+    },
+    "producer_node": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "title": "Producer Node",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "producer",
+    "producer_node",
+    "created_at",
+    "content_sha256",
+    "content"
+  ],
+  "title": "ValidationReportArtifact",
+  "type": "object"
+}

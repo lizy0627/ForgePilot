@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "name": "ForgePilot locked public C++ issues",
+  "tasks": [
+    {
+      "id": "real-bug-01",
+      "kind": "bug",
+      "title": "Preserve unknown short options in unmatched arguments",
+      "repository_url": "https://github.com/jarro2783/cxxopts",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "base_commit": "a150450486700ae28a44f0667cf83f65de2d258b",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/312",
+      "init_script": "real_tasks/init/init_repository.py",
+      "task_spec": {
+        "request": "When unrecognised options are allowed, a single-letter unknown short flag such as -z is silently lost from ParseResult::unmatched(). Keep it in the unmatched arguments in command-line order. Add a regression test using the project's existing test conventions. The preexisting assertion in test/options.cpp that encodes the old, incorrect unmatched() result may be corrected to the new expected result; preserve every other existing assertion and test control flow.",
+        "acceptance_criteria": ["Unknown short and long options remain in unmatched() in their input order.", "Existing parser tests and the protected behavioral check pass."],
+        "allowed_files": ["include/cxxopts.hpp", "test/options.cpp"],
+        "required_changed": ["include/cxxopts.hpp", "test/options.cpp"],
+        "integrity_policy": {"editable_existing_test_files": ["test/options.cpp"], "assertion_updates": [{"path": "test/options.cpp", "baseline_file_sha256": "e56bfbf3c944a7b7126614cba0152916fbf7b68e7963e9002f7b5138b07e042a", "old_assertion_sha256": "70d23badaef0125aaea6bd507615d5f1b737963cda9d746f39f0f327d7a8a36f", "new_assertion_sha256": "7206d232a15df39acf888ff655d4535e5683222c0a6d6e751a91c1415b56db50"}], "preserve_ctest_names": true, "minimum_ctest_cases": 1},
+        "validation_commands": [
+          ["cmake", "-S", ".", "-B", "{build_dir}", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCXXOPTS_BUILD_EXAMPLES=OFF", "-DCXXOPTS_BUILD_TESTS=ON"],
+          ["cmake", "--build", "{build_dir}", "--config", "Debug"],
+          ["ctest", "--test-dir", "{build_dir}", "-C", "Debug", "--output-on-failure"]
+        ]
+      },
+      "protected_oracle": "real_tasks/protected_oracles/bug_unmatched_short.py"
+    },
+    {
+      "id": "real-bug-02",
+      "kind": "bug",
+      "title": "Generate valid pkg-config include paths for absolute install directories",
+      "repository_url": "https://github.com/jarro2783/cxxopts",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "base_commit": "ac6d4702b6d28fe662ea537eb92f7286aa088e21",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/332",
+      "init_script": "real_tasks/init/init_repository.py",
+      "task_spec": {
+        "request": "Configuring cxxopts with an absolute CMAKE_INSTALL_INCLUDEDIR creates a broken pkg-config include path by prepending the install prefix. Fix absolute paths while preserving relative-path behavior. Add CTest coverage for default, custom relative, and absolute include directories.",
+        "acceptance_criteria": ["The generated includedir is exact for absolute input and remains prefix-relative for relative input.", "Existing CTest cases remain registered and pass."],
+        "allowed_files": ["cmake/cxxopts.cmake", "packaging/pkgconfig.pc.in", "test/CMakeLists.txt", "test/pkg-config-test/CMakeLists.txt"],
+        "required_changed": ["cmake/cxxopts.cmake", "packaging/pkgconfig.pc.in", "test/CMakeLists.txt", "test/pkg-config-test/CMakeLists.txt"],
+        "integrity_policy": {"editable_existing_test_files": ["test/CMakeLists.txt"], "control_flow_additions": [{"path": "test/CMakeLists.txt", "baseline_file_sha256": "deb045900277045ad946280b4d1f75c3ef36ce0a07c86cbd20c3a1d7a595ab9f", "kind": "cmake", "signature_sha256": "2f4f159511f7ab4088dc9fc42cd1674f0c4d74692be2c16b0e36db7fc786dc89"}, {"path": "test/CMakeLists.txt", "baseline_file_sha256": "deb045900277045ad946280b4d1f75c3ef36ce0a07c86cbd20c3a1d7a595ab9f", "kind": "cmake", "signature_sha256": "6fd49314af47f61fdddc4a8ea3098e627f227ad77bd66424237ac2cf1ab824a3"}], "preserve_ctest_names": true, "minimum_ctest_cases": 1},
+        "validation_commands": [
+          ["cmake", "-S", ".", "-B", "{build_dir}", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCXXOPTS_BUILD_EXAMPLES=OFF", "-DCXXOPTS_BUILD_TESTS=ON"],
+          ["cmake", "--build", "{build_dir}", "--config", "Debug"],
+          ["ctest", "--test-dir", "{build_dir}", "-C", "Debug", "--output-on-failure"]
+        ]
+      },
+      "protected_oracle": "real_tasks/protected_oracles/bug_pkgconfig_absolute.py"
+    },
+    {
+      "id": "real-bug-03",
+      "kind": "bug",
+      "title": "Reject trailing garbage in floating-point options",
+      "repository_url": "https://github.com/jarro2783/cxxopts",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "base_commit": "639cdbad93d45e74fd781e4cf6b0ac798eeec2aa",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/506",
+      "init_script": "real_tasks/init/init_repository.py",
+      "task_spec": {
+        "request": "Floating-point options accept strings with trailing junk, such as 2.5typo and nanXYZ, while integer parsing rejects trailing junk. Reject malformed floating-point arguments, keep valid floats working, and add regression tests.",
+        "acceptance_criteria": ["Trailing nonnumeric characters in float options are rejected.", "Valid finite and special floating-point values remain accepted; existing tests stay active."],
+        "allowed_files": ["include/cxxopts.hpp", "test/options.cpp"],
+        "required_changed": ["include/cxxopts.hpp", "test/options.cpp"],
+        "integrity_policy": {"editable_existing_test_files": ["test/options.cpp"], "control_flow_additions": [{"path": "test/options.cpp", "baseline_file_sha256": "8d8828d1e77ead81a4127f51103e9069d151fdc654bdae809052b94448b5979a", "kind": "cpp", "signature_sha256": "e6f731993d5907bdc5e8b86629a7626ee941837cb369c2ba1df9baea0cdcc826"}], "preserve_ctest_names": true, "minimum_ctest_cases": 1},
+        "validation_commands": [
+          ["cmake", "-S", ".", "-B", "{build_dir}", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCXXOPTS_BUILD_EXAMPLES=OFF", "-DCXXOPTS_BUILD_TESTS=ON"],
+          ["cmake", "--build", "{build_dir}", "--config", "Debug"],
+          ["ctest", "--test-dir", "{build_dir}", "-C", "Debug", "--output-on-failure"]
+        ]
+      },
+      "protected_oracle": "real_tasks/protected_oracles/bug_float_trailing.py"
+    },
+    {
+      "id": "real-feature-01",
+      "kind": "feature",
+      "title": "Expose parsed options in command-line order",
+      "repository_url": "https://github.com/jarro2783/cxxopts",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "base_commit": "f0406578bde4a942556a5f09168b9662287926af",
+      "issue_url": "https://github.com/jarro2783/cxxopts/issues/74",
+      "init_script": "real_tasks/init/init_repository.py",
+      "task_spec": {
+        "request": "Add a public ParseResult::arguments() API returning parsed options in command-line order, including repeated options. Its entries must provide key(), value(), and as<T>() accessors, so callers can inspect names, raw values, and typed values. Extend ParseResult and add tests for ordering and these accessors without changing existing keyed lookup behavior.",
+        "acceptance_criteria": ["ParseResult::arguments() exposes keys, raw values, and typed values in input order, including repetitions.", "Existing keyed lookup and CTest cases still work."],
+        "allowed_files": ["include/cxxopts.hpp", "test/options.cpp"],
+        "required_changed": ["include/cxxopts.hpp", "test/options.cpp"],
+        "integrity_policy": {"editable_existing_test_files": ["test/options.cpp"], "preserve_ctest_names": true, "minimum_ctest_cases": 1},
+        "validation_commands": [
+          ["cmake", "-S", ".", "-B", "{build_dir}", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCXXOPTS_BUILD_EXAMPLES=OFF", "-DCXXOPTS_BUILD_TESTS=ON"],
+          ["cmake", "--build", "{build_dir}", "--config", "Debug"],
+          ["ctest", "--test-dir", "{build_dir}", "-C", "Debug", "--output-on-failure"]
+        ]
+      },
+      "protected_oracle": "real_tasks/protected_oracles/feature_ordered_arguments.py"
+    },
+    {
+      "id": "real-feature-02",
+      "kind": "feature",
+      "title": "Automatically enable pugixml string-view support",
+      "repository_url": "https://github.com/zeux/pugixml",
+      "license": "MIT",
+      "license_file": "LICENSE.md",
+      "base_commit": "781e2dbe5d0aadaac9223ba35d3280f66e047761",
+      "issue_url": "https://github.com/zeux/pugixml/issues/640",
+      "init_script": "real_tasks/init/init_repository.py",
+      "task_spec": {
+        "request": "For C++17 or later, enable pugixml std::string_view overloads automatically without requiring an opt-in build define. Keep older language modes usable, align CMake's default standard and public definitions with the automatic behavior, and update the relevant configuration and documentation. Add a regression test for C++17 clients.",
+        "acceptance_criteria": ["C++17 clients can use string_view overloads without an opt-in define.", "CMake defaults to an appropriate C++ standard while explicit older standard selection still builds.", "Existing tests remain active and pass."],
+        "allowed_files": ["CMakeLists.txt", "src/pugiconfig.hpp", "src/pugixml.hpp", "tests/test_dom_traverse.cpp", "docs/manual.adoc"],
+        "required_changed": ["CMakeLists.txt", "src/pugiconfig.hpp", "src/pugixml.hpp", "docs/manual.adoc"],
+        "integrity_policy": {"editable_existing_test_files": ["tests/test_dom_traverse.cpp"], "preserve_ctest_names": true, "minimum_ctest_cases": 1},
+        "validation_commands": [
+          ["cmake", "-S", ".", "-B", "{build_dir}", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DPUGIXML_BUILD_TESTS=ON", "-DCMAKE_CXX_STANDARD=17"],
+          ["cmake", "--build", "{build_dir}", "--config", "Debug"],
+          ["ctest", "--test-dir", "{build_dir}", "-C", "Debug", "--output-on-failure"]
+        ]
+      },
+      "protected_oracle": "real_tasks/protected_oracles/feature_string_view.py"
+    }
+  ]
+}
