@@ -61,11 +61,6 @@ jobs:
         shell: pwsh
         run: ./scripts/ci-python-tests.ps1 -Fast
 
-      - name: Python tests / develop, main and release full set
-        if: github.event_name != 'pull_request'
-        shell: pwsh
-        run: ./scripts/ci-python-tests.ps1 -Full
-
       - name: Offline retrieval evaluation / develop, main and release
         if: github.event_name != 'pull_request'
         shell: pwsh
@@ -146,6 +141,11 @@ jobs:
           Push-Location client
           try { & "$env:FORGEPILOT_QT_KIT/bin/windeployqt.exe" --release --no-translations --qmldir . build/Release/ForgePilotClient.exe } finally { Pop-Location }
           if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed' }
+
+      - name: Python tests / develop, main and release full set
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: ./scripts/ci-python-tests.ps1 -Full
 
       - name: Package smoke / PR fast set
         if: github.event_name == 'pull_request'
