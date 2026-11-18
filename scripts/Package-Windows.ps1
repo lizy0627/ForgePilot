@@ -10,15 +10,31 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'artifacts' }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 $packageName = "ForgePilot-$Version-windows-x64"
-$stage = Join-Path $output $packageName
+$stage = Join-Path $output ('.forgepilot-stage-' + [Guid]::NewGuid().ToString('N'))
 $zip = Join-Path $output ($packageName + '.zip')
 $checksum = $zip + '.sha256'
+$buildRoot = Join-Path $output ('.forgepilot-freeze-' + [Guid]::NewGuid().ToString('N'))
 
 function Assert-UnderOutput([string]$Path) {
     $resolved = [IO.Path]::GetFullPath($Path)
     $prefix = $output.TrimEnd('\') + '\'
     if (-not $resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Packaging target is outside the selected output directory.'
+    }
+}
+
+function Assert-NoReparseInPath([string]$Path) {
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Packaging path contains a junction or symbolic link.'
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if (-not $parent -or $parent -eq $current) { break }
+        $current = $parent
     }
 }
 
@@ -38,35 +54,74 @@ function Get-RelativeFilePath([string]$Base, [string]$Target) {
     return [Uri]::UnescapeDataString($baseUri.MakeRelativeUri($targetUri).ToString()).Replace('/', '\')
 }
 
-function Copy-PythonTree([string]$Source, [string]$RelativeDestination) {
-    Get-ChildItem -LiteralPath $Source -Recurse -File -Filter '*.py' | Sort-Object FullName | ForEach-Object {
-        $relative = Get-RelativeFilePath $Source $_.FullName
-        Copy-File $_.FullName (Join-Path $RelativeDestination $relative)
-    }
-}
-
+Assert-NoReparseInPath $output
 New-Item -ItemType Directory -Path $output -Force | Out-Null
+Assert-NoReparseInPath $output
 Assert-UnderOutput $stage
 Assert-UnderOutput $zip
 Assert-UnderOutput $checksum
-if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+Assert-UnderOutput $buildRoot
+foreach ($path in @($stage, $zip, $checksum, $buildRoot)) { Assert-NoReparseInPath $path }
+
+$python = Join-Path $root 'agent.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Build requires the locked root agent.venv Python 3.12 environment.'
+}
+& $python -c 'import sys, fastapi, uvicorn, mcp, qdrant_client; raise SystemExit(sys.version_info[:2] != (3, 12))'
+if ($LASTEXITCODE -ne 0) { throw 'Build requires a complete Python 3.12 agent environment.' }
+$uv = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $uv) { throw 'Build host requires uv.exe; the resulting ZIP does not.' }
+$previousProjectEnvironment = $env:UV_PROJECT_ENVIRONMENT
+$previousPythonPath = $env:PYTHONPATH
+try {
+    $env:UV_PROJECT_ENVIRONMENT = Join-Path $root 'agent.venv'
+    $env:PYTHONPATH = Join-Path $root 'agent'
+    $pyinstallerArgs = @(
+        'run', '--project', (Join-Path $root 'agent'), '--no-sync',
+        '--with', 'pyinstaller==6.22.3', 'python', '-m', 'PyInstaller',
+        '--noconfirm', '--clean', '--onedir', '--contents-directory', '_internal',
+        '--name', 'ForgePilotAgent',
+        '--paths', (Join-Path $root 'agent'), '--paths', $PSScriptRoot,
+        '--collect-submodules', 'forgepilot', '--collect-submodules', 'uvicorn',
+        '--add-data', ((Join-Path $root 'agent\forgepilot\protocol_examples.v1.json') + ':forgepilot'),
+        '--collect-submodules', 'qdrant_client',
+        '--distpath', (Join-Path $buildRoot 'dist'),
+        '--workpath', (Join-Path $buildRoot 'work'),
+        '--specpath', (Join-Path $buildRoot 'spec'),
+        (Join-Path $PSScriptRoot 'desktop_launcher.py')
+    )
+    & $uv.Source @pyinstallerArgs
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
+} catch {
+    if (Test-Path -LiteralPath $buildRoot) {
+        Assert-NoReparseInPath $buildRoot
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force
+    }
+    throw
+} finally {
+    if ($null -eq $previousProjectEnvironment) { Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue }
+    else { $env:UV_PROJECT_ENVIRONMENT = $previousProjectEnvironment }
+    if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
+    else { $env:PYTHONPATH = $previousPythonPath }
+}
+$frozen = Join-Path $buildRoot 'dist\ForgePilotAgent'
+if (-not (Test-Path -LiteralPath (Join-Path $frozen 'ForgePilotAgent.exe') -PathType Leaf)) {
+    throw 'PyInstaller did not produce ForgePilotAgent.exe.'
+}
+if (Test-Path -LiteralPath $stage) { throw 'Unique release staging path already exists.' }
+foreach ($path in @($zip, $checksum, $buildRoot)) { Assert-NoReparseInPath $path }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
-foreach ($name in @('README.md', 'Start-ForgePilot.cmd', 'Stop-ForgePilot.cmd', 'Configure-ForgePilot.cmd', 'Check-Model.cmd')) {
+Copy-File (Join-Path $root 'docs\windows-release-readme.md') 'README.md'
+foreach ($name in @('Start-ForgePilot.cmd', 'Stop-ForgePilot.cmd', 'Configure-ForgePilot.cmd', 'Check-Model.cmd')) {
     Copy-File (Join-Path $root $name) $name
 }
-foreach ($name in @('pyproject.toml', 'uv.lock', '.python-version')) {
-    Copy-File (Join-Path $root "agent\$name") "agent\$name"
-}
-Copy-PythonTree (Join-Path $root 'agent\forgepilot') 'agent\forgepilot'
-Copy-File (Join-Path $root 'agent\forgepilot\protocol_examples.v1.json') 'agent\forgepilot\protocol_examples.v1.json'
-
-foreach ($name in @(
-    'Desktop.cmd', 'Desktop.ps1', 'desktop_launcher.py', 'Setup-Agent.cmd',
-    'Check-Environment.cmd', 'Start-Agent.cmd', 'Check-Release.cmd',
-    'release_smoke.py', 'local-env.example.cmd'
-)) {
+foreach ($name in @('Desktop.cmd', 'Desktop.ps1', 'Check-Release.cmd')) {
     Copy-File (Join-Path $PSScriptRoot $name) "scripts\$name"
+}
+Get-ChildItem -LiteralPath $frozen -Recurse -File | Sort-Object FullName | ForEach-Object {
+    $relative = Get-RelativeFilePath $frozen $_.FullName
+    Copy-File $_.FullName (Join-Path 'bin' $relative)
 }
 
 $clientSource = Join-Path $root 'client\build\Release'
@@ -87,7 +142,7 @@ Get-ChildItem -LiteralPath $clientSource -Directory | Sort-Object Name | ForEach
 $relativeFiles = Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
     (Get-RelativeFilePath $stage $_.FullName).Replace('\', '/')
 }
-$forbiddenNames = '(?i)(^|/)(config\.json|api-key\.dpapi|logs?|__pycache__|\.pytest_cache)(/|$)|\.(db|sqlite3?|log|pyc|pdb|obj|lib|exp)$'
+$forbiddenNames = '(?i)(^|/)(config\.json|api-key\.dpapi|logs?|__pycache__|\.pytest_cache|uv\.exe|pythonw?\.exe)(/|$)|\.(py|db|sqlite3?|log|pyc|pdb|obj|lib|exp)$'
 $badNames = @($relativeFiles | Where-Object { $_ -match $forbiddenNames })
 if ($badNames.Count) { throw 'Release staging contains forbidden runtime, secret, log, cache, or build files.' }
 
@@ -97,7 +152,9 @@ $needles = @(
     [Environment]::GetFolderPath('UserProfile'),
     [Environment]::GetFolderPath('UserProfile').Replace('\', '/')
 ) | Where-Object { $_ } | Sort-Object -Unique
-foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File) {
+foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object {
+    $_.Extension -in @('.cmd', '.ps1', '.md', '.json', '.txt', '.toml', '.xml')
+}) {
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
     $singleByteText = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
     $unicodeText = [Text.Encoding]::Unicode.GetString($bytes)
@@ -127,37 +184,45 @@ function New-ReleaseArchive([string]$ArchivePath) {
 
 function Test-ExtractedRelease([string]$ArchivePath) {
     $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-    $verifyRoot = Join-Path $temporaryRoot ('ForgePilot-release-verify-' + [Guid]::NewGuid().ToString('N'))
+    # Keep extraction under MAX_PATH even when a Qt QML asset has a long name.
+    $verifyRoot = Join-Path $temporaryRoot ('fpv-' + [Guid]::NewGuid().ToString('N').Substring(0, 12))
     $verifyRoot = [IO.Path]::GetFullPath($verifyRoot)
     if (-not $verifyRoot.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Release verification target is outside the temporary directory.'
     }
+    $previousPath = $env:PATH
     $previousPython = $env:FORGEPILOT_PYTHON
+    $previousLocalAppData = $env:LOCALAPPDATA
     try {
         [IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $verifyRoot)
         $extracted = Join-Path $verifyRoot $packageName
-        if (-not $env:FORGEPILOT_PYTHON -or -not (Test-Path -LiteralPath $env:FORGEPILOT_PYTHON -PathType Leaf)) {
-            $sourceEnvironmentPython = Join-Path $root 'agent.venv\Scripts\python.exe'
-            if (-not (Test-Path -LiteralPath $sourceEnvironmentPython -PathType Leaf)) {
-                throw 'Python 3.12 is required to verify the extracted release.'
-            }
-            $basePython = (& $sourceEnvironmentPython -c "import pathlib, sys; print(pathlib.Path(sys.base_prefix) / 'python.exe')").Trim()
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $basePython -PathType Leaf)) {
-                throw 'Python 3.12 is required to verify the extracted release.'
-            }
-            $env:FORGEPILOT_PYTHON = $basePython
+        $windows = [Environment]::GetFolderPath('Windows')
+        $env:PATH = (Join-Path $windows 'System32') + ';' + (Join-Path $windows 'System32\WindowsPowerShell\v1.0')
+        Remove-Item Env:FORGEPILOT_PYTHON -ErrorAction SilentlyContinue
+        $env:LOCALAPPDATA = Join-Path $verifyRoot 'local-app-data'
+        if (Get-Command python.exe, uv.exe -CommandType Application -ErrorAction SilentlyContinue) {
+            throw 'Verification PATH unexpectedly contains Python or uv.'
+        }
+        if (Test-Path -LiteralPath (Join-Path $extracted 'agent')) {
+            throw 'Self-contained release unexpectedly contains agent source.'
         }
         Push-Location $extracted
         try {
-            & '.\scripts\Setup-Agent.cmd'
-            if ($LASTEXITCODE -ne 0) { throw 'Extracted release agent setup failed.' }
             & '.\scripts\Check-Release.cmd'
             if ($LASTEXITCODE -ne 0) { throw 'Extracted release preflight failed.' }
+            & '.\Stop-ForgePilot.cmd'
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted release stop entrypoint failed.' }
         } finally { Pop-Location }
     } finally {
+        $env:PATH = $previousPath
         if ($null -eq $previousPython) { Remove-Item Env:FORGEPILOT_PYTHON -ErrorAction SilentlyContinue }
         else { $env:FORGEPILOT_PYTHON = $previousPython }
-        if (Test-Path -LiteralPath $verifyRoot) { Remove-Item -LiteralPath $verifyRoot -Recurse -Force }
+        if ($null -eq $previousLocalAppData) { Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue }
+        else { $env:LOCALAPPDATA = $previousLocalAppData }
+        if (Test-Path -LiteralPath $verifyRoot) {
+            Assert-NoReparseInPath $verifyRoot
+            Remove-Item -LiteralPath $verifyRoot -Recurse -Force
+        }
     }
 }
 
@@ -166,7 +231,10 @@ $pendingChecksum = $pendingZip + '.sha256'
 $backupZip = $pendingZip + '.previous'
 try {
     try { New-ReleaseArchive $pendingZip } finally {
+        Assert-NoReparseInPath $stage
+        Assert-NoReparseInPath $buildRoot
         Remove-Item -LiteralPath $stage -Recurse -Force
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force
     }
     $archive = [IO.Compression.ZipFile]::OpenRead($pendingZip)
     try {

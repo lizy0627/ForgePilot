@@ -9,6 +9,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QTimer>
 
 static_assert(_MSVC_LANG >= 202002L, "C++20 is required");
 static_assert(sizeof(void*) == 8, "x64 is required");
@@ -23,6 +24,7 @@ int main(int argc, char* argv[])
     parser.addOption({"server", "本机后端 HTTP 地址", "url", "http://127.0.0.1:8765"});
     parser.addOption({"runtime-config", "本机启动器配置路径", "path"});
     parser.addOption({"configure", "打开运行配置向导"});
+    parser.addOption({"self-test", "离线验证发布包中的 Qt/QML 客户端可加载"});
     parser.process(app);
     TaskController controller;
     controller.setBaseUrl(QUrl(parser.value("server")));
@@ -41,10 +43,13 @@ int main(int argc, char* argv[])
                      [&] { conversations.setUseRag(rag.useForTasks()); });
     RuntimeConfigController runtimeConfig;
     QObject::connect(&runtimeConfig, &RuntimeConfigController::restartAccepted, &app, &QCoreApplication::quit);
-    runtimeConfig.configureHelper(parser.value("runtime-config"));
+    if (!parser.isSet("self-test")) runtimeConfig.configureHelper(parser.value("runtime-config"));
     QQmlApplicationEngine engine;
-    engine.setInitialProperties({{"runtimeConfig", QVariant::fromValue(&runtimeConfig)}, {"showRuntimeConfiguration", parser.isSet("configure")}, {"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
+    engine.setInitialProperties({{"runtimeConfig", parser.isSet("self-test") ? QVariant() : QVariant::fromValue(&runtimeConfig)}, {"showRuntimeConfiguration", parser.isSet("configure")}, {"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("ForgePilot", "Main");
+    if (parser.isSet("self-test")) {
+        QTimer::singleShot(5000, &app, [&] { app.exit(engine.rootObjects().isEmpty() ? 1 : 0); });
+    }
     return app.exec();
 }

@@ -95,7 +95,6 @@ def close_fixture_window(pid):
     assert all(closed)
 
 
-
 def wait_stopped(config):
     deadline = time.monotonic() + 8
     while launcher.Kernel(config).running() and time.monotonic() < deadline:
@@ -289,6 +288,27 @@ def test_launcher_reads_legacy_partial_complete_and_rejects_invalid_models(tmp_p
         with pytest.raises(ValueError): launcher.read_config(config)
 
 
+def test_review_route_requires_distinct_model_and_complete_families(tmp_path):
+    config = tmp_path / 'config.json'
+    base = {'base_url': 'https://provider.invalid/v1', 'port': 8765,
+            'server_args': [], 'task_model': 'task-one',
+            'chat_model': 'task-one', 'summary_model': 'task-one'}
+    complete = {**base, 'review_model': 'review-two',
+                'task_model_family': 'doubao', 'review_model_family': 'glm'}
+    config.write_text(json.dumps(complete), encoding='utf-8')
+    selected = launcher.read_config(config)
+    assert (selected['review_model'], selected['task_model_family'],
+            selected['review_model_family']) == ('review-two', 'doubao', 'glm')
+    for invalid in ({**base, 'review_model': 'review-two'},
+                    {**complete, 'review_model': 'task-one'},
+                    {**complete, 'review_model_family': 'doubao'},
+                    {**complete, 'review_model_family': 'bad family'},
+                    {**complete, 'review_model': 'bad\nmodel'}):
+        config.write_text(json.dumps(invalid), encoding='utf-8')
+        with pytest.raises(ValueError, match='model_config_review'):
+            launcher.read_config(config)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('status', [200, 401, 403, 429])
 async def test_model_check_uses_config_without_history_or_secret_output(configured, monkeypatch, capsys, status):
@@ -352,6 +372,29 @@ async def test_model_check_validates_each_distinct_model_and_names_failed_purpos
     assert calls==['fast-chat','quality-task','cheap-summary']
     assert '任务模型检查失败' in output.err and '聊天模型检查失败' not in output.err
     assert KEY not in output.out+output.err and 'provider.invalid' not in output.out+output.err
+
+
+@pytest.mark.asyncio
+async def test_model_check_includes_review_model(tmp_path, monkeypatch, capsys):
+    config = tmp_path / 'models.json'
+    config.write_text(json.dumps({
+        'base_url': 'https://provider.invalid/v1', 'model': 'task-model',
+        'review_model': 'review-model', 'task_model_family': 'family-one',
+        'review_model_family': 'family-two', 'port': 8765, 'server_args': [],
+    }), encoding='utf-8')
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content)['model'])
+        return httpx.Response(200, json={'choices': [
+            {'message': {'role': 'assistant', 'content': 'OK'}, 'finish_reason': 'stop'},
+        ]})
+
+    monkeypatch.setenv('FORGEPILOT_API_KEY', KEY)
+    assert await launcher.check_model(config, transport=httpx.MockTransport(respond)) == 0
+    output = capsys.readouterr()
+    assert calls == ['task-model', 'review-model']
+    assert '审查' in output.out and KEY not in output.out + output.err
 
 
 @pytest.mark.asyncio

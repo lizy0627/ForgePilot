@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import secrets
 from pathlib import Path
 import socket
@@ -21,19 +22,26 @@ import sys
 import time
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'agent'))
+FROZEN = bool(getattr(sys, 'frozen', False))
+ROOT = Path(sys.executable).resolve().parents[1] if FROZEN else Path(__file__).resolve().parents[1]
+if not FROZEN:
+    sys.path.insert(0, str(ROOT / 'agent'))
 from forgepilot.build_process import ProcessJob, build_environment
 from forgepilot.security import Redactor
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.gateway import ModelGateway
 from forgepilot import desktop_configuration
 
-PYTHON = ROOT / 'agent.venv/Scripts/python.exe'
+PYTHON = Path(sys.executable) if FROZEN else ROOT / 'agent.venv/Scripts/python.exe'
 LEGACY_PYTHON_ENVIRONMENT = ROOT / 'agent/.venv'
-SCRIPT = Path(__file__).resolve()
+SCRIPT = Path(sys.executable).resolve() if FROZEN else Path(__file__).resolve()
 CLIENT_START_TIMEOUT = 15
 SHUTDOWN_TIMEOUT = 25
+
+
+def launcher_command(action: str, *arguments: str) -> list[str]:
+    prefix = [str(SCRIPT)] if FROZEN else [str(PYTHON), '-I', str(SCRIPT)]
+    return [*prefix, action, *arguments]
 
 
 class Kernel:
@@ -153,7 +161,7 @@ def backend(config, job, ready, log):
     kernel = Kernel(config)
     kernel.join(job)  # Before loading the service or spawning any of its tools.
     event = kernel.event()
-    frozen_config = os.environ.get("FORGEPILOT_LAUNCH_CONFIG")
+    frozen_config = os.environ.get('FORGEPILOT_LAUNCH_CONFIG')
     data = read_config(Path(frozen_config) if frozen_config else config)
     os.environ['FORGEPILOT_BASE_URL'] = data['base_url']
     if data['model']:
@@ -163,6 +171,13 @@ def backend(config, job, ready, log):
     os.environ['FORGEPILOT_CHAT_MODEL'] = data['chat_model']
     os.environ['FORGEPILOT_TASK_MODEL'] = data['task_model']
     os.environ['FORGEPILOT_SUMMARY_MODEL'] = data['summary_model']
+    for name, value in (('FORGEPILOT_REVIEW_MODEL', data['review_model']),
+                        ('FORGEPILOT_TASK_MODEL_FAMILY', data['task_model_family']),
+                        ('FORGEPILOT_REVIEW_MODEL_FAMILY', data['review_model_family'])):
+        if value:
+            os.environ[name] = value
+        else:
+            os.environ.pop(name, None)
     with log.open('w', encoding='utf-8') as output:
         writer = RedactedLog(output, os.environ.get('FORGEPILOT_API_KEY', ''))
         previous = sys.stdout, sys.stderr
@@ -184,7 +199,9 @@ def owned_client(job, log, port, local_token):
         client_env = build_environment()
         client_env.update(desktop_configuration.model_check_environment(os.environ.get('FORGEPILOT_RUNTIME_CONFIG')))
         client_env['FORGEPILOT_LOCAL_API_TOKEN'] = local_token
-        proc = subprocess.Popen([str(PYTHON), '-I', str(worker), job.name], stdin=subprocess.PIPE,
+        command = (launcher_command('worker', '--job', job.name) if FROZEN
+                   else [str(PYTHON), '-I', str(worker), job.name])
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE,
                                 stdout=output, stderr=output, env=client_env,
                                 creationflags=subprocess.CREATE_NO_WINDOW)
     command = [str(ROOT / 'client/build/Release/ForgePilotClient.exe'), '--server', f'http://127.0.0.1:{port}']
@@ -304,8 +321,8 @@ def supervise(config, result):
         write_json(state_file, state)
         job = ProcessJob()
         ready = run / 'backend.ready'
-        child = subprocess.Popen([str(PYTHON), '-I', str(SCRIPT), 'backend', '--config', str(config),
-                                  '--job', job.name, '--ready', str(ready), '--log', str(run / 'backend.log')],
+        child = subprocess.Popen(launcher_command('backend', '--config', str(config),
+                                  '--job', job.name, '--ready', str(ready), '--log', str(run / 'backend.log')),
                                  cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
                                  env={**os.environ, 'FORGEPILOT_LOCAL_API_TOKEN': local_token,
@@ -533,7 +550,7 @@ def start(config):
         return show_managed_window(config)
     config.parent.mkdir(parents=True, exist_ok=True)
     result = config.parent / ('start-' + uuid4().hex + '.json')
-    owner = subprocess.Popen([str(PYTHON), '-I', str(SCRIPT), 'supervise', '--config', str(config), '--result', str(result)],
+    owner = subprocess.Popen(launcher_command('supervise', '--config', str(config), '--result', str(result)),
                      cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
     deadline = time.monotonic() + 30 + CLIENT_START_TIMEOUT + SHUTDOWN_TIMEOUT + 15
@@ -674,24 +691,46 @@ def configuration_helper(config):
     return 0
 
 
-
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == 'config-helper':
         parser = argparse.ArgumentParser()
         parser.add_argument('action'); parser.add_argument('--config', type=Path, required=True)
         args = parser.parse_args()
         return configuration_helper(args.config.resolve())
+    if len(sys.argv) > 1 and sys.argv[1] == 'stdio-worker':
+        if len(sys.argv) < 4:
+            return 125
+        from forgepilot._lsp_worker import main as stdio_worker
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+        return stdio_worker()
     if LEGACY_PYTHON_ENVIRONMENT.exists():
         print('WARNING: agent/.venv is not supported. Use the root agent.venv; '
               'the old environment was not removed.', file=sys.stderr)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('start', 'stop', 'status', 'supervise', 'backend', 'check', 'desktop', 'configure', 'check-saved'))
-    parser.add_argument('--config', required=True, type=Path)
+    parser.add_argument('action', choices=('start', 'stop', 'status', 'supervise', 'backend', 'check',
+                                           'server', 'smoke', 'worker', 'desktop', 'configure', 'check-saved'))
+    parser.add_argument('--config', type=Path)
     parser.add_argument('--result', type=Path)
     parser.add_argument('--job')
     parser.add_argument('--ready', type=Path)
     parser.add_argument('--log', type=Path)
-    args = parser.parse_args()
+    args, extra = parser.parse_known_args()
+    if args.action == 'server':
+        from forgepilot.server import main as serve
+        return serve(extra)
+    if extra:
+        parser.error('unrecognized arguments: ' + ' '.join(extra))
+    if args.action == 'smoke':
+        from release_smoke import main as smoke
+        return smoke()
+    if args.action == 'worker':
+        if not args.job:
+            parser.error('worker requires --job')
+        from forgepilot._build_worker import main as worker
+        sys.argv = [sys.argv[0], args.job]
+        return worker()
+    if args.config is None:
+        parser.error('--config is required')
     config = args.config.resolve()
     if args.action == 'desktop':
         return desktop(config)

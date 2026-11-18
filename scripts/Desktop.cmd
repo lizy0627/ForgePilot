@@ -4,8 +4,10 @@ set "FORGEPILOT_DESKTOP_EXIT=1"
 for /f "tokens=2 delims=:" %%p in ('chcp') do set "FORGEPILOT_DESKTOP_OLD_CP=%%p"
 chcp 65001 >nul
 title ForgePilot - %~1
-call "%~dp0Check-Environment.cmd" runtime
-if errorlevel 1 goto failed
+if not exist "%~dp0..\bin\ForgePilotAgent.exe" (
+    call "%~dp0Check-Environment.cmd" runtime
+    if errorlevel 1 goto failed
+)
 :run
 rem Let Windows PowerShell use its own modules even when called from PowerShell 7.
 set "PSModulePath="

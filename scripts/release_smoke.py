@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,8 @@ import time
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parents[1]
+FROZEN = bool(getattr(sys, "frozen", False))
+ROOT = Path(sys.executable).resolve().parents[1] if FROZEN else Path(__file__).resolve().parents[1]
 AGENT = ROOT / "agent"
 
 
@@ -43,6 +45,28 @@ def configuration_helper_smoke(directory: Path, environment: dict[str, str]) -> 
         return False
 
 
+def frozen_worker_smoke(directory: Path) -> bool:
+    """Exercise both owned subprocess paths without Python, uv or a model."""
+    from forgepilot.build_process import ProcessJob, build_environment, run_build_process
+    from forgepilot.frozen_runtime import owned_worker_command
+
+    command = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe")
+    environment = build_environment()
+    result = asyncio.run(run_build_process([command, "/d", "/c", "echo", "forgepilot-build-ok"],
+                                           directory, timeout=15, env=environment))
+    if result.status != "succeeded" or "forgepilot-build-ok" not in result.stdout:
+        return False
+    job = ProcessJob()
+    try:
+        result = subprocess.run(owned_worker_command("stdio", job.name, command, "/d", "/c",
+                                                     "echo", "forgepilot-stdio-ok"),
+                                cwd=directory, env=environment, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return result.returncode == 0 and b"forgepilot-stdio-ok" in result.stdout
+    finally:
+        job.close()
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
@@ -71,9 +95,7 @@ def main() -> int:
             return 1
         database = Path(directory) / "health.sqlite3"
         command = [
-            sys.executable,
-            "-m",
-            "forgepilot.server",
+            *([sys.executable, "server"] if FROZEN else [sys.executable, "-m", "forgepilot.server"]),
             "--host",
             "127.0.0.1",
             "--port",
@@ -89,7 +111,7 @@ def main() -> int:
         launched_at = time.monotonic()
         process = subprocess.Popen(
             command,
-            cwd=AGENT,
+            cwd=ROOT if FROZEN else AGENT,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -109,8 +131,12 @@ def main() -> int:
                     with urlopen(request, timeout=1) as response:
                         schema = json.load(response)
                     if schema.get("openapi") and "/api/v1/conversations" in schema.get("paths", {}):
+                        if FROZEN and not frozen_worker_smoke(Path(directory)):
+                            return 1
                         print("Offline backend health check passed.")
                         print("Offline configuration helper check passed.")
+                        if FROZEN:
+                            print("Owned build and stdio worker checks passed.")
                         print(f"backend_ready_ms={(time.monotonic() - launched_at) * 1000:.3f}")
                         return 0
                     return 1

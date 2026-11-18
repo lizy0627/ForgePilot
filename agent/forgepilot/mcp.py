@@ -2,12 +2,11 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 import subprocess
-import sys
 
 from .build_process import ProcessJob
 from .errors import ForgePilotError, MCPRequestError
+from .frozen_runtime import owned_worker_command
 from .security import Redactor
 from .mcp_config import sensitive_values
 from .process import wait_for_cleanup
@@ -58,8 +57,8 @@ class MCPClient:
         env["PYTHONIOENCODING"] = "utf-8"
         env.update(self.config.env)
         self.launcher = asyncio.create_task(asyncio.create_subprocess_exec(
-            sys.executable, "-I", str(Path(__file__).with_name("_lsp_worker.py")), self.job.name,
-            self.config.command, *self.config.args, cwd=self.config.cwd, env=env,
+            *owned_worker_command("stdio", self.job.name, self.config.command, *self.config.args),
+            cwd=self.config.cwd, env=env,
             creationflags=subprocess.CREATE_NO_WINDOW, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=MAX_MESSAGE))
         try:

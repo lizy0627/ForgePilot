@@ -1,10 +1,10 @@
 ﻿param([ValidateSet('Start', 'Stop', 'Configure', 'Check')][string]$Action = 'Start')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$packagedRuntimeFile = Join-Path $projectRoot 'bin\ForgePilotAgent.exe'
-$packagedRuntimeAvailable = Test-Path -LiteralPath $packagedRuntimeFile -PathType Leaf
-$pythonExe = if ($packagedRuntimeAvailable) { $packagedRuntimeFile } elseif ($env:FORGEPILOT_PYTHON) { $env:FORGEPILOT_PYTHON } else { Join-Path $projectRoot 'agent.venv\Scripts\python.exe' }
-$launcherPrefix = if ($packagedRuntimeAvailable) { @() } else { @('-X', 'utf8', '-I', (Join-Path $PSScriptRoot 'desktop_launcher.py')) }
+$frozenExe = Join-Path $projectRoot 'bin\ForgePilotAgent.exe'
+$useFrozen = Test-Path -LiteralPath $frozenExe -PathType Leaf
+$pythonExe = if ($useFrozen) { $frozenExe } elseif ($env:FORGEPILOT_PYTHON) { $env:FORGEPILOT_PYTHON } else { Join-Path $projectRoot 'agent.venv\Scripts\python.exe' }
+$launcherArgs = if ($useFrozen) { @() } else { @('-X', 'utf8', '-I', (Join-Path $PSScriptRoot 'desktop_launcher.py')) }
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $identity = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($projectRoot.ToLowerInvariant())))).Replace('-', '').Substring(0, 16) }
 finally { $sha.Dispose() }
@@ -21,7 +21,7 @@ try {
         'Stop' { 'stop' }
         'Check' { 'check-saved' }
     }
-    & $pythonExe @launcherPrefix $operation --config $configFile
+    & $pythonExe @launcherArgs $operation --config $configFile
     exit $LASTEXITCODE
 } catch {
     # No raw exception/configuration/credential values go to console output.

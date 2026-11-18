@@ -2,12 +2,11 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 import subprocess
-import sys
 
 from .build_process import ProcessJob, build_environment
 from .errors import ForgePilotError
+from .frozen_runtime import owned_worker_command
 from .process import wait_for_cleanup
 
 MAX_MESSAGE = 4_194_304
@@ -35,7 +34,7 @@ class LspClient:
     async def start(self):
         self.job = ProcessJob()
         self.launcher = asyncio.create_task(asyncio.create_subprocess_exec(
-            sys.executable, "-I", str(Path(__file__).with_name("_lsp_worker.py")), self.job.name, *self.command,
+            *owned_worker_command("stdio", self.job.name, *self.command),
             cwd=self.root, env=build_environment(), creationflags=subprocess.CREATE_NO_WINDOW,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=MAX_MESSAGE + 8192))

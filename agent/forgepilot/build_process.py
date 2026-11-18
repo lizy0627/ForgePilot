@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 from time import perf_counter
 from uuid import uuid4
 
@@ -28,7 +27,14 @@ def build_environment() -> dict[str, str]:
              "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)",
              "COMMONPROGRAMW6432"}
     env = {k: v for k, v in os.environ.items() if k.upper() in names}
-    env.update(PYTHONIOENCODING="utf-8", CLICOLOR="0", CMAKE_COLOR_DIAGNOSTICS="OFF", MSBUILDDISABLENODEREUSE="1")
+    for key in ("PATH", "INCLUDE", "LIB", "LIBPATH"):
+        for actual in tuple(env):
+            if actual.upper() == key:
+                env[actual] = ";".join(part for part in env[actual].split(";") if part)
+    # Historical C++ fixtures contain UTF-8 source. Nested CTest builds do not
+    # inherit top-level CMAKE_CXX_FLAGS, so pin MSVC's source encoding here.
+    env.update(PYTHONIOENCODING="utf-8", CLICOLOR="0", CMAKE_COLOR_DIAGNOSTICS="OFF",
+               MSBUILDDISABLENODEREUSE="1", CL="/utf-8", _CL_="/Z7")
     return env
 
 
@@ -94,7 +100,10 @@ class BuildCancelled(asyncio.CancelledError):
 
 
 async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
-                            env: dict[str, str] | None = None, output_limit: int = 1_048_576) -> CommandResult:
+                            env: dict[str, str] | None = None, output_limit: int = 1_048_576,
+                            input_data: bytes | None = None) -> CommandResult:
+    if input_data is not None and (type(input_data) is not bytes or len(input_data) > 65_536):
+        raise ForgePilotError("command_denied", "Build process input must be bounded bytes")
     if (type(command) is not list or not command or len(command) > 257 or not command[0]
             or any(not isinstance(arg, str) or "\x00" in arg for arg in command)
             or len(json.dumps(command, ensure_ascii=True)) > 120_000):
@@ -126,14 +135,18 @@ async def run_build_process(command: list[str], cwd: Path, *, timeout: float,
         async with asyncio.timeout(timeout):
             # The trusted worker assigns itself to the job BEFORE spawning the requested
             # executable. This avoids a launch/AssignProcess race in compiler descendants.
+            from .frozen_runtime import owned_worker_command
             launcher = asyncio.create_task(asyncio.create_subprocess_exec(
-                sys.executable, "-I", str(Path(__file__).with_name("_build_worker.py")), job.name,
+                *owned_worker_command("build", job.name),
                 cwd=cwd, env=env or build_environment(), shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE))
             proc = await asyncio.shield(launcher)
             readers = [asyncio.create_task(read(proc.stdout, buffers[0])),
                        asyncio.create_task(read(proc.stderr, buffers[1]))]
-            proc.stdin.write(json.dumps({"command": command, "cwd": str(cwd)}, ensure_ascii=True).encode() + b"\n")
+            import base64
+            proc.stdin.write(json.dumps({"command": command, "cwd": str(cwd),
+                "input_data": base64.b64encode(input_data).decode("ascii") if input_data is not None else None},
+                ensure_ascii=True).encode() + b"\n")
             await proc.stdin.drain()
             proc.stdin.close()
             while proc.returncode is None:

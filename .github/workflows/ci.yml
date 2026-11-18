@@ -151,10 +151,8 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
-          & ./scripts/Package-Windows.ps1 -Version ci-pr -OutputDirectory ./artifacts
-          if ($LASTEXITCODE -ne 0) { throw 'PR package creation failed' }
-          & ./agent.venv/Scripts/python.exe -I ./scripts/release_smoke.py
-          if ($LASTEXITCODE -ne 0) { throw 'Offline backend smoke failed' }
+          & ./scripts/Package-Windows.ps1 -Version ci-pr -OutputDirectory ./artifacts -Verify
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted PR package verification failed' }
 
       - name: Package smoke / develop, main and release full set
         if: github.event_name != 'pull_request'

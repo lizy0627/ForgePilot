@@ -23,10 +23,10 @@ from test_mcp_api import serving, saved, eventually, PREFIX
 from test_mcp import config as stdio_config, wait_method, closed as stdio_closed, PEER, wire
 from test_planning import proposal
 from test_build import build_repo, build_config
-from forgepilot.chat_service import ChatService, READ_TOOLS
+from forgepilot.chat_service import ChatService, READ_TOOLS, web_search_tools
 from forgepilot.context import TaskState
 from forgepilot.errors import ForgePilotError
-from forgepilot.llm import ToolSpec, context_size
+from forgepilot.llm import ContentDelta, StreamFinished, ToolCallDelta, ToolSpec, context_size
 from forgepilot.mcp_config import MCPHttpConfig, TAVILY_ENDPOINT, create_mcp_connection
 from forgepilot.mcp_manager import MCPManager
 from forgepilot.mcp_records import bounded_records, search_sources
@@ -541,6 +541,46 @@ async def test_chat_tool_modes_expose_only_the_selected_tool_classes(peers,datab
     assert request_counts==[1]*7
     assert web_metrics.snapshot()['tool_mode']==2 and web_metrics.snapshot()['exposed_tool_count']==1
     assert not peer.records
+
+
+def test_tavily_chat_exposes_search_and_extract_only():
+    from types import SimpleNamespace
+    tavily = SimpleNamespace(config=SimpleNamespace(connection=SimpleNamespace(preset_id='tavily')))
+    custom = SimpleNamespace(config=SimpleNamespace(connection=SimpleNamespace(preset_id=None)))
+    selected = {'search': (tavily, 'tavily_search'), 'extract': (tavily, 'tavily_extract'),
+                'research': (tavily, 'tavily_research'), 'custom': (custom, 'lookup')}
+    assert web_search_tools(selected) == {'search', 'extract', 'custom'}
+
+
+@pytest.mark.asyncio
+async def test_web_chat_hides_search_round_and_streams_final_answer(peers, database):
+    peer = await peers()
+    service = MCPService(database)
+    record = await save_new(service, peer)
+    alias = tool_alias(record['server_id'], 'search')
+    class Model:
+        def __init__(self): self.requests = []
+        async def stream_chat(self, messages, tools=None):
+            self.requests.append((messages, tools))
+            if len(self.requests) == 1:
+                yield ContentDelta('searching internally')
+                yield ToolCallDelta(0, 'call-1', alias, '{"query":"q"}')
+                yield StreamFinished('tool_calls', None)
+            else:
+                yield ContentDelta('最')
+                yield ContentDelta('终')
+                yield StreamFinished('stop', None)
+        async def aclose(self): pass
+    model = Model(); events = []
+    client = ChatService(model)
+    client.configure_mcp(service.snapshots('chat'), connection_factory=create_mcp_connection)
+    try:
+        assert await client.answer([], '请联网搜索', tool_mode='web', on_event=events.append) == '最终'
+    finally:
+        await client.close()
+    assert len(model.requests) == 2 and model.requests[0][1] is not None and model.requests[1][1] is None
+    assert [event.text for event in events if event.type == 'content'] == ['最', '终']
+    assert len(methods(peer, 'tools/call')) == 1
 
 
 @pytest.mark.asyncio
