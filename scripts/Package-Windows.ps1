@@ -50,8 +50,6 @@ Assert-UnderOutput $stage
 Assert-UnderOutput $zip
 Assert-UnderOutput $checksum
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-if (Test-Path -LiteralPath $checksum) { Remove-Item -LiteralPath $checksum -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 foreach ($name in @('README.md', 'Start-ForgePilot.cmd', 'Stop-ForgePilot.cmd', 'Configure-ForgePilot.cmd', 'Check-Model.cmd')) {
@@ -113,23 +111,21 @@ foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File) {
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
-try {
-    Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName | ForEach-Object {
-        $relative = (Get-RelativeFilePath $stage $_.FullName).Replace('\', '/')
-        $entry = $archive.CreateEntry("$packageName/$relative", [IO.Compression.CompressionLevel]::Optimal)
-        $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-        $input = [IO.File]::OpenRead($_.FullName)
-        $outputStream = $entry.Open()
-        try { $input.CopyTo($outputStream) } finally { $outputStream.Dispose(); $input.Dispose() }
-    }
-} finally { $archive.Dispose() }
+function New-ReleaseArchive([string]$ArchivePath) {
+    $archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative = (Get-RelativeFilePath $stage $_.FullName).Replace('\', '/')
+            $entry = $archive.CreateEntry("$packageName/$relative", [IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+            $input = [IO.File]::OpenRead($_.FullName)
+            $outputStream = $entry.Open()
+            try { $input.CopyTo($outputStream) } finally { $outputStream.Dispose(); $input.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+}
 
-$hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($checksum, "$hash *$([IO.Path]::GetFileName($zip))`n", [Text.UTF8Encoding]::new($false))
-Remove-Item -LiteralPath $stage -Recurse -Force
-
-if ($Verify) {
+function Test-ExtractedRelease([string]$ArchivePath) {
     $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     $verifyRoot = Join-Path $temporaryRoot ('ForgePilot-release-verify-' + [Guid]::NewGuid().ToString('N'))
     $verifyRoot = [IO.Path]::GetFullPath($verifyRoot)
@@ -138,7 +134,7 @@ if ($Verify) {
     }
     $previousPython = $env:FORGEPILOT_PYTHON
     try {
-        [IO.Compression.ZipFile]::ExtractToDirectory($zip, $verifyRoot)
+        [IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $verifyRoot)
         $extracted = Join-Path $verifyRoot $packageName
         if (-not $env:FORGEPILOT_PYTHON -or -not (Test-Path -LiteralPath $env:FORGEPILOT_PYTHON -PathType Leaf)) {
             $sourceEnvironmentPython = Join-Path $root 'agent.venv\Scripts\python.exe'
@@ -163,6 +159,50 @@ if ($Verify) {
         else { $env:FORGEPILOT_PYTHON = $previousPython }
         if (Test-Path -LiteralPath $verifyRoot) { Remove-Item -LiteralPath $verifyRoot -Recurse -Force }
     }
+}
+
+$pendingZip = Join-Path $output ('.forgepilot-' + [Guid]::NewGuid().ToString('N') + '.zip')
+$pendingChecksum = $pendingZip + '.sha256'
+$backupZip = $pendingZip + '.previous'
+try {
+    try { New-ReleaseArchive $pendingZip } finally {
+        Remove-Item -LiteralPath $stage -Recurse -Force
+    }
+    $archive = [IO.Compression.ZipFile]::OpenRead($pendingZip)
+    try {
+        if ($archive.Entries.Count -ne @($relativeFiles).Count) { throw 'Release ZIP entry count mismatch.' }
+    } finally { $archive.Dispose() }
+
+    $hash = (Get-FileHash -LiteralPath $pendingZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $zipName = [IO.Path]::GetFileName($zip)
+    [IO.File]::WriteAllText($pendingChecksum, "$hash *$zipName`n", [Text.UTF8Encoding]::new($false))
+    if ($Verify) { Test-ExtractedRelease $pendingZip }
+    $verifiedHash = (Get-FileHash -LiteralPath $pendingZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([IO.File]::ReadAllText($pendingChecksum) -cne "$verifiedHash *$zipName`n") {
+        throw 'Release ZIP checksum mismatch.'
+    }
+
+    # Serialize the two final renames for publishers of the same version.
+    $lock = [IO.FileStream]::new("$zip.publish.lock", [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::None, 1, [IO.FileOptions]::DeleteOnClose)
+    try {
+        if ([IO.File]::Exists($zip)) { [IO.File]::Replace($pendingZip, $zip, $backupZip) }
+        else { [IO.File]::Move($pendingZip, $zip) }
+        try {
+            if ([IO.File]::Exists($checksum)) {
+                [IO.File]::Replace($pendingChecksum, $checksum, [Management.Automation.Language.NullString]::Value)
+            } else { [IO.File]::Move($pendingChecksum, $checksum) }
+        } catch {
+            # The old checksum is still published. Restore its ZIP before releasing the lock.
+            if ([IO.File]::Exists($backupZip)) { [IO.File]::Replace($backupZip, $zip, $pendingZip) }
+            else { [IO.File]::Delete($zip) }
+            throw
+        }
+        [IO.File]::Delete($backupZip)
+    } finally { $lock.Dispose() }
+} finally {
+    [IO.File]::Delete($pendingZip)
+    [IO.File]::Delete($pendingChecksum)
 }
 
 $size = (Get-Item -LiteralPath $zip).Length

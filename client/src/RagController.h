@@ -67,6 +67,7 @@ private:
     void openEvents();
     void readEvents(QNetworkReply *reply, quint64 generation);
     void stopEvents();
+    void startPolling();
     void scheduleRecovery();
     void reset();
     void setError(const QString &message);

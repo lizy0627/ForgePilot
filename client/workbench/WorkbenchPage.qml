@@ -13,10 +13,20 @@ Item {
     property var rag: null
     property bool detailsExpanded: width >= 1120
     property var activityEvents: []
-    onWidthChanged: { if (width < 1060) detailsExpanded = false }
+    property bool draftLayoutPending: false
+    onWidthChanged: {
+        if (width < 1060) detailsExpanded = false
+        if (draftLayoutPending) Qt.callLater(showDraft)
+    }
     function openTaskDraft(request, repository, source) {
         taskCenter.fillDraft(request, repository, source)
-        detailsExpanded = true
+        // A native resize can reach the window before its full-width Loader.
+        draftLayoutPending = Window.window && width !== Window.window.width
+        if (!draftLayoutPending) showDraft()
+    }
+    function showDraft() {
+        draftLayoutPending = false
+        detailsExpanded = width >= 1060
         detailTabs.currentIndex = 0
     }
     Connections {

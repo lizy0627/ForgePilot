@@ -87,4 +87,4 @@ async def test_candidate_transport_uses_gateway_stream_contract_and_closes_fake_
     assert len(rows)==len(requests)==len(module.FIXED_PROMPTS)
     assert all(row['success'] and row['response_chars']==2 for row in rows)
     assert all(request['model']=='fake-model' and request['stream'] for request in requests)
-    assert all(request['max_tokens']==4096 for request in requests)
+    assert all('max_tokens' not in request and 'max_completion_tokens' not in request for request in requests)

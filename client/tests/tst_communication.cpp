@@ -80,7 +80,7 @@ class CommunicationTest : public QObject {
 private slots:
     void ragControllerRequestsAndParsesStatus() {
         Source source; int statusReads=0,indexPosts=0,deletes=0;
-        const QString repository="C:/fixture repo";
+        const QString repository="C:/C++/fixture %2B&repo";
         auto state=[&](QString status="ready",bool running=false,int revision=0) {
             return QJsonObject{{"repository_id",QString(64,'a')},{"enabled",true},{"available",true},
                 {"status",status},{"total_files",2},{"processed",2},{"skipped",0},{"failed",0},
@@ -105,8 +105,22 @@ private slots:
         QCOMPARE(rag.fileCount(),2); QCOMPARE(rag.chunkCount(),7); QCOMPARE(rag.lastIndexedAt(),QString("2026-10-15T08:00:00+00:00"));
         rag.buildIndex(); QTRY_COMPARE(indexPosts,1); QTRY_VERIFY(!rag.busy()); QVERIFY(rag.error().isEmpty());
         rag.deleteIndex(); QTRY_COMPARE(deletes,1); QTRY_COMPARE(rag.status(),QString("empty")); QCOMPARE(rag.fileCount(),0);
-        QVERIFY(source.requests.first().path.contains("repository_path=C:/fixture%20repo")
-                || source.requests.first().path.contains("repository_path=C%3A/fixture%20repo"));
+        const auto query = source.requests.first().path.split('?').last();
+        QVERIFY(!query.contains('+') && !query.contains('&'));
+        QCOMPARE(QUrl::fromPercentEncoding(query), "repository_path=" + repository);
+        QCOMPARE(source.requests.last().path.split('?').last(), query);
+
+        Source second;
+        QString nextStatus = "degraded";
+        second.handle = [&](const Request &r) {
+            QCOMPARE(r.path, source.requests.first().path);
+            Source::json(r, state(nextStatus));
+        };
+        rag.setBaseUrl(second.url());
+        QVERIFY(rag.busy());
+        QTRY_COMPARE(rag.status(), QString("degraded"));
+        nextStatus = "ready";
+        QTRY_COMPARE_WITH_TIMEOUT(rag.status(), QString("ready"), 8000);
     }
 
     void ragControllerCancelsRunningIndex() {
@@ -147,13 +161,14 @@ private slots:
         source.handle=[&](const Request &r) {
             if(r.path.startsWith("/api/v1/rag/status?")) Source::json(r,state("indexing",true,1,0));
             else if(r.path.startsWith("/api/v1/rag/index/events?")) {
+                QVERIFY(r.path.contains("C%2B%2B"));
                 const auto final=state("ready",false,2,3);
                 const auto bytes="id: "+operation.toUtf8()+":2\r\nevent: rag_index_progress\r\ndata: "
                     +QJsonDocument(final).toJson(QJsonDocument::Compact)+"\r\n\r\n";
                 Source::stream(r,bytes);
             } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"},{"message","missing"}}}},404);
         };
-        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/stream");
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/C++/stream");
         QTRY_COMPARE(rag.status(),QString("ready")); QCOMPARE(rag.processed(),3);
         QCOMPARE(rag.chunkCount(),3); QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
     }

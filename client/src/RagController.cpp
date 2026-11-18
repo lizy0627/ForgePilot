@@ -5,7 +5,16 @@
 #include <QNetworkProxy>
 #include <QRegularExpression>
 #include <QSet>
-#include <QUrlQuery>
+#include <QUrl>
+
+namespace {
+void setRepositoryQuery(QUrl &url, const QString &repository)
+{
+    // The backend decodes an unescaped '+' in a query parameter as a space.
+    url.setQuery("repository_path=" + QString::fromLatin1(QUrl::toPercentEncoding(repository)),
+                 QUrl::StrictMode);
+}
+}
 
 RagController::RagController(QObject *parent) : QObject(parent)
 {
@@ -56,14 +65,21 @@ void RagController::setBaseUrl(const QUrl &url)
 {
     if (url == m_base || !Protocol::validBaseUrl(url)) return;
     reset(); m_base = url; emit changed();
-    if (!m_repository.isEmpty()) refresh();
+    startPolling();
 }
 
 void RagController::setRepositoryPath(const QString &path)
 {
     if (path == m_repository) return;
     reset(); m_repository = path; emit changed();
-    if (!path.isEmpty()) { m_poll.start(); refresh(); }
+    startPolling();
+}
+
+void RagController::startPolling()
+{
+    if (m_repository.isEmpty()) return;
+    m_poll.start();
+    refresh();
 }
 
 void RagController::refresh()
@@ -93,9 +109,7 @@ void RagController::deleteIndex()
 void RagController::send(const QByteArray &method, const QString &path, const QJsonObject &body)
 {
     QUrl url(m_base); url.setPath(path);
-    if (method != "POST") {
-        QUrlQuery query; query.addQueryItem("repository_path", m_repository); url.setQuery(query);
-    }
+    if (method != "POST") setRepositoryQuery(url, m_repository);
     clearError();
     const auto generation = m_generation;
     auto *reply = JsonHttp::send(m_network, this, method, url, body, 1024 * 1024,
@@ -186,7 +200,7 @@ void RagController::openEvents()
     if (!m_running || m_repository.isEmpty() || m_stream) return;
     m_parser.reset();
     QUrl url(m_base); url.setPath("/api/v1/rag/index/events");
-    QUrlQuery query; query.addQueryItem("repository_path", m_repository); url.setQuery(query);
+    setRepositoryQuery(url, m_repository);
     QNetworkRequest request(url); request.setRawHeader("Accept", "text/event-stream");
     JsonHttp::authenticate(request);
     if (!m_operationId.isEmpty() && m_revision > 0)
