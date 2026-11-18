@@ -167,7 +167,7 @@ Item {
         }
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         Rectangle {
-            visible: root.hasTask && (!root.mission.synchronized || !!root.mission.error)
+            visible: !!root.mission.error || (root.hasTask && !root.mission.synchronized)
             Layout.fillWidth: true; implicitHeight: connectionRow.implicitHeight + Theme.spaceSm * 2; color: Theme.dangerFill
             RowLayout { id: connectionRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: Theme.spaceLg
                 Label { Layout.fillWidth: true; text: root.mission.error || "正在同步任务，完成后可继续操作。"; color: Theme.warning; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; maximumLineCount: 3; elide: Text.ElideRight }

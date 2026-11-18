@@ -395,6 +395,28 @@ private slots:
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
+    void openingMissionByIdShowsErrorsInEmptyWorkbench()
+    {
+        Fixture fixture;
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        auto *input = ui.find("missionIdInput"); QVERIFY(input);
+        auto *open = ui.find({}, "text", "打开", input->parentItem()); QVERIFY(open);
+        QVERIFY(ui.missions.taskId().isEmpty());
+        input->setProperty("text", "invalid-id");
+        QVERIFY(ui.click(open));
+        QCOMPARE(ui.missions.error(), QStringLiteral("任务标识无效。"));
+        auto *message = ui.find({}, "text", ui.missions.error());
+        QVERIFY(message && message->isVisible());
+
+        input->setProperty("text", MissionId);
+        QVERIFY(ui.click(open));
+        QTRY_VERIFY(ui.missions.synchronized());
+        QCOMPARE(ui.missions.taskId(), MissionId);
+        QVERIFY(ui.missions.error().isEmpty());
+        QVERIFY(!message->isVisible());
+    }
     void productionWorkflowLatencyProfile()
     {
         Fixture fixture;
