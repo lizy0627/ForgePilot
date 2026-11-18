@@ -128,6 +128,7 @@ async def test_stale_form_cannot_overwrite_new_config_and_blank_key_preserves_or
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change,purpose", [({"review_model": "task-model"}, "review"),
+    ({"review_model": ""}, "review"), ({"task_model_family": ""}, "review"),
     ({"review_model_family": "writer"}, "review"), ({"task_model": ""}, "task"),
     ({"embedding_enabled": True}, "embedding"), ({"port": True}, "configuration")])
 async def test_invalid_draft_reports_purpose_without_changing_old_configuration(tmp_path, change, purpose):
@@ -190,9 +191,20 @@ async def test_legacy_key_is_loaded_without_rewriting_file_and_new_pointer_is_at
                                   "server_args": []}), encoding="utf-8")
     old = legacy.read_bytes()
     state = await core.handle_request(config, {"action": "load"})
-    assert state["has_api_key"] and not state["configured"]  # Missing independent Reviewer.
-    result = await save(config, key="")
+    assert state["has_api_key"] and state["configured"]
+    assert [state["fields"][name] for name in ("chat_model", "task_model", "summary_model")] == ["legacy"] * 3
+    requests = []
+    def respond(request):
+        requests.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"},
+                                                      "finish_reason": "stop"}]})
+    checked = await core.handle_request(config, {"action": "check", "fields": state["fields"],
+        "config_revision": state["config_revision"]}, transport=httpx.MockTransport(respond))
+    assert checked["ok"] and {check["purpose"] for check in checked["checks"]} == {"chat", "task", "summary"}
+    assert requests == ["legacy"]
+    result = await save(config, values=state["fields"], key="")
     assert result["ok"] and result["configured"] and legacy.read_bytes() == old
+    assert "--model-config" not in core.read_config(config)["server_args"]
     assert core.load_saved_key(config) == KEY
 
 

@@ -18,6 +18,7 @@ import pytest
 
 from forgepilot import desktop_configuration as configuration
 from test_build_process import alive
+from test_workspace_manager import committed_repo
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -131,6 +132,67 @@ def offline_models():
         server.shutdown()
         server.server_close()
         thread.join(5)
+
+
+def test_legacy_single_model_desktop_chat_then_eight_route_mission(tmp_path, committed_repo):
+    config = tmp_path / "config.json"
+    port = free_port()
+    token = secrets.token_urlsafe(32)
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("FORGEPILOT_")}
+    environment.update(LOCALAPPDATA=str(tmp_path / "local"), FORGEPILOT_LOCAL_API_TOKEN=token)
+    config.with_name("api-key.dpapi").write_text(configuration.protect_launcher_key(OLD_KEY), encoding="ascii")
+    with offline_models() as (base_url, _, release, calls):
+        release.set()
+        config.write_text(json.dumps({"base_url": base_url, "model": "legacy-chat", "port": port,
+            "server_args": ["--database", str(tmp_path / "history.sqlite3")]}), encoding="utf-8")
+        original = config.read_bytes()
+        loaded = asyncio.run(configuration.handle_request(config, {"action": "load"}))
+        assert loaded["configured"], loaded["errors"]
+        fields = loaded["fields"]
+        assert [fields[name] for name in ("chat_model", "task_model", "summary_model")] == ["legacy-chat"] * 3
+        assert not any(fields[name] for name in ("review_model", "task_model_family", "review_model_family"))
+        checked = invoke("config-helper", config, environment, request={"action": "check", "fields": fields,
+            "config_revision": loaded["config_revision"]})
+        assert checked.returncode == 0 and json.loads(checked.stdout)["ok"], checked.stdout
+        assert config.read_bytes() == original
+        try:
+            started = invoke("desktop", config, environment)
+            assert started.returncode == 0, started.stderr.decode(errors="replace")
+            state = wait_for(lambda: runtime(config), lambda value: value.get("status") == "running")
+            assert alive(state["client_pid"])
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"X-ForgePilot-Token": token},
+                              trust_env=False, timeout=10) as client:
+                created = client.post("/api/v1/conversations", json={"title": "Legacy chat"})
+                assert created.status_code == 201, created.text
+                path = "/api/v1/conversations/" + created.json()["conversation_id"]
+                request_id = str(uuid4())
+                sent = client.post(path + "/requests", json={"request_id": request_id, "mode": "chat",
+                    "tool_mode": "fast", "prompt": "legacy request"})
+                assert sent.status_code == 202, sent.text
+                result = wait_for(lambda: client.get(f"{path}/requests/{request_id}").json(),
+                                  lambda value: value.get("status") == "completed")
+                assert result["request_id"] == request_id
+                assert client.get(path).json()["messages"][-1]["content"] == "offline persisted reply"
+            assert [(call["model"], call["authorization"]) for call in calls] == [
+                ("legacy-chat", "Bearer " + OLD_KEY), ("legacy-chat", "Bearer " + OLD_KEY)]
+            ordinary = asyncio.run(configuration.handle_request(config, {"action": "save", "fields": fields,
+                "config_revision": loaded["config_revision"]}))
+            assert ordinary["ok"] and ordinary["configured"], ordinary
+            saved = asyncio.run(configuration.handle_request(config, {"action": "save",
+                "fields": {**fields, "review_model": "review-local",
+                           "task_model_family": "writer", "review_model_family": "reviewer"},
+                "config_revision": ordinary["config_revision"]}))
+            assert saved["ok"] and saved["configured"], saved
+            restart_to_revision(config, environment, saved["config_revision"])
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers={"X-ForgePilot-Token": token},
+                              trust_env=False, timeout=20) as client:
+                mission = client.post("/api/v2/missions", json={"repository_path": str(committed_repo),
+                    "request": "Review the source file", "task_type": "bug_fix"})
+                assert mission.status_code == 202, mission.text
+                assert client.get("/api/v2/missions/" + mission.json()["task_id"]).status_code == 200
+        finally:
+            stopped = invoke("stop", config, environment)
+            assert stopped.returncode == 0, stopped.stderr.decode(errors="replace")
 
 
 @pytest.mark.parametrize("database_source", ["explicit", "environment", "service_default"])

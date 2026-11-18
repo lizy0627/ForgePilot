@@ -48,19 +48,7 @@ def validated_launcher_config(data):
     except ForgePilotError as exc:
         purposes = [name for name in ('fallback', 'chat', 'task', 'summary') if name in exc.message]
         raise ValueError('model_config_' + '_'.join(purposes or ['unknown'])) from None
-    try:
-        review_model = checked_model_id(data.get('review_model'), 'review')
-    except ForgePilotError:
-        raise ValueError('model_config_review') from None
-    task_family = data.get('task_model_family') or None
-    review_family = data.get('review_model_family') or None
-    extras = (review_model, task_family, review_family)
-    if any(extras) and (not all(extras) or review_model == models.task
-                        or not all(isinstance(value, str) and
-                                   re.fullmatch(r'[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*', value)
-                                   for value in (task_family, review_family))
-                        or task_family == review_family):
-        raise ValueError('model_config_review')
+    review_model, task_family, review_family = _review_fields(data, models.task)
     if type(data['port']) is not int or not 1 <= data['port'] <= 65535:
         raise ValueError('port_config')
     args = data['server_args']
@@ -75,6 +63,23 @@ def validated_launcher_config(data):
             'task_model': models.task, 'summary_model': models.summary,
             'review_model': review_model, 'task_model_family': task_family,
             'review_model_family': review_family}
+
+
+def _review_fields(data, task_model):
+    try:
+        review = checked_model_id(data.get('review_model'), 'review')
+    except ForgePilotError:
+        raise ValueError('model_config_review') from None
+    task_family = data.get('task_model_family') or None
+    review_family = data.get('review_model_family') or None
+    extras = (review, task_family, review_family)
+    if any(extras) and (not all(extras) or review == task_model
+                        or not all(isinstance(value, str) and
+                                   re.fullmatch(r'[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*', value)
+                                   for value in (task_family, review_family))
+                        or task_family == review_family):
+        raise ValueError('model_config_review')
+    return extras
 
 
 async def _check_selected_models(data, key, *, transport=None, gateway_factory=ModelGateway):
@@ -308,18 +313,17 @@ def _checked_fields(raw, *, check_optional=True):
         raise ConfigurationError("model_endpoint", "服务地址须为不含凭据或查询参数的 HTTP(S) API 根地址。") from None
     if not 1 <= fields["port"] <= 65535:
         raise ConfigurationError("port_config", "本机端口须为 1 到 65535。")
-    for name in ("chat_model", "task_model", "review_model", "summary_model"):
-        try:
-            value = checked_model_id(fields[name], name)
-        except ForgePilotError:
-            value = None
-        if not value:
-            raise ConfigurationError("model_required", "请填写模型标识。", name.removesuffix("_model"))
-        fields[name] = value
-    task_family, review_family = fields["task_model_family"], fields["review_model_family"]
-    if (not all(re.fullmatch(r"[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*", family) for family in (task_family, review_family))
-            or task_family == review_family or fields["task_model"] == fields["review_model"]):
-        raise ConfigurationError("model_config_review", "独立审查须使用不同模型与模型家族；请填写两种家族标识。", "review")
+    try:
+        selected = resolve_models(chat_model=fields["chat_model"], task_model=fields["task_model"],
+                                  summary_model=fields["summary_model"])
+    except ForgePilotError as exc:
+        purpose = next(name for name in ("chat", "task", "summary") if name in exc.message)
+        raise ConfigurationError("model_required", "请填写有效的模型标识。", purpose) from None
+    fields.update(chat_model=selected.chat, task_model=selected.task, summary_model=selected.summary)
+    try:
+        _review_fields(fields, selected.task)
+    except ValueError:
+        raise ConfigurationError("model_config_review", "独立审查须使用不同模型与模型家族；请填写两种家族标识。", "review") from None
     if check_optional:
         issues = _optional_issues(fields)
         if issues:
@@ -443,7 +447,7 @@ async def load_configuration(config: Path, *, status=None):
     pending = configured and (not runtime.get("managed") or runtime.get("running_revision") != revision)
     return {"ok": True, "fields": fields, "configured": configured, **flags,
             "config_revision": revision, "restart_required": pending, "errors": errors, "warnings": warnings,
-            "notice": "已有配置；保存仅在受控重启后生效。" if valid and flags["has_api_key"] else "请完成模型、独立审查和密钥配置。",
+            "notice": "已有配置；保存仅在受控重启后生效。" if configured else "请完成模型和密钥配置。",
             **runtime}
 
 
@@ -564,9 +568,10 @@ def save_configuration(config, request):
                     filename = _new_credential(config, value, embedding=embedding)
                     created.append(config.parent / filename)
                     data[name] = filename
-            models_path = _new_models(config, fields, data["server_args"])
-            created.append(models_path)
-            data["server_args"].extend(("--model-config", str(models_path)))
+            if fields["review_model"]:
+                models_path = _new_models(config, fields, data["server_args"])
+                created.append(models_path)
+                data["server_args"].extend(("--model-config", str(models_path)))
             validated_launcher_config(data)
             _replace_config(config, data)
         except BaseException:
