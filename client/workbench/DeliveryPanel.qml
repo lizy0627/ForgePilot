@@ -39,8 +39,10 @@ Controls.Panel {
         }
     }
     Controls.ActionButton {
-        objectName: "missionDeliveryPreviewButton"; text: "预览交付操作"; Layout.fillWidth: true
-        enabled: root.mission.delivery.canPreview && (root.mission.status === "succeeded" || mode.currentIndex === 4)
+        objectName: "missionDeliveryPreviewButton"; Layout.fillWidth: true
+        readonly property bool abandoning: root.modes[mode.currentIndex] === "abandon"
+        text: abandoning && root.mission.delivery.abandonBlockReason ? root.mission.delivery.abandonBlockReason : "预览交付操作"
+        enabled: root.mission.delivery.canPreview && (abandoning ? !root.mission.delivery.abandonBlockReason : root.mission.status === "succeeded")
         onClicked: root.mission.delivery.prepare(root.modes[mode.currentIndex], target.text.trim())
     }
     Label { visible: !!root.preview.token; text: "目标：" + (root.preview.target_branch || root.mission.delivery.previewTarget || "默认交付目标")

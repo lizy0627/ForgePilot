@@ -450,6 +450,7 @@ bool MissionProtocol::staleError(const QString &code) {
     return QSet<QString>{"revision_conflict", "mission_revision_conflict", "approval_conflict", "mission_approval_conflict", "approval_stale", "recovery_conflict", "recovery_stale", "delivery_changed"}.contains(code);
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
+    if (code == "mission_cancel_required") return "请先取消任务，再放弃隔离工作区。";
     if (staleError(code)) return "任务版本或审批内容已变化，请刷新并重新审阅后提交。旧审批不会自动重试。";
     if (code == "invalid_response") return "后端响应格式无效，请刷新任务；已发送的操作可能已经执行。";
     if (code == "invalid_request" || code == "invalid_task_id") return "任务请求无效，请检查任务标识、版本和必填内容。";

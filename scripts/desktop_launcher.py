@@ -250,6 +250,7 @@ def supervise(config, result):
         return 0
     event = None
     restart_event = None
+    show_event = None
     restart_requested = False
     job = None
     client_job = None
@@ -263,7 +264,8 @@ def supervise(config, result):
         if not event:
             raise OSError('event_create')
         restart_event = kernel.api.CreateEventW(None, True, False, kernel.name + '-restart')
-        if not restart_event:
+        show_event = kernel.api.CreateEventW(None, True, False, kernel.name + '-show')
+        if not restart_event or not show_event:
             raise OSError('event_create')
         write_json(state_file, state)
         with desktop_configuration.ConfigurationLock(config):
@@ -323,30 +325,40 @@ def supervise(config, result):
             time.sleep(0.1)
         if kernel.signaled(event):
             raise RuntimeError('start_cancelled')
-        # Separate jobs also work when Python's venv redirectors already have distinct
-        # parent job hierarchies. A nonempty job cannot cross those hierarchies.
-        client_job = ProcessJob()
         os.environ['FORGEPILOT_RUNTIME_CONFIG'] = str(config)
-        client = owned_client(client_job, run / 'client.log', data['port'], local_token)
-        state['client_worker_pid'] = client.pid
-        write_json(state_file, state)
-        deadline = time.monotonic() + CLIENT_START_TIMEOUT
-        while True:
-            if kernel.signaled(event):
-                raise RuntimeError('start_cancelled')
-            if child.poll() is not None:
-                raise RuntimeError('backend_exited')
-            if client.poll() is not None:
-                state['client_exit'] = client.returncode
-                raise RuntimeError('client_start_failed')
-            client_pid = client_window(client_job)
-            if client_pid is not None:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError('client_window_timeout')
-            time.sleep(0.1)
-        state.update(status='running', client_pid=client_pid, client_status='running')
-        write_json(state_file, state)
+
+        def launch_window():
+            nonlocal client_job, client
+            # Separate jobs also work when Python's venv redirectors already have distinct
+            # parent job hierarchies. A nonempty job cannot cross those hierarchies.
+            if client_job:
+                client_job.close()
+            client_job = ProcessJob()
+            state.pop('client_exit', None)
+            state.pop('client_pid', None)
+            state.pop('client_error', None)
+            client = owned_client(client_job, run / 'client.log', data['port'], local_token)
+            state['client_worker_pid'] = client.pid
+            write_json(state_file, state)
+            deadline = time.monotonic() + CLIENT_START_TIMEOUT
+            while True:
+                if kernel.signaled(event):
+                    raise RuntimeError('start_cancelled')
+                if child.poll() is not None:
+                    raise RuntimeError('backend_exited')
+                if client.poll() is not None:
+                    state['client_exit'] = client.returncode
+                    raise RuntimeError('client_start_failed')
+                client_pid = client_window(client_job)
+                if client_pid is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('client_window_timeout')
+                time.sleep(0.1)
+            state.update(status='running', client_pid=client_pid, client_status='running')
+            write_json(state_file, state)
+
+        launch_window()
         write_json(result, state)
         reported = True
         status_due = 0.0
@@ -377,11 +389,26 @@ def supervise(config, result):
                 status_due = time.monotonic() + 2
             if child.poll() is not None:
                 raise RuntimeError('backend_exited')
-            if client.poll() is not None and state['client_status'] == 'running':
+            if state['client_status'] == 'running' and client.poll() is not None:
                 state.update(client_exit=client.returncode, client_status='closed')
                 if client.returncode != 0:
                     raise RuntimeError('client_exited')
                 write_json(state_file, state)  # Closing the UI still leaves ongoing tasks running.
+            if kernel.signaled(show_event):
+                if state['client_status'] == 'closed':
+                    try:
+                        launch_window()
+                    except (OSError, RuntimeError, ForgePilotError) as exc:
+                        if client_job:
+                            client_job.close()
+                        state.update(client_status='closed', client_error=type(exc).__name__)
+                        write_json(state_file, state)
+                elif client_window(client_job) is None:
+                    # WM_CLOSE can hide the window before the worker reports exit.
+                    time.sleep(0.1)
+                    continue
+                # Acknowledge all pending starts after verifying the window or recording a failure.
+                kernel.api.ResetEvent(show_event)
             time.sleep(0.1)
         state['status'] = 'stopping'
         write_json(state_file, state)
@@ -427,6 +454,8 @@ def supervise(config, result):
                 if not reported:
                     write_json(result, state)  # Failure is reported only after cleanup.
             finally:
+                if show_event:
+                    kernel.api.CloseHandle(show_event)
                 if restart_event:
                     kernel.api.CloseHandle(restart_event)
                 if event:
@@ -473,10 +502,35 @@ def stop(config):
     return 0
 
 
+def show_managed_window(config):
+    kernel = Kernel(config)
+    # This may race initial startup. Holding the named event until acknowledgment
+    # lets the owner receive the request even if it has only just acquired its mutex.
+    event = kernel.api.CreateEventW(None, True, False, kernel.name + '-show')
+    if not event:
+        raise OSError('event_create')
+    try:
+        if not kernel.api.SetEvent(event):
+            raise OSError('show_event_failed')
+        deadline = time.monotonic() + 30 + CLIENT_START_TIMEOUT + 5
+        while kernel.signaled(event):
+            if not kernel.running() or time.monotonic() >= deadline:
+                print('Desktop window request was not acknowledged. Inspect runtime.json.')
+                return 1
+            time.sleep(0.1)
+        state = json.loads(config.with_name('runtime.json').read_text(encoding='utf-8'))
+        if state.get('status') == 'running' and state.get('client_status') == 'running':
+            print('Connected to the running ForgePilot desktop.')
+            return 0
+        print('Desktop window did not open. Inspect client.log.')
+        return 1
+    finally:
+        kernel.api.CloseHandle(event)
+
+
 def start(config):
     if Kernel(config).running():
-        print('ForgePilot is already running; no duplicate processes started.')
-        return 0
+        return show_managed_window(config)
     config.parent.mkdir(parents=True, exist_ok=True)
     result = config.parent / ('start-' + uuid4().hex + '.json')
     owner = subprocess.Popen([str(PYTHON), '-I', str(SCRIPT), 'supervise', '--config', str(config), '--result', str(result)],
@@ -499,7 +553,9 @@ def start(config):
     if data.get('error') in {'client_start_failed', 'client_window_timeout'}:
         print('Client window did not open. See client.log for the Windows error or Qt diagnostic; '
               'also check Windows Code Integrity/App Control events. No security policy was changed.')
-    return 0 if data['status'] in {'running', 'already_running'} else 1
+    if data['status'] == 'already_running':
+        return show_managed_window(config)
+    return 0 if data['status'] == 'running' else 1
 
 
 def runtime_status(config):
@@ -586,7 +642,7 @@ def desktop(config, *, configure=False):
     if configure:
         return launch_configuration_client(config)
     if Kernel(config).running():
-        return 0
+        return show_managed_window(config)
     loaded = asyncio.run(desktop_configuration.handle_request(config, {'action': 'load'}, status=lambda: runtime_status(config)))
     if not loaded.get('configured'):
         return launch_configuration_client(config)

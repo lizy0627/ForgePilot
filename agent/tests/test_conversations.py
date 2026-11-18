@@ -574,6 +574,38 @@ async def test_work_request_storage_failure_never_leaves_queryable_running_state
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['mcp_read', 'answer_start'])
+async def test_chat_start_failure_allows_immediate_fast_followup(tmp_path,cpp_repo,monkeypatch,failure):
+    async with api(tmp_path/'chat.sqlite3',max_tasks=1) as (client,app,_,models):
+        host=app.state.conversation_host
+        cid=(await client.post('/api/v1/conversations',json={'repository_path':str(cpp_repo)})).json()['conversation_id']
+        requests=f'/api/v1/conversations/{cid}/requests'
+        rid=str(uuid4())
+        with monkeypatch.context() as fault:
+            if failure=='mcp_read':
+                def fail_read(mode):
+                    assert mode=='chat'
+                    raise ForgePilotError('mcp_storage','injected read failure')
+                fault.setattr(host.mcp_service,'snapshots',fail_read)
+            else:
+                def fail_prepare(metrics):
+                    raise RuntimeError('injected startup failure')
+                fault.setattr(StreamMetrics,'request_prepared',fail_prepare)
+            response=await client.post(requests,json={'request_id':rid,'prompt':'联网搜索','tool_mode':'web'})
+        state=await client.get(f'{requests}/{rid}')
+        if failure=='mcp_read':
+            assert response.status_code==503 and response.json()['error']['code']=='mcp_storage'
+            assert state.status_code==404
+        else:
+            assert response.status_code==202 and state.json()['status']=='failed'
+            assert state.json()['error']=='chat_internal'
+            stream=await client.get(f'{requests}/{rid}/events')
+            assert conversation_frames(stream.text)[-1][1]=='answer_failed'
+        assert not models
+        assert (await send(client,cid,'继续提问',tool_mode='fast'))['status']=='completed'
+
+
+@pytest.mark.asyncio
 async def test_followup_switch_restart_rename_no_development_tools(tmp_path,monkeypatch):
     monkeypatch.setattr('forgepilot.chat_service.executable',lambda *args: pytest.fail('Plain chat cannot resolve developer tools'))
     path=tmp_path/'chat.sqlite3'

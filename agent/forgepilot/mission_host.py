@@ -21,7 +21,7 @@ from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
 from .orchestration.graph import validate_graph
-from .orchestration.models import GraphDefinition, NodeResult, NodeStatus
+from .orchestration.models import GraphDefinition, NodeResult, NodeStatus, TERMINAL_NODE_STATUSES
 from .orchestration.recovery import recovery_role
 from .orchestration.store import GraphStore
 
@@ -700,6 +700,8 @@ class MissionHost:
     async def _delivery(self, task_id, revision, mode, token, target_branch):
         async with self._control(task_id):
             snapshot = self._check_revision(task_id, revision)
+            if mode == "abandon" and snapshot.status not in TERMINAL_NODE_STATUSES:
+                raise ForgePilotError("mission_cancel_required", "Cancel the mission before abandoning its workspace")
             self._idle(task_id)
             if mode != "abandon" and snapshot.status is not NodeStatus.SUCCEEDED:
                 raise ForgePilotError("invalid_state", "Delivery requires a successfully validated mission")
@@ -712,7 +714,7 @@ class MissionHost:
                 self.store.missions.request_delivery(task_id, revision, mode, operation_id)
                 try:
                     result = await asyncio.to_thread(workflow.workspace.deliver, task_id, mode,
-                        approved=True, token=token, bundle=bundles[-1] if bundles else None,
+                        approved=True, token=token, bundle=bundles[-1].content if bundles else None,
                         operation_id=operation_id)
                 except ForgePilotError as exc:
                     self.store.missions.record_delivery_outcome(task_id, "workspace.delivery_failed",

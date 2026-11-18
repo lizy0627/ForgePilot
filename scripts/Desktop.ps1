@@ -21,7 +21,7 @@ try {
         'Stop' { 'stop' }
         'Check' { 'check-saved' }
     }
-    & $pythonExe @launcherArgs $operation --config $configFile
+    & $pythonExe @launcherPrefix $operation --config $configFile
     exit $LASTEXITCODE
 } catch {
     # No raw exception/configuration/credential values go to console output.

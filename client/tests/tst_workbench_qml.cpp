@@ -305,6 +305,33 @@ private slots:
         QVERIFY(!approve->isEnabled());
         QCOMPARE(f.approvalPosts, 1);
     }
+    void activeMissionMustBeCancelledBeforeAbandon_data()
+    {
+        QTest::addColumn<QString>("status");
+        QTest::newRow("waiting") << QString("awaiting_human");
+        QTest::newRow("executing") << QString("running");
+    }
+    void activeMissionMustBeCancelledBeforeAbandon()
+    {
+        QFETCH(QString, status);
+        Fixture f;
+        f.snapshots[MissionA] = mission(MissionA, status);
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", 7);
+        auto *mode = ui.find("missionDeliveryMode"); QVERIFY(mode);
+        mode->setProperty("currentIndex", 4);
+        auto *preview = ui.find("missionDeliveryPreviewButton"); QVERIFY(preview);
+        QVERIFY(!preview->isEnabled());
+        QVERIFY(preview->property("text").toString().contains("先取消任务"));
+        ui.missions.delivery()->prepare("abandon");
+        QCOMPARE(ui.missions.delivery()->error(), preview->property("text").toString());
+        QVERIFY(!ui.missions.delivery()->busy());
+    }
     void deliveryPreviewSurvivesTabSwitchAndConfirmsOnce_data()
     {
         QTest::addColumn<QString>("mode");

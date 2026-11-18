@@ -9,6 +9,7 @@ class DeliveryController : public QObject {
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(bool canPreview READ canPreview NOTIFY changed)
     Q_PROPERTY(bool canConfirm READ canConfirm NOTIFY changed)
+    Q_PROPERTY(QString abandonBlockReason READ abandonBlockReason NOTIFY changed)
     Q_PROPERTY(QVariantMap preview READ preview NOTIFY changed)
     Q_PROPERTY(QString previewMode READ previewMode NOTIFY changed)
     Q_PROPERTY(QString previewTarget READ previewTarget NOTIFY changed)
@@ -20,6 +21,7 @@ public:
     bool busy() const { return m_request != 0; }
     bool canPreview() const;
     bool canConfirm() const;
+    QString abandonBlockReason() const;
     QVariantMap preview() const { return m_preview.toVariantMap(); }
     QString previewMode() const;
     QString previewTarget() const;

@@ -1,6 +1,7 @@
 """Mission application boundaries use real Graph transactions and managed Git."""
 import asyncio
 from dataclasses import asdict
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -170,7 +171,16 @@ async def test_rejection_is_atomic_terminal_and_resume_never_restarts_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_waiting_approval_counts_against_shared_capacity(tmp_path, git_exe, committed_repo):
+async def test_waiting_approval_counts_against_shared_capacity(tmp_path, git_exe, committed_repo, monkeypatch):
+    drafting, release = Event(), Event()
+    draft = ControlledWorkflow.draft
+
+    def paused_draft(workflow, context):
+        drafting.set()
+        assert release.wait(15)
+        return draft(workflow, context)
+
+    monkeypatch.setattr(ControlledWorkflow, "draft", paused_draft)
     tasks, missions = await setup(tmp_path, git_exe, max_tasks=1)
     try:
         first, second = await asyncio.gather(create(missions, committed_repo),
@@ -178,15 +188,32 @@ async def test_waiting_approval_counts_against_shared_capacity(tmp_path, git_exe
         assert isinstance(first, dict)
         assert isinstance(second, ForgePilotError) and second.code == "task_capacity"
         tid = first["task_id"]
+        assert await asyncio.to_thread(drafting.wait, 15)
+        running = missions.get(tid)
+        assert running["status"] == "running"
+        with pytest.raises(ForgePilotError, match="mission_cancel_required"):
+            await missions.delivery(tid, expected_revision=running["current_revision"], mode="abandon")
+        release.set()
         mission = await settled(missions, tid)
+        assert mission["status"] == "awaiting_human"
+        for token in (None, "0" * 64):
+            with pytest.raises(ForgePilotError, match="mission_cancel_required"):
+                await missions.delivery(tid, expected_revision=mission["current_revision"], mode="abandon", token=token)
         assert tasks.capacity.active_count() == 1
         with pytest.raises(ForgePilotError, match="task_capacity"):
             await create(missions, committed_repo)
         with pytest.raises(ForgePilotError, match="task_capacity"):
             await tasks.create(str(committed_repo), "another")
-        await missions.cancel(tid, expected_revision=mission["current_revision"])
+        cancelled = await missions.cancel(tid, expected_revision=mission["current_revision"])
         assert tasks.capacity.active_count() == 0
+        preview = await missions.delivery(tid, expected_revision=cancelled["current_revision"], mode="abandon")
+        result = await missions.delivery(tid, expected_revision=preview["mission"]["current_revision"],
+                                        mode="abandon", token=preview["delivery"]["token"])
+        assert result["delivery"]["status"] == "abandoned"
+        next_task = await create(missions, committed_repo)
+        assert (await settled(missions, next_task["task_id"]))["status"] == "awaiting_human"
     finally:
+        release.set()
         await missions.close()
         await tasks.close()
 

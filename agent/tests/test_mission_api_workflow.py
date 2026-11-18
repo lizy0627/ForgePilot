@@ -16,6 +16,7 @@ from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.validation import ValidationService
 from forgepilot.workspace_manager import WorkspaceManager
 from test_mission_service import ControlledWorkflow
+from test_workspace_delivery import artifact_bytes
 from test_workspace_manager import committed_repo
 
 
@@ -114,13 +115,23 @@ async def test_http_mission_analysis_approval_validation_delivery_and_sse(tmp_pa
                 assert validation["status"] == "passed" and validation["hidden_oracle"] == "passed"
                 diff = (await client.get(path + "/diff")).json()["patch"]
                 assert "+int value(int input) { return input < 0 ? 0 : input; }" in diff
-                preview = await client.post(path + "/delivery", json={"expected_revision": mission["current_revision"]})
-                assert preview.status_code == 200, preview.text
-                response = await client.post(path + "/delivery", json={
-                    "expected_revision": preview.json()["mission"]["current_revision"],
-                    "mode": "patch", "token": preview.json()["delivery"]["token"]})
-                assert response.status_code == 200, response.text
-                assert response.json()["delivery"]["mode"] == "patch"
+                for mode in ("patch", "bundle"):
+                    preview = await client.post(path + "/delivery", json={
+                        "expected_revision": mission["current_revision"], "mode": mode})
+                    assert preview.status_code == 200, preview.text
+                    response = await client.post(path + "/delivery", json={
+                        "expected_revision": preview.json()["mission"]["current_revision"],
+                        "mode": mode, "token": preview.json()["delivery"]["token"]})
+                    assert response.status_code == 200, response.text
+                    mission = response.json()["mission"]
+                    result = response.json()["delivery"]
+                    assert result["mode"] == mode
+                    assert artifact_bytes(case.manager, result["patch"]).decode() == diff
+                    if mode == "bundle":
+                        bundle = json.loads(artifact_bytes(case.manager, result["bundle"]))
+                        assert bundle["commit"] == preview.json()["delivery"]["head_commit"]
+                        assert bundle["patch_path"] == result["patch"]["path"]
+                        assert json.loads(artifact_bytes(case.manager, result["manifest"]))["lineage_verified"]
                 assert (case.root / "src/value.cpp").read_text(encoding="utf-8") == ORIGINAL
                 stream = frames((await client.get(path + "/events")).text)
                 categories = {event["event_type"].split(".")[0] for _, event in stream}

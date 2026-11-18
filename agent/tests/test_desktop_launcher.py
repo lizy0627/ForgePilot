@@ -643,6 +643,20 @@ def test_cmd_entrypoints_and_dpapi_roundtrip(configured, tmp_path, bad_backend):
             import re
             pid = int(re.search(rb'"configuration_client_pid"\s*:\s*(\d+)', started.stdout).group(1))
             close_fixture_window(pid)
+        else:
+            first = runtime(actual)
+            close_fixture_window(first['client_pid'])
+            reopened = entry('Start')
+            assert reopened.returncode == 0, reopened.stdout
+            second = runtime(actual)
+            assert second['client_status'] == 'running'
+            assert second['client_pid'] != first['client_pid']
+            assert second['backend_pid'] == first['backend_pid']
+            assert second['supervisor_pid'] == first['supervisor_pid']
+            assert entry('Start').returncode == 0
+            repeated = runtime(actual)
+            assert all(repeated[key] == second[key] for key in
+                       ('supervisor_pid', 'backend_pid', 'client_worker_pid', 'client_pid'))
         assert KEY.encode() not in started.stdout + started.stderr
         stopped = entry('Stop')
         assert stopped.returncode == 0, stopped.stdout.decode(errors='replace')

@@ -34,8 +34,9 @@ class ConversationStore:
         return self._sync_conversation_task(snapshot)
 
     def require_conversation(self, cid):
-        """Validate existence and durable availability under the caller's read lock."""
-        return self._conversation(cid)
+        """Return the conversation metadata after validating durable availability."""
+        with self._lock:
+            return self._conversation(cid)
 
     def _conversation_schema(self):
         for sql in (

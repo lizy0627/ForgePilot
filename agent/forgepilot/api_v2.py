@@ -20,6 +20,7 @@ V2_ERROR_STATUS = {
     "unknown_artifact": 404, "mission_conflict": 409, "graph_conflict": 409,
     "revision_conflict": 409, "approval_conflict": 409, "approval_stale": 409,
     "mission_revision_conflict": 409, "mission_approval_conflict": 409,
+    "mission_cancel_required": 409,
     "approval_required": 403, "permission_denied": 403, "policy_denied": 403,
     "tool_policy": 403, "tool_denied": 403, "command_denied": 403,
     "test_approval_required": 403, "delivery_approval": 403,

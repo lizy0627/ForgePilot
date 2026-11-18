@@ -46,40 +46,67 @@ class ConversationHost:
         if self.runtime.stopping:
             raise ForgePilotError('server_stopping','服务正在关闭。')
         self.capacity.check_available('活动请求数量已达上限，请等待当前请求完成。')
-        if mode=='chat' and self.chat_factory is None:
-            raise ForgePilotError('llm_config','问答模型尚未配置。')
+        if mode=='chat':
+            if self.chat_factory is None:
+                raise ForgePilotError('llm_config','问答模型尚未配置。')
+            has_repository=bool(self.store.require_conversation(cid)['repository_path'])
+            route=chat_tool_route(tool_mode,prompt,has_repository)
+            snapshots=self._web_snapshots(route)
         _,notice=self.store.conversation_context(cid)
         request=self.store.begin_conversation_request(cid,rid,mode,prompt,notice)
-        if mode=='task':
-            try:
+        try:
+            if mode=='task':
                 await self.tasks.create_for_conversation(request['repository_path'],prompt,request_id=rid,use_rag=use_rag,
                     prepare_context=lambda:self._prepare_task_context(request),background=lambda:self.store.memory_background(cid,request['repository_path']))
-            except Exception as exc:
+            else:
+                # Project association can change on the API thread before admission.
+                if has_repository!=bool(request['repository_path']):
+                    route=chat_tool_route(tool_mode,prompt,bool(request['repository_path']))
+                    snapshots=self._web_snapshots(route)
+                started=self._start_answer(request,route,snapshots,request_started,len(prompt))
+                await started.wait()
+        except Exception as exc:
+            if mode=='task':
                 if isinstance(exc, ForgePilotError) and exc.code == 'storage_unavailable':
                     self.store.mark_request_unavailable(rid)
                     raise
                 error=self.store.redactor.text(str(exc)) if isinstance(exc,ForgePilotError) else 'task_internal'
-                try:
-                    self.store.finish_conversation_request(rid,'failed','执行任务未能启动。\n'+error,error)
-                except (sqlite3.Error, ForgePilotError):
-                    self.store.mark_request_unavailable(rid)
-                    raise ForgePilotError('storage_unavailable','Request persistence failed; durable status is unavailable') from None
-            return self.store.conversation_request(cid,rid)
+                content='执行任务未能启动。\n'+error
+            else:
+                error=exc.code if isinstance(exc,ForgePilotError) else 'chat_internal'
+                content='回答未完成，请稍后重试。'
+            try:
+                self.store.finish_conversation_request(rid,'failed',content,error)
+            except (sqlite3.Error, ForgePilotError):
+                self.store.mark_request_unavailable(rid)
+                raise ForgePilotError('storage_unavailable','Request persistence failed; durable status is unavailable') from None
+        return self.store.conversation_request(cid,rid)
+
+    def _web_snapshots(self,route):
+        if self.mcp_disabled or not route.web:
+            return ()
+        return web_mcp_snapshots(self.mcp_service.snapshots('chat'))
+
+    def _start_answer(self,request,route,snapshots,request_started,input_chars):
+        cid,rid=request['conversation_id'],request['request_id']
         started=asyncio.Event()
-        route=chat_tool_route(tool_mode,prompt,bool(request['repository_path']))
-        snapshots=(() if self.mcp_disabled or not route.web else
-                   web_mcp_snapshots(self.mcp_service.snapshots('chat')))
-        metrics=StreamMetrics(started=request_started,mode=mode,
+        metrics=StreamMetrics(started=request_started,mode='chat',
             project_tools_enabled=route.project,mcp_enabled=bool(snapshots),
-            request_input_chars=len(prompt),tool_mode=tool_mode)
+            request_input_chars=input_chars,tool_mode=route.mode)
         broker=ConversationStreamBroker(cid,rid,max_subscribers=self._stream_max_subscribers,
                                         metrics=metrics)
-        self._streams[rid]=broker
         self.capacity.acquire('chat',rid,message='活动请求数量已达上限，请等待当前请求完成。')
-        self._answers[rid]=asyncio.create_task(self._answer(request,started,snapshots,tool_mode))
-        metrics.request_prepared()
-        await started.wait()
-        return self.store.conversation_request(cid,rid)
+        self._streams[rid]=broker
+        answer=self._answer(request,started,snapshots,route.mode)
+        try:
+            metrics.request_prepared()
+            self._answers[rid]=asyncio.create_task(answer)
+        except Exception:
+            answer.close()
+            self._streams.pop(rid)
+            self.capacity.release('chat',rid)
+            raise
+        return started
 
     async def _answer(self,request,started,snapshots,tool_mode):
         rid=request['request_id']; service=None

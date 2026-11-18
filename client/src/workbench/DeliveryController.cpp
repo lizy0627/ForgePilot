@@ -68,6 +68,12 @@ bool DeliveryController::canConfirm() const
         && hash.match(m_preview.value("token").toString()).hasMatch()
         && m_preview.value("task_id") == m_mission.value("task_id");
 }
+QString DeliveryController::abandonBlockReason() const
+{
+    if (!m_mission.isEmpty() && !MissionProtocol::terminal(m_mission.value("status").toString()))
+        return MissionProtocol::errorMessage("mission_cancel_required", 409);
+    return {};
+}
 // Keep the selected operation visible while its preview or confirmation is in flight.
 QString DeliveryController::previewMode() const
 { return busy() || !m_preview.isEmpty() ? m_mode : QString{}; }
@@ -76,6 +82,9 @@ QString DeliveryController::previewTarget() const
 void DeliveryController::prepare(const QString &mode, const QString &targetBranch)
 {
     const QStringList modes{"squash", "keep_branch", "patch", "bundle", "abandon"};
+    if (mode == "abandon" && !abandonBlockReason().isEmpty()) {
+        m_error = abandonBlockReason(); emit changed(); return;
+    }
     if (!canPreview() || !modes.contains(mode) || (mode != "abandon" && m_mission.value("status") != "succeeded")) {
         m_error = "当前任务不可执行所选交付操作，请刷新任务状态。"; emit changed(); return;
     }
