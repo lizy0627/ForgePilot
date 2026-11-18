@@ -190,7 +190,7 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 - ripgrep：存在时用于更快的文本搜索；缺少时需要仓库搜索的工作功能会明确不可用，普通聊天不受影响。
 - CMake/CTest：只在客户端构建、测试和获批的工作任务中使用。缺失时相关操作失败并报告不可用，不影响普通聊天。
 - Ninja：仅在选择 Ninja 生成器时需要；Visual Studio preset 不依赖它。
-- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。设置页会分别显示 `已就绪 / 索引中 / 降级可用 / 索引失败 / 未启用`，支持更新、取消、清空和自动重连。“新任务使用 RAG”只影响之后发送的工作任务，不会启动后端、删除索引或改变已经运行的任务；工作详情会明确显示本次是否实际使用了 RAG。架构、隐私边界、管理接口和评测方法见 [docs/code-rag.md](docs/code-rag.md)。
+- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。设置页会分别显示 `已就绪 / 索引中 / 降级可用 / 索引失败 / 未启用`，支持更新、取消、清空和自动重连。“新任务使用 RAG”只影响之后发送的工作任务，不会启动后端、删除索引或改变已经运行的任务；工作详情会明确显示本次是否实际使用了 RAG。实现与管理接口见 [RAG 源码](agent/forgepilot/rag/)。
 
 ### 启用 Code RAG
 
@@ -229,11 +229,10 @@ RAG 默认关闭。桌面启动器实际读取上文所示本机 `config.json` �
 .\scripts\Run-Benchmark.cmd --mode offline --approval manifest --generator Ninja
 ```
 
-离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。原始 JSON、逐次 CSV、任务级 CSV、Markdown 报告与自动生成的 Benchmark Card 保存在 `logs/benchmark/` 的本次运行目录。任务锁定、Oracle 边界和指标定义见 [评测说明](docs/evaluation.md)；[Benchmark Card](docs/benchmark-card.md) 当前只记录协议和正式证据状态。
+离线评测使用受控任务和样例，不代表真实模型在任意仓库中的修复能力。原始 JSON、逐次 CSV、任务级 CSV、Markdown 报告与自动生成的 Benchmark Card 保存在 `logs/benchmark/` 的本次运行目录。任务定义和指标计算见[评测清单](eval/forgepilot_eval/manifest.py)和[指标实现](eval/forgepilot_eval/metrics.py)。
 
 Bug Fix / Feature 的完整后端入口 `DeliveryWorkflow` 已连接确定性 Validator、共用三轮额度的 Repair、
-独立 Reviewer 和 DeliveryBundle。接入方式、失败分类、Oracle 边界与真实 CMake 集成测试见
-[受控实现与完整闭环](docs/controlled-implementer.md#完整-bug-fix--feature-闭环)。
+独立 Reviewer 和 DeliveryBundle。接入方式见[交付实现](agent/forgepilot/agents/delivery.py)，验证示例见[交付流程测试](agent/tests/test_delivery_workflow.py)。
 
 代码检索可复现评测不会调用 LLM 或收费 Embedding，并与上述 Agent 评测分开报告：
 

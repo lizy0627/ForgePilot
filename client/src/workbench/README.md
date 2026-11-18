@@ -17,8 +17,7 @@
 旧 `WorkbenchPage.qml` 与详情面板保留兼容回归，新界面由
 `tst_workflow_qml.cpp` 通过真实 Main.qml、控制器和本地 HTTP fixture 验证。
 
-实现前核对了 `docs/development-technical-plan.md` 第 5、20、21 节和实际后端 v2
-模型/路由。原 `AgentApiClient` 仅支持 v1，JSON 检查只覆盖顶层对象；原 `SseClient`
+原 `AgentApiClient` 仅支持 v1，JSON 检查只覆盖顶层对象；原 `SseClient`
 只根据事件序号处理 v1，遇到缺口直接报错；旧 `TaskController` 同时承担计划、构建、
 Diff、Trace 等投影。这些既有接口继续保留，v2 校验与工作台职责单独实现。
 

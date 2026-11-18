@@ -102,3 +102,13 @@ $RECYCLE.BIN/
 *.stackdump
 *.swp
 *~
+
+# Local project notes, coursework and generated acceptance output
+/docs/*
+!/docs/windows-release-readme.md
+/AGENTS.md
+/ForgePilot_Codex_Prompts.md
+/agent/artifacts/
+*.doc
+*.docx
+/agent/examples/task-analysis-artifacts.json
