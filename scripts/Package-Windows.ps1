@@ -112,7 +112,10 @@ if (Test-Path -LiteralPath $stage) { throw 'Unique release staging path already 
 foreach ($path in @($zip, $checksum, $buildRoot)) { Assert-NoReparseInPath $path }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
-Copy-File (Join-Path $root 'docs\windows-release-readme.md') 'README.md'
+$releaseReadme = Join-Path $root 'docs\windows-release-readme.md'
+if (Test-Path -LiteralPath $releaseReadme -PathType Leaf) {
+    Copy-File $releaseReadme 'README.md'
+}
 foreach ($name in @('Start-ForgePilot.cmd', 'Stop-ForgePilot.cmd', 'Configure-ForgePilot.cmd', 'Check-Model.cmd')) {
     Copy-File (Join-Path $root $name) $name
 }

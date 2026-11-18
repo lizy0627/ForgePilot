@@ -47,7 +47,7 @@ function statusDetail(status, errorCode, reachable, statusReadFailed, hasReposit
     var reason = safeReason(errorCode);
     if (reason) return reason;
     var details = {
-        disabled: "后端未启用代码 RAG；请按 README 配置并重启后端。",
+        disabled: "后端未启用代码 RAG；请在后端启动参数中加入 --enable-rag 并重启后端。",
         unavailable: "索引依赖当前不可用；原任务流程仍可继续。",
         empty: "当前项目还没有代码索引。",
         pending: "项目文件有变化，建议更新索引。",

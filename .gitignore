@@ -70,6 +70,10 @@ dist/
 
 # Local machine settings, secrets, runtime data, and logs
 scripts/local-env.cmd
+*.dpapi
+/config.json
+launch-config.json
+mission-models.json
 .env
 .env.*
 !.env.example
@@ -105,9 +109,8 @@ $RECYCLE.BIN/
 
 # Local project notes, coursework and generated acceptance output
 /docs/*
-!/docs/windows-release-readme.md
-/AGENTS.md
-/ForgePilot_Codex_Prompts.md
+*.md
+*.pdf
 /agent/artifacts/
 *.doc
 *.docx
