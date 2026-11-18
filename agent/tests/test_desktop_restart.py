@@ -22,7 +22,8 @@ class OwnerFixture:
 
     def __init__(self, tmp_path, monkeypatch, failure=None):
         self.events, self.closed = [], set()
-        self.stopped, self.restart_pending, self.mutex_released = False, True, False
+        self.signals = {"stop": False, "restart": True, "show": False}
+        self.mutex_released = False
         self.config = tmp_path / "settings/config.json"
         self.config.parent.mkdir()
         with socket.socket() as listener:
@@ -41,10 +42,10 @@ class OwnerFixture:
         monkeypatch.setenv("FORGEPILOT_LOCAL_API_TOKEN", "private-local-token")
         monkeypatch.setenv("FORGEPILOT_RUNTIME_CONFIG", str(self.config))
         api = SimpleNamespace(CreateMutexW=lambda *_: "mutex", WaitForSingleObject=lambda *_: 0,
-            CreateEventW=lambda *args: "restart" if args[-1].endswith("-restart") else "stop",
-            ResetEvent=lambda handle: self._reset(handle), CloseHandle=lambda handle: self.events.append("close:" + handle),
+            CreateEventW=lambda *args: args[-1].rsplit("-", 1)[-1],
+            ResetEvent=self._reset, CloseHandle=lambda handle: self.events.append("close:" + handle),
             ReleaseMutex=lambda handle: self._release(handle))
-        self.kernel = SimpleNamespace(api=api, name="offline-owner", signaled=self._signaled)
+        self.kernel = SimpleNamespace(api=api, name="offline-owner", signaled=self.signals.__getitem__)
         monkeypatch.setattr(launcher, "Kernel", lambda config: self.kernel)
         read_config = launcher.read_config
         reads = []
@@ -111,7 +112,7 @@ class OwnerFixture:
         def request_stop(kernel, handle):
             assert handle == "stop"
             self.events.append("stop_backend")
-            self.stopped = True
+            self.signals["stop"] = True
 
         monkeypatch.setattr(launcher, "request_stop", request_stop)
         write_json = launcher.write_json
@@ -129,13 +130,13 @@ class OwnerFixture:
             # Let a denied owner keep running until a separate user stop.
             if "rejected" in self.events:
                 self.events.append("user_stop")
-                self.stopped = True
+                self.signals["stop"] = True
 
         monkeypatch.setattr(launcher.time, "sleep", sleep)
 
         def start(path):
             assert self.mutex_released and self.closed == {"job-0", "job-1"}
-            assert {"close:stop", "close:restart", "close:mutex"} <= set(self.events)
+            assert {"close:stop", "close:restart", "close:show", "close:mutex"} <= set(self.events)
             assert os.environ["FORGEPILOT_API_KEY"] == "new-offline-key"
             self.events.append("start_new_owner")
             return 0
@@ -143,15 +144,11 @@ class OwnerFixture:
         monkeypatch.setattr(launcher, "start", start)
 
     def _reset(self, handle):
-        assert handle == "restart"
-        self.restart_pending = False
+        self.signals[handle] = False
 
     def _release(self, handle):
         assert handle == "mutex"
         self.mutex_released = True
-
-    def _signaled(self, handle):
-        return self.restart_pending if handle == "restart" else self.stopped
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows desktop owner")
@@ -253,7 +250,7 @@ def test_backend_reads_launch_snapshot_after_saved_configuration_changes(tmp_pat
 @pytest.mark.skipif(os.name != "nt", reason="Windows desktop owner")
 def test_invalid_optional_embedding_key_disables_only_current_rag_launch(tmp_path, monkeypatch):
     fixture = OwnerFixture(tmp_path, monkeypatch)
-    fixture.restart_pending = False
+    fixture.signals["restart"] = False
     data = json.loads(fixture.config.read_text(encoding="utf-8"))
     data.update(server_args=["--enable-rag"], embedding_credential_file="embedding-key-" + "1" * 32 + ".dpapi")
     fixture.config.write_text(json.dumps(data), encoding="utf-8")
@@ -274,7 +271,7 @@ def test_invalid_optional_embedding_key_disables_only_current_rag_launch(tmp_pat
 
     def status(*_, prepare=False):
         assert not prepare
-        fixture.stopped = True  # A separate user stop after the ordinary startup.
+        fixture.signals["stop"] = True  # A separate user stop after the ordinary startup.
         return {"active_count": 0, "restarting": False}
 
     monkeypatch.setattr(launcher, "_backend_runtime", status)
