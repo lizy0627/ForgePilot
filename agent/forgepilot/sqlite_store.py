@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -93,6 +94,18 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if isinstance(exc, (sqlite3.Error, OSError)):
                 raise ForgePilotError("storage_unavailable", "Cannot open or initialize task database") from None
             raise
+
+    @contextmanager
+    def locked_connection(self) -> Iterator[sqlite3.Connection]:
+        """Borrow the shared connection under the store lock for a read."""
+        with self._lock:
+            yield self._db
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Borrow the connection for one locked, atomic write transaction."""
+        with self._transaction():
+            yield self._db
 
     @contextmanager
     def _transaction(self):

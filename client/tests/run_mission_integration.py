@@ -10,6 +10,7 @@ import sys
 import tempfile
 from threading import Thread
 import time
+from unittest.mock import patch
 from uuid import uuid4
 
 import uvicorn
@@ -80,9 +81,10 @@ def run(root, output_root):
                 return result.returncode
             restart_offset = len(requests)
             restart_report = output / "mission-restart-results.txt"
-            restarted = subprocess.run([str(root / "client/build/Release/ForgePilotMissionBackendTests.exe"),
-                "persistentMissionDiscovery", "-v1", "-o", str(restart_report) + ",txt"],
-                env=env, capture_output=True, timeout=45)
+            with patch.object(store.artifacts, "list_for_task", wraps=store.artifacts.list_for_task) as artifact_reads:
+                restarted = subprocess.run([str(root / "client/build/Release/ForgePilotMissionBackendTests.exe"),
+                    "persistentMissionDiscovery", "-v1", "-o", str(restart_report) + ",txt"],
+                    env=env, capture_output=True, timeout=45)
             restart_detail = (restart_report.read_bytes() if restart_report.exists() else b"") + restarted.stdout + restarted.stderr
             (output / "mission-restart.log").write_bytes(restart_detail)
             print(restart_detail.decode("utf-8", errors="replace"), flush=True)
@@ -97,6 +99,7 @@ def run(root, output_root):
                 assert len(missions) == 1 and missions[0]["status"] == "succeeded", missions
                 assert len(approvals) == 1 and approvals[0]["status"] == "approved", approvals
                 assert store._db.execute("PRAGMA foreign_key_check").fetchall() == []
+            artifact_reads.assert_called_once_with(missions[0]["task_id"])
             approval_posts = [entry for entry in requests if entry["method"] == "POST" and entry["path"].endswith("/approvals")]
             assert [entry["status"] for entry in approval_posts] == [409, 202, 409], approval_posts
             assert (repository / "source.txt").read_bytes() == original

@@ -3,8 +3,10 @@
 #include "Protocol.h"
 #include <QJsonArray>
 #include <QUrl>
+#include <utility>
 
-MemoryController::MemoryController(ConversationController *c):QObject(c),m_conversations(c)
+MemoryController::MemoryController(ConversationController *c, Request request)
+    : QObject(c), m_conversations(c), m_request(std::move(request))
 {
     connect(c,&ConversationController::changed,this,&MemoryController::synchronize);
     connect(c,&ConversationController::conversationDeleted,this,[this](const QString &){
@@ -15,7 +17,7 @@ MemoryController::MemoryController(ConversationController *c):QObject(c),m_conve
 }
 void MemoryController::synchronize()
 {
-    const auto base=m_conversations->m_tasks->baseUrl().toString();
+    const auto base=m_conversations->baseUrl().toString();
     const auto id=m_conversations->conversationId(),project=m_conversations->repositoryPath();
     if(base==m_base && id==m_id && project==m_project) return;
     m_base=base; m_id=id; m_project=project; ++m_generation; m_pending=0; m_busy=false;
@@ -28,13 +30,13 @@ void MemoryController::refresh()
 {
     if(loading() || m_busy) return;
     m_error.clear(); m_pending=m_id.isEmpty()?1:2; const auto generation=++m_generation; emit changed();
-    m_conversations->request("GET","/api/v1/memories"+(m_project.isEmpty()?QString{}:"?repository_path="+QString::fromLatin1(QUrl::toPercentEncoding(m_project))),{},
+    m_request("GET","/api/v1/memories"+(m_project.isEmpty()?QString{}:"?repository_path="+QString::fromLatin1(QUrl::toPercentEncoding(m_project))),{},
         [=,this](const QJsonObject &body,int,const QString &error){
             if(generation!=m_generation) return;
             --m_pending; if(error.isEmpty()) m_items=body.value("items").toArray().toVariantList(); else m_error=error; emit changed();
         });
     if(m_id.isEmpty()) { m_summary={}; return; }
-    m_conversations->request("GET","/api/v1/conversations/"+m_id+"/context",{},[=,this](const QJsonObject &body,int status,const QString &error){
+    m_request("GET","/api/v1/conversations/"+m_id+"/context",{},[=,this](const QJsonObject &body,int status,const QString &error){
         if(generation!=m_generation) return;
         --m_pending;
         if(error.isEmpty()) m_summary=body;
@@ -46,7 +48,7 @@ void MemoryController::mutate(const QByteArray &method,const QString &path,const
 {
     if(m_busy || loading()) return;
     m_busy=true; m_error.clear(); const auto generation=++m_generation; emit changed();
-    m_conversations->request(method,path,body,[=,this](const QJsonObject &reply,int,const QString &error){
+    m_request(method,path,body,[=,this](const QJsonObject &reply,int,const QString &error){
         if(generation!=m_generation) return;
         m_busy=false; m_error=error;
         if(reply.value("error").toObject().value("code").toString()=="api_internal") m_error="记忆操作未完成，请刷新后重试。";

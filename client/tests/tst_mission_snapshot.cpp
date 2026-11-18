@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QFile>
+#include <QUuid>
 #include "HttpFixture.h"
 #include "workbench/MissionProtocol.h"
 #include "workbench/MissionSnapshotLoader.h"
@@ -37,6 +38,7 @@ QJsonObject error(const QString &code)
 struct Fixture {
     Source source;
     QJsonObject current = mission();
+    QJsonArray artifacts;
     std::function<bool(const Request &)> intercept;
     Fixture()
     {
@@ -48,9 +50,7 @@ struct Fixture {
     {
         const auto task = current.value("task_id");
         if (r.path.endsWith("/graph")) Source::json(r, graph(current));
-        else if (r.path.endsWith("/artifacts")) Source::json(r, {{"task_id", task}, {"items", QJsonArray{}}});
-        else if (r.path.endsWith("/diff")) Source::json(r, {{"task_id", task}, {"patch", "fixture patch"}, {"change_sets", QJsonArray{}}});
-        else if (r.path.endsWith("/validation")) Source::json(r, {{"task_id", task}, {"items", QJsonArray{}}, {"latest", QJsonValue::Null}});
+        else if (r.path.endsWith("/artifacts")) Source::json(r, {{"task_id", task}, {"items", artifacts}});
         else Source::json(r, current);
     }
     int missionReads(const QString &task = A) const
@@ -84,21 +84,68 @@ private slots:
             projections.append(r); return true;
         };
         loader.selectTask(A); loader.refresh(10); loader.refresh(); loader.refresh();
-        QTRY_COMPARE(projections.size(), 4);
+        QTRY_COMPARE(projections.size(), 2);
         loader.refresh(); loader.refresh();
         QCOMPARE(f.missionReads(), 1); QCOMPARE(ready.count(), 0);
-        for (int i = 0; i < 3; ++i) f.respond(projections.at(i));
+        f.respond(projections.first());
         QTest::qWait(30); QCOMPARE(f.missionReads(), 1); QCOMPARE(ready.count(), 0);
         f.respond(projections.last());
         QTRY_COMPARE(ready.count(), 1);
-        QCOMPARE(f.source.requests.size(), 6); QCOMPARE(f.missionReads(), 2);
+        QCOMPARE(f.source.requests.size(), 4); QCOMPARE(f.missionReads(), 2);
         QCOMPARE(f.source.requests.first().path, "/api/v2/missions/" + A.toUtf8());
         QCOMPARE(f.source.requests.last().path, f.source.requests.first().path);
         const auto loaded = bundle(ready);
         QCOMPARE(loaded.mission, f.current); QCOMPARE(loaded.graph, graph(f.current));
         QCOMPARE(loaded.artifacts.value("task_id").toString(), A);
-        QCOMPARE(loaded.diff.value("patch").toString(), "fixture patch");
-        QCOMPARE(loaded.validation.value("task_id").toString(), A);
+        QCOMPARE(loaded.diff, (QJsonObject{{"task_id", A}, {"patch", ""}, {"change_sets", QJsonArray{}}}));
+        QCOMPARE(loaded.validation, (QJsonObject{{"task_id", A}, {"items", QJsonArray{}}, {"latest", QJsonValue::Null}}));
+    }
+    void multipleRepairRoundsUseLatestChangeSetAndPreserveHistory()
+    {
+        QFile file(QString(FORGEPILOT_SOURCE_DIR) + "/client/tests/fixtures/mission_artifacts.json");
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto examples = QJsonDocument::fromJson(file.readAll()).object();
+        const auto task = examples.value("task_id").toString();
+        Fixture f; f.current = mission(task);
+        QJsonObject change, report;
+        for (const auto &item : examples.value("items").toArray()) {
+            const auto type = item.toObject().value("artifact_type");
+            if (type == "ChangeSet") change = item.toObject();
+            else if (type == "ValidationReport") report = item.toObject();
+            else if (type == "TaskSpec") f.artifacts.append(item);
+        }
+        QVERIFY(!change.isEmpty() && !report.isEmpty());
+        const auto exampleFile = change.value("content").toObject().value("files").toArray().first().toObject();
+        QJsonArray changes, reports;
+        for (int round = 0; round <= 2; ++round) {
+            auto changeContent = change.value("content").toObject();
+            auto source = exampleFile, header = exampleFile;
+            source["unified_diff"] = QString("source-%1\n").arg(round);
+            header["unified_diff"] = QString("header-%1\n").arg(round);
+            header["path"] = "src/window.h";
+            changeContent["files"] = QJsonArray{source, header};
+            change["content"] = changeContent;
+            change["artifact_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            changes.append(change);
+
+            auto reportContent = report.value("content").toObject();
+            reportContent["status"] = round == 2 ? "passed" : "failed";
+            reportContent["failure_classification"] = round == 2 ? "none" : "code_failure";
+            reportContent["tests_failed"] = round == 2 ? 0 : 1;
+            report["content"] = reportContent;
+            report["artifact_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            reports.append(report);
+            f.artifacts.append(change);
+            f.artifacts.append(report);
+        }
+        AgentApiClient api; QVERIFY(api.setBaseUrl(f.source.url()));
+        MissionSnapshotLoader loader(&api); QSignalSpy ready(&loader, &MissionSnapshotLoader::snapshotReady);
+        loader.selectTask(task); loader.refresh();
+        QTRY_COMPARE(ready.count(), 1);
+        const auto loaded = bundle(ready);
+        QCOMPARE(loaded.artifacts, (QJsonObject{{"task_id", task}, {"items", f.artifacts}}));
+        QCOMPARE(loaded.diff, (QJsonObject{{"task_id", task}, {"patch", "source-2\nheader-2\n"}, {"change_sets", changes}}));
+        QCOMPARE(loaded.validation, (QJsonObject{{"task_id", task}, {"items", reports}, {"latest", report}}));
     }
     void inconsistentFenceDiscardsTheWholeBundle_data()
     {

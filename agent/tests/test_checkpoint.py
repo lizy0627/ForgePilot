@@ -198,6 +198,24 @@ def test_checkpoint_snapshot_cannot_be_replaced_by_a_changed_in_memory_record():
         store.close()
 
 
+def test_checkpoint_readback_error_rolls_back_the_insert():
+    store = SqliteEventStore()
+    try:
+        _attempt(store)
+        checkpoints = CheckpointStore(store)
+        with store.transaction() as db:
+            db.execute("""CREATE TEMP TRIGGER corrupt_checkpoint AFTER INSERT ON checkpoints
+                BEGIN UPDATE checkpoints SET created_at='invalid' WHERE ordinal=NEW.ordinal; END""")
+        with pytest.raises(CheckpointIntegrityError):
+            _create(checkpoints)
+        assert checkpoints.list_for_task("task-checkpoint") == ()
+        with store.transaction() as db:
+            db.execute("DROP TRIGGER corrupt_checkpoint")
+        assert _create(checkpoints).ordinal == 1
+    finally:
+        store.close()
+
+
 def test_sqlite_insert_failure_and_ambiguous_commit_converge_on_one_checkpoint(monkeypatch):
     store = SqliteEventStore()
     try:

@@ -26,7 +26,7 @@ signals:
     void snapshotReady(const MissionSnapshot &snapshot);
     void loadFailed(int status, const QString &code);
 private:
-    enum class Part { Start, Graph, Artifacts, Diff, Validation, Fence };
+    enum class Part { Start, Graph, Artifacts, Fence };
     struct Pending { Part part; quint64 generation; };
     void begin();
     void track(quint64 request, Part part);
@@ -40,6 +40,6 @@ private:
     MissionSnapshot m_bundle;
     qint64 m_floor = 0;
     quint64 m_generation = 0;
-    int m_parts = 0, m_attempts = 0;
+    int m_attempts = 0;
     bool m_loading = false;
 };

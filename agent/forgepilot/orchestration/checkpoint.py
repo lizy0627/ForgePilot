@@ -145,13 +145,13 @@ class CheckpointStore:
                     "node_id": node_id, "attempt": attempt, "payload": canonical_payload}
         digest = sha256(_canonical(proposed)).hexdigest()
         try:
-            with self.events_store._transaction():
-                if self.events_store._db.execute(
+            with self.events_store.transaction() as db:
+                if db.execute(
                     "SELECT 1 FROM task_node_attempts WHERE task_id=? AND node_id=? AND attempt=?",
                     (task_id, node_id, attempt),
                 ).fetchone() is None:
                     raise ForgePilotError("checkpoint_attempt", "Checkpoint intent has no matching node attempt")
-                existing = self.events_store._db.execute(
+                existing = db.execute(
                     "SELECT * FROM checkpoint_intents WHERE task_id=? AND node_id=? AND attempt=?",
                     (task_id, node_id, attempt),
                 ).fetchone()
@@ -160,7 +160,7 @@ class CheckpointStore:
                     if saved != {**proposed, "data_sha256": digest}:
                         raise ForgePilotError("checkpoint_conflict", "A node checkpoint intent is immutable")
                     return saved
-                self.events_store._db.execute(
+                db.execute(
                     """INSERT INTO checkpoint_intents(checkpoint_id,task_id,node_id,attempt,payload_json,data_sha256)
                        VALUES(?,?,?,?,?,?)""",
                     (checkpoint_id, task_id, node_id, attempt, payload_json, digest),
@@ -171,8 +171,8 @@ class CheckpointStore:
 
     def intent_for_attempt(self, task_id: str, node_id: str, attempt: int) -> dict | None:
         try:
-            with self.events_store._lock:
-                row = self.events_store._db.execute(
+            with self.events_store.locked_connection() as db:
+                row = db.execute(
                     "SELECT * FROM checkpoint_intents WHERE task_id=? AND node_id=? AND attempt=?",
                     (task_id, node_id, attempt),
                 ).fetchone()
@@ -182,8 +182,8 @@ class CheckpointStore:
 
     def intents_for_task(self, task_id: str) -> tuple[dict, ...]:
         try:
-            with self.events_store._lock:
-                rows = self.events_store._db.execute(
+            with self.events_store.locked_connection() as db:
+                rows = db.execute(
                     "SELECT * FROM checkpoint_intents WHERE task_id=? ORDER BY rowid", (task_id,)
                 ).fetchall()
                 return tuple(self._intent(row) for row in rows)
@@ -236,8 +236,8 @@ class CheckpointStore:
         # Use the same redaction boundary as GraphStore before hashing/persisting.
         result = NodeResult.from_dict(self.events_store.redactor.data(result.to_dict()))
         try:
-            with self.events_store._transaction():
-                attempt_row = self.events_store._db.execute(
+            with self.events_store.transaction() as db:
+                attempt_row = db.execute(
                     """SELECT idempotency_key FROM task_node_attempts
                        WHERE task_id=? AND node_id=? AND attempt=?""",
                     (task_id, node_id, attempt),
@@ -247,7 +247,7 @@ class CheckpointStore:
                 key = idempotency_key if idempotency_key is not None else attempt_row[0]
                 if not isinstance(key, str) or not SHA256.fullmatch(key) or key != attempt_row[0]:
                     raise ForgePilotError("checkpoint_conflict", "Checkpoint idempotency key differs from its attempt")
-                existing = self.events_store._db.execute(
+                existing = db.execute(
                     "SELECT * FROM checkpoints WHERE task_id=? AND node_id=? AND attempt=?",
                     (task_id, node_id, attempt),
                 ).fetchone()
@@ -264,7 +264,7 @@ class CheckpointStore:
                     return saved
                 # Explicit allocation lets the canonical hash cover the ordinal.
                 # AUTOINCREMENT retains the high-water mark even if rows are deleted.
-                sequence = self.events_store._db.execute(
+                sequence = db.execute(
                     "SELECT seq FROM sqlite_sequence WHERE name='checkpoints'"
                 ).fetchone()
                 ordinal = (sequence[0] if sequence is not None else 0) + 1
@@ -274,7 +274,7 @@ class CheckpointStore:
                     workspace_id, head_commit, files, inputs, outputs, key, ordinal, stamp, "",
                 )
                 digest = sha256(_canonical(record.to_dict())).hexdigest()
-                self.events_store._db.execute(
+                db.execute(
                     """INSERT INTO checkpoints(ordinal,checkpoint_id,task_id,node_id,attempt,
                        checkpoint_type,status,workspace_id,commit_hash,created_at,result_json,
                        file_hashes_json,input_artifacts_json,output_artifacts_json,idempotency_key,data_sha256)
@@ -284,7 +284,7 @@ class CheckpointStore:
                      _canonical(files).decode(), _canonical(inputs).decode(),
                      _canonical(outputs).decode(), key, digest),
                 )
-                row = self.events_store._db.execute(
+                row = db.execute(
                     "SELECT * FROM checkpoints WHERE checkpoint_id=?", (checkpoint_id,)
                 ).fetchone()
                 return self._record(row)
@@ -293,8 +293,8 @@ class CheckpointStore:
 
     def for_attempt(self, task_id: str, node_id: str, attempt: int) -> CheckpointRecord | None:
         try:
-            with self.events_store._lock:
-                row = self.events_store._db.execute(
+            with self.events_store.locked_connection() as db:
+                row = db.execute(
                     "SELECT * FROM checkpoints WHERE task_id=? AND node_id=? AND attempt=?",
                     (task_id, node_id, attempt),
                 ).fetchone()
@@ -304,8 +304,8 @@ class CheckpointStore:
 
     def latest(self, task_id: str) -> CheckpointRecord | None:
         try:
-            with self.events_store._lock:
-                row = self.events_store._db.execute(
+            with self.events_store.locked_connection() as db:
+                row = db.execute(
                     """SELECT * FROM checkpoints WHERE task_id=? AND node_id IS NOT NULL
                        ORDER BY ordinal DESC LIMIT 1""", (task_id,)
                 ).fetchone()
@@ -315,8 +315,8 @@ class CheckpointStore:
 
     def list_for_task(self, task_id: str) -> tuple[CheckpointRecord, ...]:
         try:
-            with self.events_store._lock:
-                rows = self.events_store._db.execute(
+            with self.events_store.locked_connection() as db:
+                rows = db.execute(
                     """SELECT * FROM checkpoints WHERE task_id=? AND node_id IS NOT NULL
                        ORDER BY ordinal""", (task_id,)
                 ).fetchall()

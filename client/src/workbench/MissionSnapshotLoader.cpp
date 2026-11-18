@@ -1,5 +1,31 @@
 #include "MissionSnapshotLoader.h"
+#include <QJsonArray>
 #include <algorithm>
+
+namespace {
+void applyArtifacts(MissionSnapshot &snapshot, const QJsonObject &artifacts)
+{
+    snapshot.artifacts = artifacts;
+    QJsonArray changes, reports;
+    for (const auto &item : artifacts.value("items").toArray()) {
+        const auto type = item.toObject().value("artifact_type");
+        if (type == "ChangeSet") changes.append(item);
+        else if (type == "ValidationReport") reports.append(item);
+    }
+
+    // Match the Mission diff endpoint: the last ChangeSet holds the cumulative patch.
+    QString patch;
+    if (!changes.isEmpty()) {
+        const auto content = changes.last().toObject().value("content").toObject();
+        for (const auto &file : content.value("files").toArray())
+            patch += file.toObject().value("unified_diff").toString();
+    }
+    const auto task = artifacts.value("task_id");
+    snapshot.diff = {{"task_id", task}, {"patch", patch}, {"change_sets", changes}};
+    snapshot.validation = {{"task_id", task}, {"items", reports},
+        {"latest", reports.isEmpty() ? QJsonValue::Null : reports.last()}};
+}
+}
 
 MissionSnapshotLoader::MissionSnapshotLoader(AgentApiClient *api, QObject *parent)
     : QObject(parent), m_api(api)
@@ -30,7 +56,7 @@ void MissionSnapshotLoader::invalidate(qint64 minimumRevision)
     const auto requests = m_requests.keys();
     m_requests.clear();
     if (m_api) for (const auto request : requests) m_api->abortRequest(request);
-    m_loading = false; m_parts = 0; m_start = {}; m_bundle = {};
+    m_loading = false; m_start = {}; m_bundle = {};
     observeRevision(minimumRevision);
 }
 void MissionSnapshotLoader::refresh(int delay)
@@ -44,7 +70,7 @@ void MissionSnapshotLoader::track(quint64 request, Part part)
 void MissionSnapshotLoader::begin()
 {
     if (!m_api || m_task.isEmpty() || m_loading) return;
-    m_loading = true; m_parts = 0; m_start = {}; m_bundle = {};
+    m_loading = true; m_start = {}; m_bundle = {};
     track(m_api->getMission(m_task), Part::Start);
 }
 void MissionSnapshotLoader::received(quint64 request, const QString &task, const QJsonObject &body)
@@ -58,8 +84,6 @@ void MissionSnapshotLoader::received(quint64 request, const QString &task, const
         m_start = body;
         track(m_api->getMissionGraph(m_task), Part::Graph);
         track(m_api->getMissionArtifacts(m_task), Part::Artifacts);
-        track(m_api->getMissionDiff(m_task), Part::Diff);
-        track(m_api->getMissionValidation(m_task), Part::Validation);
         return;
     }
     if (part == Part::Fence) {
@@ -80,10 +104,8 @@ void MissionSnapshotLoader::received(quint64 request, const QString &task, const
         return;
     }
     if (part == Part::Graph) m_bundle.graph = body;
-    if (part == Part::Artifacts) m_bundle.artifacts = body;
-    if (part == Part::Diff) m_bundle.diff = body;
-    if (part == Part::Validation) m_bundle.validation = body;
-    if (++m_parts == 4) track(m_api->getMission(m_task), Part::Fence);
+    if (part == Part::Artifacts) applyArtifacts(m_bundle, body);
+    if (m_requests.isEmpty()) track(m_api->getMission(m_task), Part::Fence);
 }
 void MissionSnapshotLoader::failed(quint64 request, int status, const QString &code)
 {

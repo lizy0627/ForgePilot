@@ -47,6 +47,7 @@ class ConversationController : public QObject {
 public:
     explicit ConversationController(TaskController *tasks, QObject *parent=nullptr);
     ~ConversationController() override;
+    QUrl baseUrl() const { return m_tasks->baseUrl(); }
     QString conversationId() const { return m_id; }
     QString title() const { return m_detail.value("title").toString("新对话"); }
     QString repositoryPath() const { return m_detail.value("repository_path").toString(); }
@@ -116,7 +117,6 @@ signals:
     void conversationDeleted(const QString &conversationId);
     void mcpToolsChanged();
 private:
-    friend class MemoryController;
     using Callback=std::function<void(const QJsonObject&,int,const QString&)>;
     void request(const QByteArray &method,const QString &path,const QJsonObject &body,Callback callback,qint64 limit=16*1024*1024);
     void applyDetail(const QJsonObject &body,bool older=false);

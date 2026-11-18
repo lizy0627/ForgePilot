@@ -3,6 +3,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QJsonObject>
+#include <functional>
 class ConversationController;
 
 class MemoryController:public QObject {
@@ -13,7 +14,9 @@ class MemoryController:public QObject {
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
 public:
-    explicit MemoryController(ConversationController *conversations);
+    using Callback = std::function<void(const QJsonObject &, int, const QString &)>;
+    using Request = std::function<void(const QByteArray &, const QString &, const QJsonObject &, Callback)>;
+    MemoryController(ConversationController *conversations, Request request);
     QVariantList items() const { return m_items; }
     QVariantMap summary() const { return m_summary.toVariantMap(); }
     bool loading() const { return m_pending>0; }
@@ -35,6 +38,7 @@ private:
     void synchronize();
     void mutate(const QByteArray &method,const QString &path,const QJsonObject &body);
     ConversationController *m_conversations;
+    Request m_request;
     QVariantList m_items;
     QJsonObject m_summary;
     QString m_id,m_project,m_base,m_error;

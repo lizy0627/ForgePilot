@@ -6,12 +6,16 @@
 #include <QUuid>
 #include <QDesktopServices>
 #include <QLoggingCategory>
+#include <utility>
 
 Q_LOGGING_CATEGORY(conversationStreamLog,"forgepilot.conversation.stream",QtInfoMsg)
 
 ConversationController::ConversationController(TaskController *tasks,QObject *parent):QObject(parent),m_tasks(tasks)
 {
-    m_memory=new MemoryController(this);
+    m_memory=new MemoryController(this, [this](const QByteArray &method, const QString &path,
+                                              const QJsonObject &body, Callback callback) {
+        request(method, path, body, std::move(callback));
+    });
     m_network.setProxy(QNetworkProxy::NoProxy);
     m_poll.setInterval(1000);
     connect(&m_poll,&QTimer::timeout,this,[this]{

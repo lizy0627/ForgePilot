@@ -507,12 +507,12 @@ private slots:
             timer.start(); fixture.streams.last().socket->write(frame); fixture.streams.last().socket->flush();
             QVERIFY(QTest::qWaitFor([&] { return ui.missions.revision() == revision && ui.missions.synchronized(); }, 10000));
             QVERIFY(render()); updates.append(measure(timer));
-            // One coherent read bundle per update: start, four parts and fence.
+            // Each update reads the graph and artifacts between the two Mission reads.
             int detailReads = 0;
             for (int r = requestStart; r < fixture.source.requests.size(); ++r)
                 if (fixture.source.requests[r].method == "GET"
                         && fixture.source.requests[r].path.startsWith("/api/v2/missions/")) ++detailReads;
-            QCOMPARE(detailReads, 6);
+            QCOMPARE(detailReads, 4);
             const auto records = page->property("nodeRecords").value<QJSValue>().toVariant().toList();
             bool activeVisible = false;
             for (const auto &record : records) {
@@ -1252,8 +1252,9 @@ print(json.dumps(result))
         QVERIFY(ui.click("agentWorkbenchModeButton"));
         ui.missions.selectMission(MissionId);
         QTRY_VERIFY(ui.missions.synchronized());
-        auto *stage = ui.find("workflowStage", "stageId", "analysis"); QVERIFY(stage);
-        auto *expand = ui.find("workflowStageExpand", "stageId", "analysis"); QVERIFY(expand);
+        QQuickItem *stage = nullptr, *expand = nullptr;
+        QTRY_VERIFY((stage = ui.find("workflowStage", "stageId", "analysis")));
+        QTRY_VERIFY((expand = ui.find("workflowStageExpand", "stageId", "analysis")));
         const bool initiallyExpanded = stage->property("expanded").toBool();
         QVERIFY(ui.click(expand));
         QTRY_COMPARE(stage->property("expanded").toBool(), !initiallyExpanded);
