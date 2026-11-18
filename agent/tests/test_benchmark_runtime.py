@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "eval"))
 from forgepilot_eval.manifest import load_tasks, verify_real_lock
 from forgepilot_eval.campaign_budget import BudgetPlan, SharedTokenBudget
 from forgepilot_eval.runner import (Benchmark, BudgetedModel, TokenBudget, main,
-    approve, comparison_lock, empty_row, parser, verify_ab_pair)
+    approve, benchmark_model_configuration, comparison_lock, empty_row,
+    model_routing_lock, parser, verify_ab_pair)
 from forgepilot.security import Redactor
 from test_build import build_config
 
@@ -171,6 +172,37 @@ def test_real_comparison_lock_binds_locked_tasks_and_source_without_credentials(
     serialized = json.dumps(lock)
     assert "sk-fixture-secret" not in serialized
     assert "https://fixture.invalid/v1" not in serialized
+
+
+def test_formal_model_routing_is_identical_for_both_arms_and_keeps_review_independent(monkeypatch):
+    monkeypatch.setenv("FORGEPILOT_BASE_URL", "https://fixture.invalid/v1")
+    monkeypatch.setenv("FORGEPILOT_API_KEY", "sk-fixture-secret-never-serialized")
+    monkeypatch.setenv("FORGEPILOT_REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("FORGEPILOT_TASK_MODEL_FAMILY", "main-family")
+    monkeypatch.setenv("FORGEPILOT_REVIEW_MODEL_FAMILY", "review-family")
+    args = parser().parse_args(["--mode", "real", "--dataset", "real",
+                                "--max-total-tokens", "100000"])
+    configuration = benchmark_model_configuration(args, "main-model")
+    routes = model_routing_lock(configuration)
+    assert {item["route_id"] for item in routes["routes"]} == {
+        "task", "orchestration", "analysis", "implementation", "review", "repair"}
+    assert routes["profiles"][0]["model"] == "main-model"
+    assert routes["profiles"][1]["family"] == "review-family"
+    environment = {"tools": {"git": "git-fixture"}, "versions": {"git": {"output": "fixture"}},
+                   "code_commit": "a" * 40, "code_dirty": False}
+    tasks = verify_real_lock()
+    single = comparison_lock(tasks, {}, args, environment, "main-model")
+    args.agent_topology = "multi"
+    multi = comparison_lock(tasks, {}, args, environment, "main-model")
+    assert single == multi
+    assert single["configuration"]["model_routing"] == routes
+    assert len(single["configuration"]["model_routing_sha256"]) == 64
+    serialized = json.dumps(single)
+    assert "sk-fixture-secret" not in serialized
+    assert "https://fixture.invalid/v1" not in serialized
+    monkeypatch.setenv("FORGEPILOT_REVIEW_MODEL_FAMILY", "main-family")
+    with pytest.raises(ValueError):
+        benchmark_model_configuration(args, "main-model")
 
 
 @pytest.fixture

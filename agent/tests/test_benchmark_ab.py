@@ -24,9 +24,24 @@ def make_pair(tmp_path, *, token_ratio=2.4, safety=0, campaign_cap=100_000, per_
                "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest(),
                "credential_ref": "env:FORGEPILOT_API_KEY", "timeout_seconds": 60,
                "temperature": "provider_default", "max_output_tokens": 4096}
+    routing = {"profiles": [
+        {"profile_id": "review", "model": "fixture-review", "family": "other",
+         "endpoint_sha256": profile["endpoint_sha256"],
+         "credential_ref": profile["credential_ref"], "temperature": "provider_default",
+         "max_output_tokens": 4096, "timeout_seconds": 60, "supports_tool_calling": True},
+        {"profile_id": "task", "model": "fixture-model", "family": "primary",
+         "endpoint_sha256": profile["endpoint_sha256"],
+         "credential_ref": profile["credential_ref"], "temperature": "provider_default",
+         "max_output_tokens": 4096, "timeout_seconds": 60, "supports_tool_calling": True},
+    ], "routes": [
+        {"route_id": name, "role": None, "primary": "review" if name == "review" else "task",
+         "fallback": None}
+        for name in ("analysis", "implementation", "orchestration", "repair", "review", "task")
+    ], "enforce_review_family_separation": True}
     config = {"dataset": "real", "task_lock_sha256": lock["sha256"],
               "model": "fixture-model", "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest(),
               "model_profile": profile, "model_profile_sha256": _sha256(profile),
+              "model_routing": routing, "model_routing_sha256": _sha256(routing),
               "max_total_tokens": campaign_cap,
               "shared_budget_plan_sha256": BudgetPlan.formal().sha256,
               "max_tokens_per_run": per_run_cap, "tools": {"git": "git-fixture", "cmake": "cmake-fixture"},
@@ -72,6 +87,7 @@ def make_pair(tmp_path, *, token_ratio=2.4, safety=0, campaign_cap=100_000, per_
                     "selected_tasks": ids, "task_categories": kinds,
                     "model": "fixture-model", "endpoint_sha256": config["endpoint_sha256"],
                     "model_profile_sha256": config["model_profile_sha256"],
+                    "model_routing_sha256": config["model_routing_sha256"],
                     "code_commit": config["code_commit"], "code_dirty": config["code_dirty"],
                     "prompt_sha256": config["prompt_sha256"],
                     "agent_definition_sha256": config["agent_definition_sha256"],
@@ -134,6 +150,10 @@ def test_rag_on_requires_pinned_embedding_and_index_configuration(tmp_path):
     ("tool_versions", "configuration is incomplete"),
     ("version_missing", "tool version is missing"),
     ("endpoint", "saved metadata contradicts"),
+    ("routing", "complete model routing"),
+    ("same_family", "families overlap"),
+    ("different_main", "primary model differs"),
+    ("embedded_secret", "unapproved fields"),
 ])
 def test_saved_pair_rejects_unverifiable_evidence(tmp_path, mutation, pattern):
     single, multi = make_pair(tmp_path)
@@ -168,6 +188,21 @@ def test_saved_pair_rejects_unverifiable_evidence(tmp_path, mutation, pattern):
         document["metadata"]["comparison_configuration"]["tool_versions"].pop("git")
     elif mutation == "endpoint":
         document["metadata"]["endpoint_sha256"] = hashlib.sha256(b"different endpoint").hexdigest()
+    elif mutation == "routing":
+        document["metadata"]["comparison_configuration"]["model_routing"]["routes"].pop()
+    elif mutation in {"same_family", "different_main", "embedded_secret"}:
+        routing = document["metadata"]["comparison_configuration"]["model_routing"]
+        if mutation == "same_family":
+            routing["profiles"][0]["family"] = "primary"
+        elif mutation == "different_main":
+            routing["routes"][0]["primary"] = "review"
+        else:
+            routing["profiles"][0]["api_key"] = "should-never-be-saved"
+        document["metadata"]["comparison_configuration"]["model_routing_sha256"] = _sha256(routing)
+        document["metadata"]["model_routing_sha256"] = _sha256(routing)
+        document["metadata"]["config_hash"] = _sha256(document["metadata"]["comparison_configuration"])
+        for row in document["tasks"]:
+            row["config_hash"] = document["metadata"]["config_hash"]
     multi.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match=pattern):
         compare_saved(single, multi)

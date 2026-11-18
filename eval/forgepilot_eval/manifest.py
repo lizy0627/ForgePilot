@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from forgepilot.repository import is_link
 from forgepilot.artifacts.models import TaskSpec as ArtifactTaskSpec
+from forgepilot.agents.contracts import validate_task_spec
 from forgepilot.integrity import (
     AssertionUpdate, ControlFlowAddition, IntegrityTaskSpec,
     _assertions_preserved, _control_flow_preserved,
@@ -20,6 +21,14 @@ from forgepilot.integrity import (
 DISTRIBUTION = {"C++ 编译错误": 3, "C++ 逻辑 Bug": 3, "Qt Signal/Slot": 2,
                 "CMake": 2, "Unit Test": 2, "调用链分析": 1, "跨文件修改": 1, "Repair": 1}
 DATA_ROOT = Path(__file__).resolve().parents[1]
+
+# Each step restates an input and observation in its locked issue request. The
+# manifest contains no separate reproduction-command field; do not invent one.
+REAL_BUG_REPRODUCTION = {
+    "real-bug-01": ("Allow unrecognised options, parse -z, and inspect ParseResult::unmatched().",),
+    "real-bug-02": ("Configure with an absolute CMAKE_INSTALL_INCLUDEDIR and inspect the generated pkg-config include path.",),
+    "real-bug-03": ("Parse floating-point option values 2.5typo and nanXYZ and inspect whether they are accepted.",),
+}
 
 
 def relative(value):
@@ -262,7 +271,7 @@ class RealTaskSpec(Strict):
         return self
 
     def to_artifact_task_spec(self):
-        """Validate the frozen benchmark definition against the runtime TaskSpec v1.
+        """Map the frozen definition to the strict Mission TaskSpec contract.
 
         The benchmark's assertion replacement rule is separate from the
         production TaskSpec schema and stays in trusted evaluator metadata.
@@ -272,14 +281,18 @@ class RealTaskSpec(Strict):
              "verification": "protected_test" if index == 1 else "ctest"}
             for index, item in enumerate(self.task_spec.acceptance_criteria, start=1)
         ]
-        return ArtifactTaskSpec.model_validate({
+        criteria.append({"id": f"AC-{len(criteria) + 1}",
+                         "description": "The pinned project configures and builds successfully with the locked CMake command.",
+                         "verification": "build"})
+        reproduction = REAL_BUG_REPRODUCTION[self.id] if self.kind == "bug" else ()
+        return validate_task_spec(ArtifactTaskSpec.model_validate({
             "task_type": "bug_fix" if self.kind == "bug" else "feature",
             "title": self.title,
             "objective": self.task_spec.request,
-            "repository": {"base_ref": self.base_commit, "toolchain_profile": "windows-msvc-cmake"},
+            "repository": {"base_ref": self.base_commit, "toolchain_profile": "cmake-ctest-v1"},
             "problem": {"observed_behavior": self.task_spec.request,
                         "expected_behavior": self.task_spec.acceptance_criteria[0],
-                        "reproduction_steps": ()},
+                        "reproduction_steps": reproduction},
             "acceptance_criteria": criteria,
             "allowed_scope": {"path_patterns": self.task_spec.allowed_files,
                               "max_changed_files": len(self.task_spec.allowed_files)},
@@ -291,7 +304,7 @@ class RealTaskSpec(Strict):
             "assumptions": [],
             "risks": ["Preserve existing test coverage; honor only the task's locked test corrections and file scope."],
             "risk_level": "medium",
-        })
+        }))
 
     def to_integrity_task_spec(self):
         """Trusted exact-file permissions for a future real-run adapter."""

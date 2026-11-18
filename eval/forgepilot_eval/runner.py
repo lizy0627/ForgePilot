@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from forgepilot.cli import ConsoleInput, SafeArgumentParser
 from forgepilot.llm import OpenAICompatibleClient
+from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
 from forgepilot.presets import BuildConfig
 from forgepilot.process import executable, run_process
 from forgepilot.rag import RagConfig, RagFileStore, RagManager, RagRuntimeSettings
@@ -120,7 +121,57 @@ def source_revision(directory):
     return configuration_digest(inventory(directory))
 
 
-def comparison_lock(tasks, sources, args, environment, model):
+def benchmark_model_configuration(args, model):
+    """Build the one frozen route table shared by both topology adapters.
+
+    This is a pure configuration check: it never resolves a credential or
+    creates a provider. Missing or overlapping families leave formal A/B
+    unavailable rather than guessing independence from model identifiers.
+    """
+    if args.mode != "real":
+        return None
+    endpoint = os.environ.get("FORGEPILOT_BASE_URL")
+    review_model = os.environ.get("FORGEPILOT_REVIEW_MODEL")
+    task_family = os.environ.get("FORGEPILOT_TASK_MODEL_FAMILY")
+    review_family = os.environ.get("FORGEPILOT_REVIEW_MODEL_FAMILY")
+    if not all((endpoint, model, review_model, task_family, review_family)):
+        return None
+    if model == review_model:
+        raise ValueError("Formal A/B Reviewer must use a different verified model family")
+    common = dict(base_url=endpoint, api_key_ref="env:FORGEPILOT_API_KEY",
+                  timeout_seconds=args.llm_timeout,
+                  max_output_tokens=min(4096, args.max_tokens_per_run),
+                  temperature=0.1)
+    return ModelConfiguration(profiles=(
+        ModelProfile(profile_id="benchmark-main", model=model, family=task_family, **common),
+        ModelProfile(profile_id="benchmark-review", model=review_model, family=review_family, **common),
+    ), routes=tuple(ModelRoute(route_id=name,
+        primary="benchmark-review" if name == "review" else "benchmark-main")
+        for name in ("analysis", "implementation", "orchestration", "repair", "review", "task")),
+        enforce_review_family_separation=True)
+
+
+def model_routing_lock(configuration):
+    if configuration is None:
+        return None
+    profiles = [{"profile_id": profile.profile_id, "model": profile.model,
+                 "family": profile.family,
+                 "endpoint_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
+                 "credential_ref": profile.api_key_ref,
+                 "temperature": profile.temperature,
+                 "max_output_tokens": profile.max_output_tokens,
+                 "timeout_seconds": profile.timeout_seconds,
+                 "supports_tool_calling": profile.supports_tool_calling}
+                for profile in sorted(configuration.profiles, key=lambda item: item.profile_id)]
+    routes = [{"route_id": route.route_id, "role": route.role,
+               "primary": route.primary, "fallback": route.fallback}
+              for route in sorted(configuration.routes,
+                                  key=lambda item: (item.route_id, item.role or ""))]
+    return {"profiles": profiles, "routes": routes,
+            "enforce_review_family_separation": configuration.enforce_review_family_separation}
+
+
+def comparison_lock(tasks, sources, args, environment, model, *, model_configuration=None):
     """Topology is intentionally excluded so unequal A/B conditions are detectable."""
     endpoint = os.environ.get("FORGEPILOT_BASE_URL") if args.mode == "real" else None
     project_root = DATA_ROOT.parent
@@ -132,11 +183,16 @@ def comparison_lock(tasks, sources, args, environment, model):
     # Effective wire settings of the legacy benchmark client; no credential or
     # raw endpoint enters the saved profile. A future multi adapter must prove it
     # uses this same primary profile before producing comparable real evidence.
+    model_configuration = (model_configuration if model_configuration is not None else
+                           benchmark_model_configuration(args, model))
+    routing = model_routing_lock(model_configuration)
+    main = model_configuration.router().resolve("task", "generalist").primary if model_configuration else None
     primary_profile = {"provider": "openai-compatible", "model": model,
                        "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
                        "credential_ref": "env:FORGEPILOT_API_KEY" if args.mode == "real" else None,
-                       "timeout_seconds": args.llm_timeout, "temperature": "provider_default",
-                       "max_output_tokens": min(4096, args.max_tokens_per_run)}
+                       "timeout_seconds": main.timeout_seconds if main else args.llm_timeout,
+                       "temperature": main.temperature if main else "provider_default",
+                       "max_output_tokens": main.max_output_tokens if main else min(4096, args.max_tokens_per_run)}
     toolchain = {"tools": environment["tools"], "versions": environment["versions"],
                  "generator": args.generator, "qt_kit": args.qt_kit}
     payload = {"schema": 1, "dataset": args.dataset, "tasks": [t.model_dump(mode="json") for t in tasks],
@@ -144,6 +200,8 @@ def comparison_lock(tasks, sources, args, environment, model):
                "endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest() if endpoint else None,
                "model_profile": primary_profile,
                "model_profile_sha256": configuration_digest(primary_profile),
+               "model_routing": routing,
+               "model_routing_sha256": configuration_digest(routing) if routing else None,
                "code_commit": environment.get("code_commit"), "code_dirty": environment.get("code_dirty"),
                "max_total_tokens": args.max_total_tokens,
                "shared_budget_plan_sha256": BudgetPlan.formal().sha256,
@@ -526,6 +584,7 @@ class Benchmark:
             "endpoint_sha256": lock["configuration"]["endpoint_sha256"],
             "real_task_lock_sha256": lock["configuration"]["task_lock_sha256"],
             "model_profile_sha256": lock["configuration"]["model_profile_sha256"],
+            "model_routing_sha256": lock["configuration"]["model_routing_sha256"],
             "code_commit": environment.get("code_commit"), "code_dirty": environment.get("code_dirty"),
             "prompt_sha256": lock["configuration"]["prompt_sha256"],
             "agent_definition_sha256": lock["configuration"]["agent_definition_sha256"],

@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.24)
+project(ForgePilotAppContainerLauncher LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_executable(appcontainer_launcher ../../forgepilot_eval/appcontainer_launcher.cpp)
+target_link_libraries(appcontainer_launcher PRIVATE userenv)

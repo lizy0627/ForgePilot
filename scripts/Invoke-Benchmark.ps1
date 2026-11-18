@@ -1,5 +1,8 @@
 param(
     [switch]$CheckOnly,
+    [string]$ReviewModel,
+    [string]$TaskModelFamily,
+    [string]$ReviewModelFamily,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$BenchmarkArgs
 )
@@ -34,6 +37,14 @@ if ($keyFile -isnot [IO.FileInfo] -or $keyFile.LinkType -or $keyFile.Length -gt 
 }
 $baseUrl = $config.base_url
 $taskModel = if ($config.task_model) { $config.task_model } else { $config.model }
+$reviewModel = if ($ReviewModel) { $ReviewModel } elseif ($env:FORGEPILOT_REVIEW_MODEL) { $env:FORGEPILOT_REVIEW_MODEL } else { $config.review_model }
+$taskFamily = if ($TaskModelFamily) { $TaskModelFamily } elseif ($env:FORGEPILOT_TASK_MODEL_FAMILY) { $env:FORGEPILOT_TASK_MODEL_FAMILY } else { $config.task_model_family }
+$reviewFamily = if ($ReviewModelFamily) { $ReviewModelFamily } elseif ($env:FORGEPILOT_REVIEW_MODEL_FAMILY) { $env:FORGEPILOT_REVIEW_MODEL_FAMILY } else { $config.review_model_family }
+$routeValid = ($reviewModel -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -and
+               $reviewModel -ne $taskModel -and
+               $taskFamily -match '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$' -and
+               $reviewFamily -match '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$' -and
+               $taskFamily -ne $reviewFamily)
 if ($baseUrl -isnot [string] -or [string]::IsNullOrWhiteSpace($baseUrl) -or
     $taskModel -isnot [string] -or [string]::IsNullOrWhiteSpace($taskModel)) {
     throw 'Saved model endpoint or task model is missing. Run Configure-ForgePilot.cmd.'
@@ -50,8 +61,11 @@ try {
     if ($CheckOnly) {
         Write-Output 'saved_model_config=present'
         Write-Output 'encrypted_api_key=decryptable'
+        Write-Output "review_model=$($(if ($reviewModel) { 'configured' } else { 'missing' }))"
+        Write-Output "model_routes=$($(if ($routeValid) { 'configured_distinct' } else { 'missing_or_invalid' }))"
         Write-Output 'api_connectivity=not_checked'
         Write-Output 'benchmark_model_tokens=0'
+        if (-not $routeValid) { exit 2 }
         exit 0
     }
 
@@ -59,12 +73,19 @@ try {
         $BenchmarkArgs -notcontains 'real') {
         throw 'Use this wrapper only with an explicit --mode real benchmark command.'
     }
-    $names = @('FORGEPILOT_BASE_URL', 'FORGEPILOT_TASK_MODEL', 'FORGEPILOT_API_KEY')
+    if (-not $routeValid) {
+        throw 'Formal benchmark requires a configured Reviewer model and two distinct verified model families.'
+    }
+    $names = @('FORGEPILOT_BASE_URL', 'FORGEPILOT_TASK_MODEL', 'FORGEPILOT_REVIEW_MODEL',
+               'FORGEPILOT_TASK_MODEL_FAMILY', 'FORGEPILOT_REVIEW_MODEL_FAMILY', 'FORGEPILOT_API_KEY')
     $previous = @{}
     foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     try {
         $env:FORGEPILOT_BASE_URL = $baseUrl
         $env:FORGEPILOT_TASK_MODEL = $taskModel
+        $env:FORGEPILOT_REVIEW_MODEL = $reviewModel
+        $env:FORGEPILOT_TASK_MODEL_FAMILY = $taskFamily
+        $env:FORGEPILOT_REVIEW_MODEL_FAMILY = $reviewFamily
         $env:FORGEPILOT_API_KEY = [Net.NetworkCredential]::new('', $secret).Password
         & (Join-Path $PSScriptRoot 'Run-Benchmark.cmd') @BenchmarkArgs
         $result = $LASTEXITCODE

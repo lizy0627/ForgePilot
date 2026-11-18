@@ -13,7 +13,8 @@ from .metrics import summarize, task_results
 
 REQUIRED_GATES = ("flow", "scope", "build", "ctest", "oracle", "integrity", "test_integrity")
 REQUIRED_LOCK_FIELDS = ("dataset", "task_lock_sha256", "model", "endpoint_sha256",
-                        "model_profile", "model_profile_sha256",
+                        "model_profile", "model_profile_sha256", "model_routing",
+                        "model_routing_sha256",
                         "max_total_tokens", "max_tokens_per_run", "shared_budget_plan_sha256",
                         "tools", "tool_versions",
                         "task_timeout", "llm_timeout", "generator", "approval", "rag",
@@ -21,10 +22,103 @@ REQUIRED_LOCK_FIELDS = ("dataset", "task_lock_sha256", "model", "endpoint_sha256
                         "code_commit", "code_dirty", "prompt_sha256", "agent_definition_sha256",
                         "task_spec_sha256", "toolchain_sha256")
 
+_ROLES = {"task": ("generalist",), "orchestration": ("orchestrator",),
+          "analysis": ("root_cause_analyst", "impact_test_analyst"),
+          "implementation": ("implementer",), "review": ("reviewer",),
+          "repair": ("repair",)}
+_PROFILE_FIELDS = {"profile_id", "model", "family", "endpoint_sha256",
+                   "credential_ref", "temperature", "max_output_tokens",
+                   "timeout_seconds", "supports_tool_calling"}
+_ROUTE_FIELDS = {"route_id", "role", "primary", "fallback"}
+
 
 def _sha256(value):
     canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_model_routing(config):
+    routing = config.get("model_routing")
+    if (not isinstance(routing, dict)
+            or set(routing) != {"profiles", "routes", "enforce_review_family_separation"}
+            or routing["enforce_review_family_separation"] is not True
+            or _sha256(routing) != config.get("model_routing_sha256")):
+        raise ValueError("A/B complete model routing is missing or changed")
+    profiles, routes = routing["profiles"], routing["routes"]
+    if not isinstance(profiles, list) or not profiles or not isinstance(routes, list) or not routes:
+        raise ValueError("A/B complete model routing is missing or changed")
+    by_id = {}
+    for item in profiles:
+        if not isinstance(item, dict) or not _PROFILE_FIELDS <= set(item) or set(item) - _PROFILE_FIELDS - {"provider"}:
+            raise ValueError("A/B model profile is incomplete or contains unapproved fields")
+        identity = item["profile_id"]
+        if (not isinstance(identity, str) or not identity or identity in by_id
+                or not isinstance(item["model"], str) or not item["model"]
+                or not isinstance(item["family"], str) or not item["family"]
+                or not isinstance(item["endpoint_sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["endpoint_sha256"]) is None
+                or not isinstance(item["credential_ref"], str)
+                or re.fullmatch(r"(?:env:[A-Z][A-Z0-9_]{0,127}|dpapi:[a-z][a-z0-9._-]{0,127})",
+                                item["credential_ref"]) is None
+                or type(item["max_output_tokens"]) is not int or item["max_output_tokens"] <= 0
+                or isinstance(item["timeout_seconds"], bool)
+                or not isinstance(item["timeout_seconds"], (int, float))
+                or not math.isfinite(item["timeout_seconds"]) or item["timeout_seconds"] <= 0
+                or item["supports_tool_calling"] is not True
+                or item.get("provider", "openai-compatible") != "openai-compatible"):
+            raise ValueError("A/B model profile is invalid")
+        temperature = item["temperature"]
+        if temperature != "provider_default" and (isinstance(temperature, bool)
+                or not isinstance(temperature, (int, float)) or not math.isfinite(temperature)
+                or not 0 <= temperature <= 2):
+            raise ValueError("A/B model temperature is invalid")
+        by_id[identity] = item
+    if [item["profile_id"] for item in profiles] != sorted(by_id):
+        raise ValueError("A/B model profiles must use canonical order")
+    by_route = {}
+    for item in routes:
+        if not isinstance(item, dict) or set(item) != _ROUTE_FIELDS:
+            raise ValueError("A/B model route is invalid")
+        key = (item["route_id"], item["role"])
+        if (not isinstance(key[0], str) or not key[0]
+                or key[1] is not None and not isinstance(key[1], str)
+                or key in by_route or item["primary"] not in by_id
+                or item["fallback"] is not None and (item["fallback"] not in by_id
+                                                       or item["fallback"] == item["primary"])):
+            raise ValueError("A/B model route is invalid")
+        by_route[key] = item
+    if [(item["route_id"], item["role"] or "") for item in routes] != sorted(
+            (item["route_id"], item["role"] or "") for item in routes):
+        raise ValueError("A/B model routes must use canonical order")
+
+    def resolve(use_case, role):
+        route = by_route.get((use_case, role)) or by_route.get((use_case, None))
+        if route is None:
+            raise ValueError("A/B model route is missing")
+        return route
+
+    task = resolve("task", "generalist")
+    for use_case, roles in _ROLES.items():
+        for role in roles:
+            route = resolve(use_case, role)
+            if use_case != "review" and route["primary"] != task["primary"]:
+                raise ValueError("A/B primary model differs between Agent topologies")
+    implementation = resolve("implementation", "implementer")
+    review = resolve("review", "reviewer")
+    writing_families = {by_id[identity]["family"] for identity in
+                        (implementation["primary"], implementation["fallback"])
+                        if identity is not None}
+    review_families = {by_id[identity]["family"] for identity in
+                       (review["primary"], review["fallback"])
+                       if identity is not None}
+    if writing_families & review_families:
+        raise ValueError("A/B Reviewer and Implementer model families overlap")
+    primary = by_id[task["primary"]]
+    if (primary["model"] != config["model"]
+            or primary["endpoint_sha256"] != config["endpoint_sha256"]
+            or primary["credential_ref"] != config["model_profile"].get("credential_ref")):
+        raise ValueError("A/B primary model profile contradicts routing")
+    return routing
 
 
 def _load(path, topology, tasks, lock_digest):
@@ -69,6 +163,7 @@ def _load(path, topology, tasks, lock_digest):
             or re.fullmatch(r"(?:env:[A-Z][A-Z0-9_]{0,127}|dpapi:[a-z][a-z0-9._-]{0,127})",
                             profile["credential_ref"]) is None):
         raise ValueError("A/B model profile does not bind the selected provider")
+    _validate_model_routing(config)
     if config["rag"] == "on":
         rag = config.get("rag_configuration")
         if (not isinstance(rag, dict)
@@ -76,7 +171,8 @@ def _load(path, topology, tasks, lock_digest):
                 or any(not isinstance(rag.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", rag[key]) is None
                        for key in ("embedding_endpoint_sha256", "index_configuration_sha256"))):
             raise ValueError("A/B RAG configuration is not pinned")
-    for key in ("endpoint_sha256", "model_profile_sha256", "shared_budget_plan_sha256",
+    for key in ("endpoint_sha256", "model_profile_sha256", "model_routing_sha256",
+                "shared_budget_plan_sha256",
                 "runtime_revision", "evaluator_revision", "prompt_sha256",
                 "agent_definition_sha256", "task_spec_sha256", "toolchain_sha256"):
         if not isinstance(config[key], str) or re.fullmatch(r"[0-9a-f]{64}", config[key]) is None:
@@ -100,6 +196,7 @@ def _load(path, topology, tasks, lock_digest):
             or metadata.get("approval_mode") != config["approval"]
             or metadata.get("endpoint_sha256") != config["endpoint_sha256"]
             or metadata.get("model_profile_sha256") != config["model_profile_sha256"]
+            or metadata.get("model_routing_sha256") != config["model_routing_sha256"]
             or metadata.get("code_commit") != config["code_commit"]
             or metadata.get("code_dirty") != config["code_dirty"]
             or any(metadata.get(key) != config[key] for key in (
