@@ -171,7 +171,11 @@ private slots:
         QVERIFY(!build->property("enabled").toBool());
         QVERIFY(!remove->property("enabled").toBool());
         QVERIFY(!toggle->property("checked").toBool());
-        QCOMPARE(status->property("text").toString(),QString("未启用"));
+        QCOMPARE(status->property("text").toString(),QString("待选择仓库"));
+        QCOMPARE(indexPanel->property("subtitle").toString(),status->property("text").toString());
+        auto *detail=panel->findChild<QObject*>("codeIndexStatusDetail");
+        QVERIFY(detail);
+        QCOMPARE(detail->property("text").toString(),QString("请先在当前页面选择仓库。"));
     }
 
     void ragQmlPresentationLogicIsExplicitAndSafe() {

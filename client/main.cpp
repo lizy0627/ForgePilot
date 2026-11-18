@@ -37,8 +37,6 @@ int main(int argc, char* argv[])
     conversations.setUseRag(rag.useForTasks());
     QObject::connect(&controller, &TaskController::baseUrlChanged, &rag,
                      [&] { rag.setBaseUrl(controller.baseUrl()); });
-    QObject::connect(&controller, &TaskController::repositoryPathChanged, &rag,
-                     [&] { rag.setRepositoryPath(controller.repositoryPath()); });
     QObject::connect(&rag, &RagController::useForTasksChanged, &conversations,
                      [&] { conversations.setUseRag(rag.useForTasks()); });
     RuntimeConfigController runtimeConfig;

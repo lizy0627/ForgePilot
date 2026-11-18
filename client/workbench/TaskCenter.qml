@@ -11,12 +11,13 @@ Rectangle {
     required property var mission
     property var mcp: null
     property var rag: null
+    readonly property string draftRepositoryPath: repositoryInput.text.trim()
     property bool ragRequested: rag ? rag.useForTasks : false
     property var selectedMcpIds: []
     property string selectedContext: ""
     property var baselinePaths: []
     function baselineRequest() {
-        var result = {repository_path: repositoryInput.text.trim(), base_ref: "HEAD", baseline_paths: baselinePaths}
+        var result = {repository_path: draftRepositoryPath, base_ref: "HEAD", baseline_paths: baselinePaths}
         if (presetSelection.checked) {
             if (configurePreset.text.trim()) result.configure_preset = configurePreset.text.trim()
             if (buildPreset.text.trim()) result.build_preset = buildPreset.text.trim()

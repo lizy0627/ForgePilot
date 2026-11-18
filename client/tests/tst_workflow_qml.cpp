@@ -20,6 +20,7 @@
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QUrlQuery>
 #include <QtTest>
 #include <algorithm>
 #include <functional>
@@ -536,6 +537,81 @@ private slots:
             output.write(QJsonDocument(results).toJson()); QVERIFY(output.commit());
         }
         QVERIFY(ui.capture("stage5-main-workflow-long-diff"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void ragSettingsUseVisibleRepository()
+    {
+        QTemporaryDir chat, task;
+        QVERIFY(chat.isValid() && task.isValid());
+        Fixture fixture;
+        fixture.mission["repository_path"] = task.path();
+        QStringList operations, targets;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path == "/api/v1/conversations/" + A.toUtf8()) {
+                Source::json(request, {{"conversation_id", A}, {"title", "聊天 A"},
+                    {"repository_path", chat.path()}, {"messages", QJsonArray{}}});
+                return true;
+            }
+            if (!request.path.startsWith("/api/v1/rag/")) return false;
+            const QUrl url = QUrl::fromEncoded(request.path);
+            if (url.path().endsWith("/events")) {
+                Source::stream(request, ": ready\n\n", false);
+                return true;
+            }
+            const QString operation = request.method + ' ' + url.path().section('/', -1);
+            operations.append(operation);
+            targets.append(request.method == "POST" ? request.body.value("repository_path").toString()
+                : QUrlQuery(url).queryItemValue("repository_path", QUrl::FullyDecoded));
+            const bool running = operation == "POST index";
+            const bool deleted = operation == "DELETE index";
+            Source::json(request, {{"repository_id", QString(64, 'a')}, {"enabled", true}, {"available", true},
+                {"status", running ? "indexing" : deleted ? "empty" : "ready"}, {"running", running},
+                {"revision", operations.size()}, {"operation_id", running ? QJsonValue(QString(32, 'c')) : QJsonValue::Null},
+                {"total_files", 1}, {"processed", 0}, {"chunks", 0}, {"file_count", deleted ? 0 : 1},
+                {"dirty_file_count", 0}, {"failed_file_count", 0}, {"last_indexed_at", QJsonValue::Null},
+                {"error_code", QJsonValue::Null}});
+            return true;
+        };
+        Ui ui(fixture);
+        ui.rag.setBaseUrl(fixture.source.url());
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        auto exerciseIndex = [&](const QString &settingsButton, const QString &expected) {
+            operations.clear(); targets.clear();
+            QVERIFY(ui.click(settingsButton));
+            QTRY_COMPARE(ui.rag.status(), QString("ready"));
+            QVERIFY(ui.find("codeIndexTarget")->property("text").toString().contains(expected));
+            QVERIFY(ui.click("buildCodeIndexButton"));
+            QTRY_VERIFY(ui.rag.running());
+            QVERIFY(ui.click("cancelCodeIndexButton"));
+            QTRY_VERIFY(!ui.rag.running());
+            QVERIFY(ui.click("deleteCodeIndexButton"));
+            QVERIFY(ui.click("confirmDeleteCodeIndexButton"));
+            QTRY_COMPARE(ui.rag.status(), QString("empty"));
+            QCOMPARE(operations, QStringList({"GET status", "POST index", "POST cancel", "DELETE index"}));
+            QCOMPARE(targets, QStringList(4, expected));
+            QVERIFY(ui.click("closeSettingsButton"));
+        };
+        ui.conversations.selectConversation(A);
+        QTRY_COMPARE(ui.conversations.repositoryPath(), chat.path());
+        exerciseIndex("settingsButton", chat.path());
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QVERIFY(ui.click("workbenchSettingsButton"));
+        QTRY_VERIFY(ui.rag.repositoryPath().isEmpty());
+        QVERIFY(ui.find("codeIndexTarget")->property("text").toString().contains("待选择"));
+        QVERIFY(!ui.find("buildCodeIndexButton")->isEnabled());
+        QVERIFY(!ui.find("deleteCodeIndexButton")->isEnabled());
+        QVERIFY(ui.click("closeSettingsButton"));
+        auto *input = ui.find("missionRepositoryInput"); QVERIFY(input);
+        input->setProperty("text", task.path().left(3));
+        input->setProperty("text", task.path());
+        QVERIFY(ui.rag.repositoryPath().isEmpty());
+        exerciseIndex("workbenchSettingsButton", task.path());
+        input->setProperty("text", chat.path());
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        exerciseIndex("workbenchSettingsButton", task.path());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        exerciseIndex("workbenchSettingsButton", chat.path());
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void runtimeConfigurationFirstRunAndSettingsShareFormWithoutBackend()

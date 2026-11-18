@@ -23,6 +23,7 @@ Item {
     property var selectedNode: ({})
     readonly property bool hasTask: !!mission.taskId
     readonly property bool demandCollapsed: hasTask && !taskCenterExpanded
+    readonly property string indexRepositoryPath: demandCollapsed ? (mission.snapshot.repository_path || "") : taskCenter.draftRepositoryPath
     readonly property bool compactLayout: width < 1100 || (taskCenterExpanded && width < 1420)
     readonly property string attentionNodeId: {
         for (var i = 0; i < nodeRecords.length; ++i)

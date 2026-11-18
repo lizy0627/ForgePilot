@@ -87,6 +87,7 @@ ApplicationWindow {
             ActionButton { objectName: "agentWorkbenchModeButton"; text: "Agent 工作台"; checked: window.agentMode; Accessible.name: "Agent 工作台模式"; Accessible.checkable: true; Accessible.checked: checked
                 onClicked: { window.agentMode = true; window.conversations.mode = "chat" } }
             Item { Layout.fillWidth: true }
+            ActionButton { objectName: "workbenchSettingsButton"; text: "设置"; flat: true; visible: window.agentMode; onClicked: settingsDialog.open() }
             Label { text: window.agentMode ? "Mission Control" : "只读问答 · 不执行代码修改"; color: Theme.muted; font.pixelSize: 11 }
         }
     }
@@ -253,7 +254,14 @@ ApplicationWindow {
         id: settingsDialog; objectName: "settingsDialog"; title: "设置"; modal: true; anchors.centerIn: parent
         closePolicy: !window.mcp || window.mcp.canCloseEditor ? Popup.CloseOnEscape | Popup.CloseOnPressOutside : Popup.NoAutoClose
         width: Math.min(800, window.width - 48); height: Math.min(640, window.height - 48)
-        onOpened: { if (window.mcp) window.mcp.open(); if (window.rag) window.rag.refresh() }
+        onAboutToShow: {
+            if (window.rag) {
+                const target = window.agentMode ? workflowLoader.item.indexRepositoryPath : window.conversations.repositoryPath
+                if (target === window.rag.repositoryPath) window.rag.refresh()
+                else window.rag.repositoryPath = target
+            }
+        }
+        onOpened: if (window.mcp) window.mcp.open()
         onClosed: { if (window.mcp) window.mcp.close() }
         contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag; runtimeConfig: window.runtimeConfig; onConfigureRuntimeRequested: { settingsDialog.close(); runtimeConfigDialog.open() } }
         footer: DialogButtonBox { ActionButton { objectName: "closeSettingsButton"; text: "完成"; enabled: !window.mcp || window.mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }

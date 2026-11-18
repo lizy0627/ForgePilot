@@ -11,7 +11,6 @@ ColumnLayout {
     property var rag: null
     property var runtimeConfig: null
     signal configureRuntimeRequested()
-    onVisibleChanged: if (visible && rag && controller.repositoryPath) rag.refresh()
     TabBar {
         id: tabs; Layout.fillWidth: true
         NavigationTab { objectName: "connectionSettingsTab"; text: "连接" }
@@ -42,8 +41,8 @@ ColumnLayout {
                 Label { text: "连接地址仅在本次运行中生效。切换后端或关闭窗口不会取消任务；模型配置由后端管理。"; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12 }
             }
             Panel {
-                objectName: "codeIndexPanel"; Layout.fillWidth: true
-                title: "代码索引"; subtitle: root.rag ? RagUi.statusLabel(root.rag.status) : "控制器不可用"
+                id: codeIndex; objectName: "codeIndexPanel"; Layout.fillWidth: true
+                title: "代码索引"; subtitle: !root.rag ? "控制器不可用" : !root.rag.repositoryPath ? "待选择仓库" : RagUi.statusLabel(root.rag.status)
                 RowLayout {
                     Layout.fillWidth: true
                     Switch {
@@ -57,25 +56,29 @@ ColumnLayout {
                     Item { Layout.fillWidth: true }
                     Label {
                         objectName: "codeIndexStatus"
-                        text: root.rag ? RagUi.statusLabel(root.rag.status) : "不可用"
+                        text: codeIndex.subtitle
                         color: root.rag ? RagUi.statusColor(root.rag.status, root.rag.reachable) : Theme.muted
                         font.bold: true; textFormat: Text.PlainText
                     }
+                }
+                Label {
+                    objectName: "codeIndexTarget"; Layout.fillWidth: true
+                    text: "索引目标：" + (root.rag && root.rag.repositoryPath || "待选择仓库")
+                    color: Theme.secondary; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
                 }
                 Label {
                     objectName: "codeIndexStatusDetail"
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
                     color: root.rag && (root.rag.status === "failed" || !!root.rag.error) ? Theme.danger
                         : root.rag && root.rag.status === "degraded" ? Theme.warning : Theme.muted
-                    text: root.rag ? RagUi.statusDetail(root.rag.status, root.rag.statusErrorCode, root.rag.reachable)
-                        : "代码索引控制器不可用。"
+                    text: !root.rag ? "代码索引控制器不可用。" : !root.rag.repositoryPath ? "请先在当前页面选择仓库。"
+                        : RagUi.statusDetail(root.rag.status, root.rag.statusErrorCode, root.rag.reachable)
                 }
                 Label {
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
                     color: root.rag && root.rag.available ? Theme.secondary : Theme.muted
-                    text: !root.controller.repositoryPath ? "请先为当前对话选择项目。"
-                        : !root.rag ? "代码索引控制器不可用。"
-                        : "文件 %1  ·  Chunk %2  ·  待更新 %3  ·  失败 %4".arg(root.rag.fileCount).arg(root.rag.chunkCount).arg(root.rag.dirtyCount).arg(root.rag.failedCount)
+                    visible: !!root.rag && !!root.rag.repositoryPath
+                    text: root.rag ? "文件 %1  ·  Chunk %2  ·  待更新 %3  ·  失败 %4".arg(root.rag.fileCount).arg(root.rag.chunkCount).arg(root.rag.dirtyCount).arg(root.rag.failedCount) : ""
                 }
                 ProgressBar {
                     objectName: "codeIndexProgress"; Layout.fillWidth: true
@@ -94,7 +97,7 @@ ColumnLayout {
                     Layout.fillWidth: true
                     ActionButton {
                         objectName: "buildCodeIndexButton"; text: root.rag && root.rag.fileCount ? "更新索引" : "构建索引"
-                        enabled: !!root.rag && !!root.controller.repositoryPath && root.rag.enabled && root.rag.available && !root.rag.busy && !root.rag.running
+                        enabled: !!root.rag && !!root.rag.repositoryPath && root.rag.enabled && root.rag.available && !root.rag.busy && !root.rag.running
                         onClicked: root.rag.buildIndex()
                     }
                     ActionButton {
