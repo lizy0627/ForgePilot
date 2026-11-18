@@ -12,9 +12,6 @@ Item {
     required property var mission
     property var mcp: null
     property var rag: null
-    property string conversionRequest: ""
-    property string conversionSource: ""
-    property string conversionRepository: ""
     property bool taskCenterExpanded: false
     property string selectedNodeId: ""
     property bool selectionPinned: false
@@ -93,7 +90,11 @@ Item {
         refreshView()
     }
     onSelectedNodeIdChanged: updateDetails()
-    onConversionRequestChanged: if (conversionRequest) { taskCenterExpanded = true; detailsVisible = false }
+    function openTaskDraft(request, repository, source) {
+        taskCenter.fillDraft(request, repository, source)
+        taskCenterExpanded = true
+        detailsVisible = false
+    }
     Component.onCompleted: refreshView()
     Connections { target: root.mission; function onMissionChanged() { Qt.callLater(root.refreshView) } }
     Connections {
@@ -187,7 +188,7 @@ Item {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: 0
             TaskCenter {
                 id: taskCenter
-                mission: root.mission; mcp: root.mcp; rag: root.rag; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository
+                mission: root.mission; mcp: root.mcp; rag: root.rag
                 visible: !root.demandCollapsed
                 Layout.preferredWidth: root.hasTask ? 300 : Math.min(420, root.width * 0.48)
                 Layout.fillWidth: !root.hasTask && root.compactLayout

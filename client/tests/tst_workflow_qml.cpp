@@ -779,6 +779,16 @@ print(json.dumps(result))
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
         QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
         QVERIFY(ui.find("missionBaselineSummary")->property("text").toString().contains(QString(40, 'a')));
+        QVERIFY(ui.click("missionBaselineFile"));
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("freeChatModeButton"));
+        ui.conversations.setMode("task"); ui.conversations.sendMessage("同一仓库的下一项需求");
+        QCOMPARE(ui.find("missionRequestInput")->property("text").toString(), QString("同一仓库的下一项需求"));
+        QCOMPARE(ui.find("missionRepositoryInput")->property("text").toString(), QString("D:/fixture/repository"));
+        QVERIFY(ui.missions.creationPreview().isEmpty());
+        QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(!ui.find("missionBaselineFile")->property("checked").toBool());
         QVERIFY(ui.click(ui.find("missionCreateButton")));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QTRY_COMPARE(ui.missions.taskId(), MissionId);
@@ -786,14 +796,14 @@ print(json.dumps(result))
         QVERIFY(ui.window->property("agentMode").toBool());
         QCOMPARE(ui.conversations.mode(), QString("chat"));
         QCOMPARE(fixture.creates.first().value("repository_path").toString(), QString("D:/fixture/repository"));
-        QCOMPARE(fixture.creates.first().value("request").toString(), QString("旧入口的新代码任务"));
+        QCOMPARE(fixture.creates.first().value("request").toString(), QString("同一仓库的下一项需求"));
         for(const auto &request:fixture.source.requests)
             if(request.method == "POST") QVERIFY(request.path == "/api/v2/missions" || request.path == "/api/v2/missions/preview");
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void convertedChatDraftCreatesMissionWithoutHistory()
     {
-        Fixture fixture; Ui ui(fixture);
+        Fixture fixture; Ui ui(fixture, 1600, 1400);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         auto *prompt=ui.find("conversationPrompt"); QVERIFY(prompt);
         prompt->setProperty("text", "选定的任务文本");
@@ -803,10 +813,31 @@ print(json.dumps(result))
         QTRY_COMPARE(input->property("text").toString(), QString("选定的任务文本"));
         QCOMPARE(fixture.creates.size(), 0);
         auto *repository=ui.find("missionRepositoryInput"); QVERIFY(repository);
+        input->setProperty("text", "编辑中的任务需求");
         repository->setProperty("text", "D:/fixture/repository");
-        QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
-        QVERIFY(ui.click(ui.find("missionCreateButton")));
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionBaselineFile"));
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionBaselineConfirmation"));
+
+        QVERIFY(ui.click("freeChatModeButton"));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QCOMPARE(input->property("text").toString(), QString("编辑中的任务需求"));
+        QCOMPARE(repository->property("text").toString(), QString("D:/fixture/repository"));
+        QVERIFY(ui.find("missionCreateButton")->isEnabled());
+
+        QVERIFY(ui.click("freeChatModeButton"));
+        QVERIFY(ui.click("convertDraftToAgentTaskButton"));
+        QCOMPARE(input->property("text").toString(), QString("选定的任务文本"));
+        QVERIFY(repository->property("text").toString().isEmpty());
+        QVERIFY(ui.missions.creationPreview().isEmpty());
+        QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+
+        repository->setProperty("text", "D:/fixture/repository");
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton"));
         QTRY_COMPARE(fixture.creates.size(), 1);
+        QVERIFY(fixture.creates.first().value("baseline_paths").toArray().isEmpty());
         QCOMPARE(fixture.creates.first().value("request").toString(), QString("选定的任务文本"));
         QVERIFY(!fixture.creates.first().contains("conversation_id"));
         QCOMPARE(ui.conversations.mode(), QString("chat"));

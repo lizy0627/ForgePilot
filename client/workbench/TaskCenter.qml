@@ -13,9 +13,7 @@ Rectangle {
     property var rag: null
     property bool ragRequested: rag ? rag.useForTasks : false
     property var selectedMcpIds: []
-    property string seedRequest: ""
     property string selectedContext: ""
-    property string seedRepository: ""
     property var baselinePaths: []
     function baselineRequest() {
         var result = {repository_path: repositoryInput.text.trim(), base_ref: "HEAD", baseline_paths: baselinePaths}
@@ -50,7 +48,16 @@ Rectangle {
         if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions()
         if (mcp) mcp.refreshMissionChoices()
     }
-    onSeedRequestChanged: { if (seedRequest) requestInput.text = seedRequest }
+    function resetBaseline() {
+        baselinePaths = []
+        mission.invalidateCreationPreview(true)
+    }
+    function fillDraft(request, repository, source) {
+        requestInput.text = request
+        selectedContext = source
+        if (repositoryInput.text === repository) resetBaseline()
+        else repositoryInput.text = repository
+    }
     FolderDialog { id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog; onAccepted: repositoryInput.text = root.mission.localPath(selectedFolder) }
     Controls.AppScrollView {
         id: sidebarScroll; objectName: "missionTaskCenterScroll"
@@ -64,8 +71,8 @@ Rectangle {
         TextArea { id: requestInput; objectName: "missionRequestInput"; Layout.fillWidth: true; Layout.preferredHeight: 94; wrapMode: TextEdit.Wrap; placeholderText: "描述 Agent 任务"; textFormat: TextEdit.PlainText }
         TextField {
             id: repositoryInput; objectName: "missionRepositoryInput"; Layout.fillWidth: true
-            placeholderText: "本地仓库绝对路径"; text: root.seedRepository
-            onTextChanged: { root.baselinePaths = []; root.mission.invalidateCreationPreview(true) }
+            placeholderText: "本地仓库绝对路径"
+            onTextChanged: root.resetBaseline()
         }
         Controls.ActionButton { text: "选择仓库…"; Layout.fillWidth: true; onClicked: folder.open() }
         ComboBox { id: kind; Layout.fillWidth: true; model: ["自动判断", "修复缺陷", "实现功能"]; Accessible.name: "任务类型" }

@@ -20,9 +20,12 @@ ApplicationWindow {
     property bool detailsExpanded: false
     property bool sidebarExpanded: true
     property bool agentMode: false
-    property string conversionRequest: ""
-    property string conversionSource: ""
-    property string conversionRepository: ""
+    function openTaskDraft(request, repository, source) {
+        if (!workflowLoader.item) return
+        workflowLoader.item.openTaskDraft(request, repository, source)
+        agentMode = true
+        conversations.mode = "chat"
+    }
     property string previousConversationMode: "chat"
     property bool previousHistoryReadOnly: false
     readonly property bool workMode: conversations.mode === "task"
@@ -61,15 +64,7 @@ ApplicationWindow {
     Connections {
         target: window.conversations
         function onCodeTaskRequested(prompt, repositoryPath) {
-            if (window.missions) {
-                window.agentMode = true
-                window.conversations.mode = "chat"
-                window.missions.invalidateCreationPreview(true)
-                window.conversionRequest = ""
-                window.conversionRepository = repositoryPath
-                window.conversionSource = "来自旧工作入口；仅使用当前输入，请确认任务基线。"
-                window.conversionRequest = prompt
-            }
+            window.openTaskDraft(prompt, repositoryPath, "来自旧工作入口；仅使用当前输入，请确认任务基线。")
         }
         function onSelectionChanged() { window.detailsExpanded = false }
         function onChanged() {
@@ -189,12 +184,7 @@ ApplicationWindow {
                     Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
                     onOpenWorkDetails: { window.conversations.showActiveTask(); window.detailsExpanded = true }
                     onConvertToAgentTask: function(selectedText, sourceLabel) {
-                        if (window.missions) window.missions.invalidateCreationPreview(true)
-                        window.conversionRepository = ""
-                        window.conversionRequest = selectedText
-                        window.conversionSource = sourceLabel + "；仅发送所选文本，需另行指定仓库。"
-                        window.agentMode = true
-                        window.conversations.mode = "chat"
+                        window.openTaskDraft(selectedText, "", sourceLabel + "；仅发送所选文本，需另行指定仓库。")
                     }
                 }
                 Rectangle {
@@ -248,6 +238,7 @@ ApplicationWindow {
         }
     }
     Loader {
+        id: workflowLoader
         active: !!window.missions
         visible: window.agentMode
         anchors.top: modeBar.bottom; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
@@ -255,9 +246,6 @@ ApplicationWindow {
             Workbench.WorkflowPage {
                 mission: window.missions
                 mcp: window.mcp; rag: window.rag
-                conversionRequest: window.conversionRequest
-                conversionSource: window.conversionSource
-                conversionRepository: window.conversionRepository
             }
         }
     }

@@ -11,13 +11,14 @@ Item {
     required property var mission
     property var mcp: null
     property var rag: null
-    property string conversionRequest: ""
-    property string conversionSource: ""
-    property string conversionRepository: ""
     property bool detailsExpanded: width >= 1120
     property var activityEvents: []
     onWidthChanged: { if (width < 1060) detailsExpanded = false }
-    onConversionRequestChanged: { if (conversionRequest) { detailsExpanded = true; detailTabs.currentIndex = 0 } }
+    function openTaskDraft(request, repository, source) {
+        taskCenter.fillDraft(request, repository, source)
+        detailsExpanded = true
+        detailTabs.currentIndex = 0
+    }
     Connections {
         target: root.mission
         function onMissionChanged() {
@@ -37,8 +38,8 @@ Item {
     property string currentTaskId: ""
     RowLayout {
         anchors.fill: parent; spacing: 0
-        TaskCenter { mission: root.mission
-            mcp: root.mcp; rag: root.rag; seedRequest: root.conversionRequest; selectedContext: root.conversionSource; seedRepository: root.conversionRepository; Layout.preferredWidth: 244; Layout.fillHeight: true }
+        TaskCenter { id: taskCenter; mission: root.mission
+            mcp: root.mcp; rag: root.rag; Layout.preferredWidth: 244; Layout.fillHeight: true }
         ScrollView {
             id: centerScroll; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             ScrollBar.vertical: Controls.AppScrollBar {}
