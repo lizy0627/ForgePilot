@@ -57,7 +57,8 @@ class _SourcePreview:
 
 class MissionHost:
     def __init__(self, task_host=None, workflow_factory=None, *, runtime=None, capacity=None,
-                 store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None):
+                 store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None,
+                 development_config=None):
         # Positional TaskHost remains an in-process compatibility adapter only.
         # Production composition injects these shared components explicitly.
         self.runtime = runtime if runtime is not None else task_host.runtime
@@ -69,6 +70,7 @@ class MissionHost:
         if dependencies is not None and dependencies.events is not self.store:
             raise ValueError("Mission dependencies must use the host event store")
         self.dependencies = dependencies
+        self._development_config = development_config or (lambda: dependencies)
         self.graphs = GraphStore(self.store)
         self._services = {}
         self._previews: dict[str, _SourcePreview] = {}
@@ -148,12 +150,19 @@ class MissionHost:
                 config = self._build_config(metadata)
                 if not isinstance(metadata.get("build_selection"), dict):
                     raise ForgePilotError("build_selection_changed", "Frozen build selection is missing; recreate this task")
-                if asdict(config) != metadata.get("frozen_build_config"):
+                selection = MissionBuildSelection.from_dict(metadata["build_selection"])
+                current, frozen = asdict(config), metadata.get("frozen_build_config")
+                # Earlier hosts froze an implicit Debug as an explicit value.
+                # Presets can resolve an unspecified configuration differently.
+                if (selection.configuration == "Debug" and current["configuration"] in (None, "Debug")
+                        and isinstance(frozen, dict) and frozen.get("configuration") in (None, "Debug")):
+                    current["configuration"] = frozen.get("configuration")
+                if current != frozen:
                     raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; recreate this task")
                 workflow.mission_source_baseline = metadata["source_baseline"]
                 workflow.mission_build_selection = metadata["build_selection"]
                 if hasattr(workflow.validator, "bind_build_selection"):
-                    workflow.validator.bind_build_selection(task_id, MissionBuildSelection.from_dict(metadata["build_selection"]))
+                    workflow.validator.bind_build_selection(task_id, selection)
             if restoring and metadata.get("tool_selection") is not None:
                 from .mission_tools import MissionToolSelection, bind_mission_tools
                 selection = MissionToolSelection.from_dict(metadata["tool_selection"])
@@ -291,22 +300,24 @@ class MissionHost:
     def _build_config(self, fields):
         from .presets import BuildConfig
         from .process import executable
-        config = self.dependencies.build_config if self.dependencies else None
+        development = self._development_config()
+        config = development.build_config if development else None
         config = config or BuildConfig(executable(None, "cmake"), executable(None, "ctest"), configuration="Debug")
         names = {key: fields.get(key) or getattr(config, key)
                  for key in ("configure_preset", "build_preset", "test_preset")}
         if any(names.values()):
             # Explicit preset semantics replace the host's non-preset fallback flags.
             return replace(config, **names, generator=None, architecture=None, make_program=None)
-        return replace(config, **names)
+        return config
 
     def _preview_workspace(self):
         from .workspace_manager import WorkspaceManager
         configured = getattr(self.store, "workspace_backend", None)
         if isinstance(configured, WorkspaceManager):
             return configured
+        development = self._development_config()
         return WorkspaceManager(self.store.artifacts.root / "mission-workspaces", artifacts=self.store.artifacts,
-            git_executable=self.dependencies.git_executable if self.dependencies else None)
+            git_executable=development.git_executable if development else None)
 
     @staticmethod
     def _preview_fields(fields):
@@ -432,14 +443,15 @@ class MissionHost:
         preview = self._previews.get(token) if token else None
         if token and (preview is None or monotonic() >= preview.expires_at or self._preview_fields(fields) != preview.fields):
             raise ForgePilotError("baseline_changed", "Source preview expired or selection changed; preview and confirm again")
-        config_requires_preview = any(getattr(self._build_config(fields), key)
+        config = self._build_config(fields)
+        config_requires_preview = any(getattr(config, key)
             for key in ("configure_preset", "build_preset", "test_preset"))
         if config_requires_preview and preview is None:
             raise ForgePilotError("baseline_approval", "Preview the resolved preset configuration before creating the task")
         if fields.get("baseline_paths") and (preview is None or fields.get("baseline_confirmed") is not True):
             raise ForgePilotError("baseline_approval", "Preview and explicitly confirm selected source changes")
         if preview is not None:
-            if not preview.selection.matches_config(self._build_config(fields)):
+            if not preview.selection.matches_config(config):
                 raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; preview and confirm again")
             preview.selection.verify_tools(preview.build_config.cmake, preview.build_config.ctest)
             source = await asyncio.to_thread(preview.workspace.source_baseline_view, preview.task_id,
@@ -474,7 +486,6 @@ class MissionHost:
                     await asyncio.to_thread(workflow.workspace.freeze_source_baseline, task_id,
                         preview.patch_sha256, approved=True, expected=applied)
             record = workflow.workspace.record(task_id)
-            config = preview.build_config if preview else self._build_config(fields)
             selection = await asyncio.to_thread(lambda: Presets(Path(record["worktree_path"]),
                 build_environment()).resolve_mission(config))
             if preview and selection.to_dict() != preview.selection.to_dict():

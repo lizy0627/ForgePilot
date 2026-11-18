@@ -1,6 +1,7 @@
 """python -m forgepilot.server: single-process, loopback-only v1 service."""
 
 import asyncio
+from functools import cache
 import os
 import secrets
 from pathlib import Path
@@ -72,6 +73,7 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
     local_token = os.environ.get("FORGEPILOT_LOCAL_API_TOKEN") or secrets.token_urlsafe(32)
     redactor = Redactor((key, local_token))
     try:
+        @cache
         def development_config():
             # Resolve only when v1 work or a Mission needs development tools.
             rg, git = executable(args.rg, "rg"), executable(args.git, "git")
@@ -138,7 +140,8 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  summary_factory=summary_factory, mcp_disabled=args.disable_mcp,
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
-                                 rag_coordinator=rag_coordinator, api_token=local_token)
+                                 rag_coordinator=rag_coordinator, api_token=local_token,
+                                 development_config=resources.development)
                 from .mission_factory import build_mission_workflow
                 app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
                     resources.mission_dependencies(events,

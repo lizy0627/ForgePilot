@@ -11,9 +11,11 @@ from conftest import reply
 from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.api import create_app
 from forgepilot.errors import ForgePilotError
+from forgepilot.mission_host import MissionHost
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
 from forgepilot.orchestration.models import GraphDefinition
+from forgepilot.service_composition import DevelopmentConfig
 from forgepilot.workspace_manager import WorkspaceManager
 from test_mission_api_workflow import AnalysisProvider, poll
 from test_mission_service import create, setup, settled
@@ -185,6 +187,50 @@ async def test_selected_untracked_presets_are_previewed_from_read_only_overlay(t
         assert (Path(record["worktree_path"]) / name).read_bytes() == raw
         assert (committed_repo / name).read_bytes() == raw
         assert (committed_repo / ".git/index").read_bytes() == original_index
+    finally:
+        await host.close()
+        await tasks.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preset,stored_configuration,restored_configuration,changed_configuration", [
+    (None, "Debug", None, "Release"),
+    ("Debug", "Debug", None, "Release"),
+    (None, None, "Debug", "Release"),
+    ("Release", None, None, "Debug"),
+])
+async def test_restore_frozen_configuration(tmp_path, git_exe, rg_exe, committed_repo,
+        preset, stored_configuration, restored_configuration, changed_configuration):
+    tasks, original = await setup(tmp_path, git_exe)
+    config = replace(original._build_config({}), configuration=stored_configuration)
+    def development():
+        return DevelopmentConfig(rg_exe, git_exe, config)
+    host = MissionHost(tasks, original.factory, development_config=development)
+    fields = {}
+    try:
+        if preset:
+            document = {"version": 6, "configurePresets": [{"name": "chosen", "generator": "Ninja"}],
+                "buildPresets": [{"name": "chosen", "configurePreset": "chosen", "configuration": preset}],
+                "testPresets": [{"name": "chosen", "configurePreset": "chosen", "configuration": preset}]}
+            (committed_repo / "CMakePresets.json").write_text(json.dumps(document), encoding="utf-8")
+            git(git_exe, committed_repo, "add", "CMakePresets.json")
+            git(git_exe, committed_repo, "commit", "-q", "-m", "task preset")
+            fields["configure_preset"] = "chosen"
+            preview = await host.preview(**source_fields(committed_repo), **fields)
+            fields["preview_token"] = preview["preview_token"]
+        task_id = (await create(host, committed_repo, **fields))["task_id"]
+        assert (await settled(host, task_id))["status"] == "awaiting_human"
+        metadata = host._metadata(task_id)
+        assert metadata["frozen_build_config"]["configuration"] == stored_configuration
+        assert metadata["build_selection"]["configuration"] == (preset or "Debug")
+
+        config = replace(config, configuration=restored_configuration)
+        restored = MissionHost(tasks, original.factory, development_config=development)
+        assert restored._workflow(task_id).mission_build_selection == metadata["build_selection"]
+        config = replace(config, configuration=changed_configuration)
+        changed = MissionHost(tasks, original.factory, development_config=development)
+        with pytest.raises(ForgePilotError, match="build_selection_changed"):
+            changed._workflow(task_id)
     finally:
         await host.close()
         await tasks.close()

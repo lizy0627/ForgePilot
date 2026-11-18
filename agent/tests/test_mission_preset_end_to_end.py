@@ -1,11 +1,16 @@
 """Reviewed source and preset inputs cross the real HTTP/Graph/Validator boundary."""
+import asyncio
 import json
+import os
 from pathlib import Path
+import shutil
+from threading import Event
 
 import httpx
 import pytest
 
 from closed_loop_support import make_loop_case
+from forgepilot import server
 from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.api import create_app
 from forgepilot.build_process import run_build_process
@@ -13,6 +18,8 @@ from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
 from forgepilot.validation import ValidationService
 from test_mission_api_workflow import AnalysisProvider, poll
+from test_build import build_config
+from test_desktop_restart_real import free_port
 from test_workspace_manager import git
 
 
@@ -112,4 +119,70 @@ async def test_reviewed_selected_source_and_presets_share_one_baseline(tmp_path,
                 assert git(git_exe, case.root, "status", "--porcelain=v1") == source_status
     finally:
         await gateway.aclose()
+        await case.close()
+
+
+@pytest.mark.asyncio
+async def test_server_explicit_tools_match_preview_frozen_selection_and_build(
+        tmp_path, git_exe, rg_exe, build_config, monkeypatch):
+    case = await make_loop_case(tmp_path, git_exe)
+    providers = {**case.providers, "analysis": AnalysisProvider(case)}
+    base = case.gateway.router.configuration
+    models = ModelConfiguration(profiles=(*base.profiles, ModelProfile(profile_id="analysis",
+        base_url="http://127.0.0.1:1/v1", api_key_ref="env:FORGEPILOT_API_KEY", model="fake-analysis",
+        family="analyst")), routes=(*base.routes, *(ModelRoute(route_id=role, primary="analysis")
+        for role in ("analysis", "orchestration", "task", "chat", "summary"))))
+    gateway = ModelGateway(models, secret_resolver=lambda _: "offline-only",
+        provider_factory=lambda profile, _: providers[profile.profile_id])
+    monkeypatch.setattr("forgepilot.service_composition.model_gateway_from_args", lambda _: gateway)
+    monkeypatch.setenv("FORGEPILOT_LOCAL_API_TOKEN", "offline-mission-token")
+    # MSVC's compiler probes append long paths below the per-Mission build directory.
+    artifact_root = tmp_path.parent / ("a-" + case.task_id[:8])
+    monkeypatch.setenv("FORGEPILOT_ARTIFACT_ROOT", str(artifact_root))
+    search_dirs = os.environ["PATH"].split(os.pathsep)
+    monkeypatch.setenv("PATH", os.pathsep.join(p for p in search_dirs
+        if not any((Path(p) / name).is_file() for name in ("cmake.exe", "git.exe"))))
+    assert shutil.which("cmake") is None and shutil.which("git") is None
+    port = free_port()
+    ready, stop = Event(), Event()
+    cli = ["--port", str(port), "--database", str(tmp_path / "server.sqlite3"),
+        "--git", git_exe, "--rg", rg_exe, "--cmake", build_config.cmake, "--ctest", build_config.ctest,
+        "--generator", "Ninja", "--configuration", "Release", "--make-program", build_config.make_program,
+        "--mission-oracle", str(case.oracle)]
+    service = asyncio.create_task(asyncio.to_thread(server.main, cli, stop_requested=stop.is_set, on_ready=ready.set))
+    try:
+        assert await asyncio.to_thread(ready.wait, 15)
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=90,
+                headers={"X-ForgePilot-Token": "offline-mission-token"}) as client:
+            source = {"repository_path": str(case.root)}
+            preview = await client.post("/api/v2/missions/preview", json=source)
+            assert preview.status_code == 200, preview.text
+            selection = preview.json()["build"]
+            assert (selection["generator"], selection["configuration"]) == ("Ninja", "Release")
+            assert [Path(p) for p, _ in selection["tool_files"]][:2] == [
+                Path(build_config.cmake), Path(build_config.ctest)]
+            created = await client.post("/api/v2/missions", json={**source,
+                "request": "Fix negative input behavior", "task_type": "bug_fix",
+                "preview_token": preview.json()["preview_token"]})
+            assert created.status_code == 202, created.text
+            path = "/api/v2/missions/" + created.json()["task_id"]
+            waiting = await poll(client, path, {"awaiting_human", "failed", "retryable"})
+            assert waiting["status"] == "awaiting_human", (await client.get(path + "/graph")).json()
+            assert waiting["build_selection"] == selection
+            review = waiting["review"]
+            approved = await client.post(path + "/approvals", json={
+                "expected_revision": waiting["current_revision"], "decision": "approved",
+                **{k: review[k] for k in ("task_spec_hash", "plan_hash", "scope_hash")}})
+            assert approved.status_code == 202, approved.text
+            final = await poll(client, path, {"succeeded", "retryable", "failed"})
+            assert final["status"] == "succeeded", (await client.get(path + "/graph")).json()
+            report = (await client.get(path + "/validation")).json()["latest"]["content"]
+            assert report["status"] == "passed" and report["tests_passed"] > 0
+            assert report["hidden_oracle"] == "passed"
+            binary, = artifact_root.rglob("public_test.exe")
+            cache = (binary.parent / "CMakeCache.txt").read_text(encoding="utf-8")
+            assert "CMAKE_BUILD_TYPE:STRING=Release" in cache and "CMAKE_GENERATOR:INTERNAL=Ninja" in cache
+    finally:
+        stop.set()
+        assert await service == 0
         await case.close()
