@@ -288,7 +288,7 @@ void ConversationController::applyStreamEvent(const QString &type,const QJsonObj
         }
         m_streamFlush.stop(); m_streamBuffer.clear(); m_streamDraft=content;
         m_streamSegment=segment; m_streamRevision=revision; updateStreamRow();
-        m_answerStatus=payload.value("status").toString()=="working"?"正在调用工具…":"正在生成…";
+        m_answerStatus="正在生成回答…";
         if(payload.value("terminal").toBool()) {
             m_stream.disconnectStream(); ++m_generation; m_loading=false; resetRequestPolling(); refresh();
         }
@@ -313,12 +313,12 @@ void ConversationController::applyStreamEvent(const QString &type,const QJsonObj
         } else if(type=="answer_segment_discarded") {
             if(segment!=m_streamSegment) return;
             m_streamFlush.stop(); m_streamBuffer.clear(); m_streamDraft.clear(); m_streamRevision=revision;
-            m_answerStatus="正在调用工具…"; updateStreamRow();
+            m_answerStatus="正在生成回答…"; updateStreamRow();
         } else if(type=="answer_segment_committed") {
             if(segment!=m_streamSegment) return;
             flushStreamBuffer(); m_streamRevision=revision; updateStreamRow();
         } else if(type=="tool_activity") {
-            m_streamRevision=revision; m_answerStatus="正在调用工具…";
+            m_streamRevision=revision; m_answerStatus="正在生成回答…";
             m_streamToolActivity={{"request_id",m_streamRequest},{"segment_id",segment},
                 {"status",payload.value("activity").toString()=="started"?"running":
                     payload.value("success").toBool()?"succeeded":"failed"},

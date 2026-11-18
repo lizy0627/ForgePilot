@@ -47,7 +47,12 @@ foreach ($case in $cases) {
     Write-Output "Qt offline integration: $($case.name)"
     $arguments = @($runner) + $case.args + @('--output-root', $output)
     $log = Join-Path $output (($case.name -replace ' ', '-') + '.log')
-    & $python @arguments *> $log
+    # Native tools may print harmless Git line-ending warnings to stderr.
+    # Decide success from the process exit code, not PowerShell's stderr record.
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $python @arguments *> $log }
+    finally { $ErrorActionPreference = $previousErrorAction }
     $exitCode = $LASTEXITCODE
     Get-Content -LiteralPath $log -Tail 12
     if ($exitCode -ne 0) {

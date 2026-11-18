@@ -1,5 +1,6 @@
 #include "ConversationController.h"
 #include "ClientUi.h"
+#include "ColorContrast.h"
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
@@ -36,17 +37,22 @@ private slots:
         TaskController tasks; tasks.setBaseUrl(QUrl(QString("http://127.0.0.1:%1").arg(server.serverPort())));
         ConversationController c(&tasks); QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError> &errors){for(const auto &e:errors) warnings.append(e.toString());});
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"width",1000},{"height",720}});
+        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"width",860},{"height",640}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window); QVERIFY(QTest::qWaitForWindowExposed(window));
         QTRY_VERIFY(!c.error().isEmpty()); QTest::qWait(100);
         auto *send=window->findChild<QQuickItem*>("sendMessageButton"); QVERIFY(send);
+        auto *prompt=window->findChild<QQuickItem*>("conversationPrompt"); QVERIFY(prompt);
         const auto output=qEnvironmentVariable("FORGEPILOT_INTEGRATION_OUTPUT");
         QVERIFY(window->grabWindow().save(output+"/conversation-long-error.png"));
         const auto rect=send->mapRectToScene(QRectF(0,0,send->width(),send->height()));
         QVERIFY2(rect.top()>=0 && rect.bottom()<window->height() && rect.right()<=window->width(),"Long diagnostics must not push the send button outside the window");
+        const auto promptRect=prompt->mapRectToScene(QRectF(0,0,prompt->width(),prompt->height()));
+        QVERIFY2(promptRect.top()>=0 && promptRect.bottom()<=window->height() && promptRect.right()<=window->width(),"Long diagnostics must leave the prompt usable at minimum size");
         auto *details=window->findChild<QQuickItem*>("conversationErrorDetailsButton"); QVERIFY(details); QVERIFY(details->isVisible());
+        const auto detailsRect=details->mapRectToScene(QRectF(0,0,details->width(),details->height()));
+        QVERIFY2(detailsRect.right()<=window->width() && detailsRect.bottom()<=window->height(),"Long diagnostics must leave the details action reachable");
         QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,details->mapToScene(QPointF(details->width()/2,details->height()/2)).toPoint());
         auto *dialog=window->findChild<QObject*>("conversationErrorDialog"); QVERIFY(dialog); QTRY_VERIFY(dialog->property("visible").toBool());
         auto *content=window->findChild<QObject*>("conversationErrorContent"); QVERIFY(content); QCOMPARE(content->property("text").toString(),c.error());
@@ -112,8 +118,9 @@ private slots:
         } else {
             QVERIFY(c.conversationId().isEmpty()); QVERIFY(c.repositoryPath().isEmpty()); QVERIFY(capture("empty"));
             const auto background=prompt->property("background").value<QObject*>(); QVERIFY(background);
-            QVERIFY(background->property("color").value<QColor>().lightnessF()>0.8);
-            QVERIFY(prompt->property("color").value<QColor>().lightnessF()<0.3);
+            const auto surface = background->property("color").value<QColor>();
+            const auto foreground = prompt->property("color").value<QColor>();
+            QVERIFY2(colorContrast(foreground, surface) >= 4.5, "Prompt text must remain readable on its surface");
             QVERIFY(!window->property("detailsExpanded").toBool());
             prompt->setProperty("text","切换模式时保留草稿");
             QVERIFY(click("taskModeButton")); QCOMPARE(c.mode(),"task");

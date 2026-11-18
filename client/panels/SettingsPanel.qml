@@ -18,7 +18,10 @@ ColumnLayout {
     }
     StackLayout {
         currentIndex: tabs.currentIndex; Layout.fillWidth: true; Layout.fillHeight: true
-        ColumnLayout {
+        AppScrollView {
+            id: connectionScroll; clip: true; contentWidth: availableWidth
+            ColumnLayout {
+            width: connectionScroll.availableWidth; spacing: Theme.spaceMd
             Panel {
                 Layout.fillWidth: true; title: "运行配置"
                 Label {
@@ -34,15 +37,25 @@ ColumnLayout {
                 Layout.fillWidth: true; title: "连接"; subtitle: "本机后端"
                 RowLayout {
                     Layout.fillWidth: true
-                    TextField { id: server; objectName: "serverInput"; text: root.controller.baseUrl; placeholderText: "http://127.0.0.1:8765"; Layout.fillWidth: true; selectByMouse: true }
+                    AppTextField { id: server; objectName: "serverInput"; text: root.controller.baseUrl; placeholderText: "http://127.0.0.1:8765"; Layout.fillWidth: true; selectByMouse: true }
                     ActionButton { objectName: "connectButton"; text: "连接"; enabled: !root.controller.busy; onClicked: root.controller.configureBackend(server.text) }
-                    StatusBadge { status: root.controller.serverStatus }
                 }
-                Label { text: "连接地址仅在本次运行中生效。切换后端或关闭窗口不会取消任务；模型配置由后端管理。"; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12 }
+                StatusBadge {
+                    id: serverStatusBadge
+                    status: root.controller.serverStatus; Layout.alignment: Qt.AlignLeft
+                    Layout.maximumWidth: Math.max(120, root.width - Theme.spaceLg * 4)
+                    elide: Text.ElideRight
+                }
+                LongText {
+                    visible: serverStatusBadge.truncated || root.controller.serverStatus.length > 60
+                    Layout.fillWidth: true; title: "完整连接状态"
+                    text: root.controller.serverStatus; monospace: false; maximumHeight: 150
+                }
+                Label { text: "连接地址仅在本次运行中生效。切换后端或关闭窗口不会取消任务；模型配置由后端管理。"; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: Theme.fontSizeSm }
             }
             Panel {
                 id: codeIndex; objectName: "codeIndexPanel"; Layout.fillWidth: true
-                title: "代码索引"; subtitle: !root.rag ? "控制器不可用" : !root.rag.repositoryPath ? "待选择仓库" : RagUi.statusLabel(root.rag.status)
+                title: "代码索引"; subtitle: !root.rag ? "控制器不可用" : !root.rag.repositoryPath ? "待选择仓库" : RagUi.statusLabel(root.rag.status, root.rag.reachable, root.rag.statusReadFailed, !!root.rag.repositoryPath, root.rag.busy)
                 RowLayout {
                     Layout.fillWidth: true
                     Switch {
@@ -54,12 +67,6 @@ ColumnLayout {
                         Accessible.description: "只影响之后发送的工作任务，不会启动或停止后端，也不会删除索引。"
                     }
                     Item { Layout.fillWidth: true }
-                    Label {
-                        objectName: "codeIndexStatus"
-                        text: codeIndex.subtitle
-                        color: root.rag ? RagUi.statusColor(root.rag.status, root.rag.reachable) : Theme.muted
-                        font.bold: true; textFormat: Text.PlainText
-                    }
                 }
                 Label {
                     objectName: "codeIndexTarget"; Layout.fillWidth: true
@@ -67,12 +74,24 @@ ColumnLayout {
                     color: Theme.secondary; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
                 }
                 Label {
-                    objectName: "codeIndexStatusDetail"
+                    objectName: "codeIndexStatus"; Layout.fillWidth: true
+                    text: codeIndex.subtitle
+                    color: root.rag ? RagUi.statusColor(root.rag.status, root.rag.reachable, root.rag.statusReadFailed, !!root.rag.repositoryPath) : Theme.muted
+                    font.bold: true; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                }
+                Label {
+                    id: codeIndexDetail; objectName: "codeIndexStatusDetail"
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
                     color: root.rag && (root.rag.status === "failed" || !!root.rag.error) ? Theme.danger
                         : root.rag && root.rag.status === "degraded" ? Theme.warning : Theme.muted
                     text: !root.rag ? "代码索引控制器不可用。" : !root.rag.repositoryPath ? "请先在当前页面选择仓库。"
-                        : RagUi.statusDetail(root.rag.status, root.rag.statusErrorCode, root.rag.reachable)
+                        : RagUi.statusDetail(root.rag.status, root.rag.statusErrorCode, root.rag.reachable, root.rag.statusReadFailed, !!root.rag.repositoryPath, root.rag.busy)
+                }
+                LongText {
+                    objectName: "codeIndexStatusFull"
+                    Layout.fillWidth: true; title: "完整索引状态"
+                    text: codeIndexDetail.text
+                    monospace: false; maximumHeight: 170
                 }
                 Label {
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
@@ -87,8 +106,8 @@ ColumnLayout {
                     indeterminate: root.rag && root.rag.running && root.rag.totalFiles === 0
                 }
                 Label {
-                    Layout.fillWidth: true; color: Theme.muted; font.pixelSize: 11
-                    textFormat: Text.PlainText; elide: Text.ElideRight
+                    Layout.fillWidth: true; color: Theme.muted; font.pixelSize: Theme.fontSizeXs
+                    textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
                     text: root.rag && root.rag.running
                         ? "正在处理 %1 / %2".arg(root.rag.processed).arg(root.rag.totalFiles)
                         : root.rag && root.rag.lastIndexedAt ? "最近索引：" + root.rag.lastIndexedAt : "尚未建立索引"
@@ -97,24 +116,33 @@ ColumnLayout {
                     Layout.fillWidth: true
                     ActionButton {
                         objectName: "buildCodeIndexButton"; text: root.rag && root.rag.fileCount ? "更新索引" : "构建索引"
-                        enabled: !!root.rag && !!root.rag.repositoryPath && root.rag.enabled && root.rag.available && !root.rag.busy && !root.rag.running
+                        enabled: !!root.rag && !!root.rag.repositoryPath && root.rag.enabled && root.rag.available
+                            && root.rag.reachable && !root.rag.statusReadFailed && !root.rag.busy && !root.rag.running
                         onClicked: root.rag.buildIndex()
                     }
                     ActionButton {
                         objectName: "cancelCodeIndexButton"; text: "取消"; visible: !!root.rag && root.rag.running
-                        enabled: visible && !root.rag.busy; onClicked: root.rag.cancelIndex()
+                        enabled: visible && root.rag.reachable && !root.rag.statusReadFailed && !root.rag.busy; onClicked: root.rag.cancelIndex()
                     }
                     Item { Layout.fillWidth: true }
                     ActionButton {
                         objectName: "deleteCodeIndexButton"; text: "清空索引"; flat: true
-                        enabled: !!root.rag && root.rag.fileCount > 0 && !root.rag.busy && !root.rag.running
+                        enabled: !!root.rag && root.rag.fileCount > 0 && root.rag.reachable
+                            && !root.rag.statusReadFailed && !root.rag.busy && !root.rag.running
                         onClicked: deleteIndexDialog.open()
                     }
                 }
                 Label {
                     objectName: "codeIndexError"; visible: !!root.rag && !!root.rag.error
                     text: root.rag ? root.rag.error : ""; textFormat: Text.PlainText
-                    color: Theme.danger; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; maximumLineCount: 2
+                    color: Theme.danger; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+                    maximumLineCount: 2; elide: Text.ElideRight
+                }
+                LongText {
+                    objectName: "codeIndexErrorDetail"
+                    visible: !!root.rag && !!root.rag.error; Layout.fillWidth: true
+                    title: "完整代码索引错误"; text: root.rag ? root.rag.error : ""
+                    monospace: false; maximumHeight: 190
                 }
                 RowLayout {
                     visible: !!root.rag && !!root.rag.error; Layout.fillWidth: true
@@ -123,19 +151,19 @@ ColumnLayout {
                     ActionButton { text: "重试"; flat: true; enabled: !!root.rag && !root.rag.busy; onClicked: if (root.rag) root.rag.refresh() }
                 }
             }
-            Item { Layout.fillHeight: true }
+            }
         }
         Loader { active: !!root.mcp; sourceComponent: Component { McpSettingsPanel { mcp: root.mcp } } }
     }
     Dialog {
         id: deleteIndexDialog; objectName: "deleteCodeIndexDialog"; modal: true
-        title: "清空代码索引？"; anchors.centerIn: parent
-        width: Math.min(420, Math.max(280, root.width - 48))
+        parent: Overlay.overlay; title: "清空代码索引？"; anchors.centerIn: parent
+        width: Math.min(420, Math.max(280, parent.width - 48))
         standardButtons: Dialog.Cancel
         contentItem: Label { text: "只会删除当前项目的检索索引，不会修改项目源码。"; wrapMode: Text.Wrap; textFormat: Text.PlainText }
         footer: DialogButtonBox {
             ActionButton { text: "取消"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-            ActionButton { objectName: "confirmDeleteCodeIndexButton"; text: "清空"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: if (root.rag) root.rag.deleteIndex() }
+            ActionButton { objectName: "confirmDeleteCodeIndexButton"; text: "清空"; enabled: !!root.rag && root.rag.reachable && !root.rag.statusReadFailed && !root.rag.busy && !root.rag.running; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: if (root.rag) root.rag.deleteIndex() }
         }
     }
 }

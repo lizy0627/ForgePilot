@@ -11,7 +11,7 @@ Controls.Panel {
     readonly property var artifact: W.artifact(mission.artifacts, "TaskSpec")
     readonly property var spec: artifact.content || ({})
     title: "TaskSpec · 任务说明"
-    subtitle: artifact.contentHash ? artifact.contentHash.substring(0, 12) : ""
+    subtitle: artifact.contentHash || ""
     objectName: "taskSpecPanel"
     StateNotice { mission: root.mission; hasData: !!root.artifact.artifactId; emptyText: "TaskSpec 尚未生成。"; Layout.fillWidth: true }
     Label { visible: !!root.spec.title; text: root.spec.title || ""; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }

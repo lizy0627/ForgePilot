@@ -14,6 +14,7 @@ class RagController : public QObject {
     Q_PROPERTY(bool enabled READ enabled NOTIFY changed)
     Q_PROPERTY(bool available READ available NOTIFY changed)
     Q_PROPERTY(bool reachable READ reachable NOTIFY changed)
+    Q_PROPERTY(bool statusReadFailed READ statusReadFailed NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QString statusErrorCode READ statusErrorCode NOTIFY changed)
     Q_PROPERTY(int fileCount READ fileCount NOTIFY changed)
@@ -36,6 +37,7 @@ public:
     bool enabled() const { return m_enabled; }
     bool available() const { return m_available; }
     bool reachable() const { return m_reachable; }
+    bool statusReadFailed() const { return m_statusReadFailed; }
     QString status() const { return m_status; }
     QString statusErrorCode() const { return m_statusErrorCode; }
     int fileCount() const { return m_fileCount; }
@@ -77,6 +79,7 @@ private:
     QString m_lastIndexed, m_error, m_statusErrorCode;
     bool m_useForTasks = true;
     bool m_enabled = false, m_available = false, m_reachable = false, m_running = false;
+    bool m_statusReadFailed = false;
     int m_fileCount = 0, m_chunks = 0, m_dirty = 0, m_failedFiles = 0;
     int m_total = 0, m_processed = 0;
     qint64 m_revision = 0;

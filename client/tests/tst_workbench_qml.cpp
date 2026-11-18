@@ -1,10 +1,13 @@
 #include "ClientUi.h"
 #include "ConversationController.h"
+#include "McpController.h"
 #include "TaskController.h"
 #include "workbench/MissionController.h"
 #include "HttpFixture.h"
 #include <QFile>
 #include <QGuiApplication>
+#include <QClipboard>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QElapsedTimer>
@@ -12,6 +15,8 @@
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRectF>
+#include <QScreen>
 #include <QtTest>
 #include <algorithm>
 #include <functional>
@@ -20,6 +25,19 @@
 namespace {
 const QString MissionA = "10000000-0000-4000-a000-000000000001";
 const QString MissionB = "10000000-0000-4000-a000-000000000009";
+
+QRectF sceneBounds(QQuickItem *item)
+{
+    return {item->mapToScene(QPointF(0, 0)), QSizeF(item->width(), item->height())};
+}
+
+bool insideWindow(QQuickItem *item, QQuickWindow *window)
+{
+    if (!item || !item->isVisible() || item->width() <= 0 || item->height() <= 0) return false;
+    const auto rect = sceneBounds(item);
+    return rect.left() >= -1 && rect.top() >= -1
+        && rect.right() <= window->width() + 1 && rect.bottom() <= window->height() + 1;
+}
 
 QJsonObject fromFile(const QString &name)
 {
@@ -61,10 +79,11 @@ QJsonObject mission(const QString &id, const QString &status, int revision = 8)
 QJsonObject graph(const QJsonObject &m)
 {
     const auto status = m.value("status");
-    const QJsonObject node{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
+    const auto nodeId = m.value("test_graph_node_id").toString("execution_approval");
+    const QJsonObject node{{"node_id", nodeId}, {"node_type", "human_gate"},
         {"status", status}, {"attempt", 1}, {"result", QJsonValue::Null}};
-    const QJsonObject definition{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
-        {"handler", "execution_approval"}, {"dependencies", QJsonArray{}},
+    const QJsonObject definition{{"node_id", nodeId}, {"node_type", "human_gate"},
+        {"handler", nodeId}, {"dependencies", QJsonArray{}},
         {"agent_id", QJsonValue::Null}, {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
     return {{"task_id", m.value("task_id")}, {"graph_id", m.value("graph_id")},
         {"graph_version", 1}, {"definition_hash", QString(64, 'a')}, {"status", status},
@@ -138,18 +157,21 @@ struct Ui {
     TaskController tasks;
     ConversationController conversations{&tasks};
     MissionController missions;
+    McpController mcp{&tasks};
     QQmlApplicationEngine engine;
     QQuickWindow *window = nullptr;
     QStringList warnings;
-    explicit Ui(Fixture &f)
+    explicit Ui(Fixture &f, int initialWidth = 1200, int initialHeight = 760, bool withMcp = false)
     {
         tasks.setBaseUrl(f.source.url()); missions.setBaseUrl(f.source.url());
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings.append(error.toString());
         });
-        engine.setInitialProperties({{"controller", QVariant::fromValue(&tasks)},
+        QVariantMap initial{{"controller", QVariant::fromValue(&tasks)},
             {"conversations", QVariant::fromValue(&conversations)},
-            {"missions", QVariant::fromValue(&missions)}, {"width", 1200}, {"height", 760}});
+            {"missions", QVariant::fromValue(&missions)}, {"width", initialWidth}, {"height", initialHeight}};
+        if (withMcp) initial.insert("mcp", QVariant::fromValue(&mcp));
+        engine.setInitialProperties(initial);
     }
     bool load()
     {
@@ -227,20 +249,586 @@ private slots:
     {
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
+    void responsiveLayout_data()
+    {
+        QTest::addColumn<int>("windowWidth");
+        QTest::addColumn<int>("windowHeight");
+        QTest::newRow("minimum-860x640") << 860 << 640;
+        QTest::newRow("desktop-1280x720") << 1280 << 720;
+        QTest::newRow("desktop-1600x900") << 1600 << 900;
+    }
+    void responsiveLayout()
+    {
+        QFETCH(int, windowWidth);
+        QFETCH(int, windowHeight);
+        Fixture f; Ui ui(f, windowWidth, windowHeight);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QTRY_COMPARE(ui.window->width(), windowWidth);
+        QTRY_COMPARE(ui.window->height(), windowHeight);
+        QCOMPARE(ui.window->minimumWidth(), 860);
+        QCOMPARE(ui.window->minimumHeight(), 640);
+        qInfo().noquote() << "RESPONSIVE" << windowWidth << 'x' << windowHeight
+            << "devicePixelRatio=" << ui.window->screen()->devicePixelRatio();
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) QVERIFY(QDir().mkpath(captureDir));
+        auto capture = [&](const QString &page) {
+            if (captureDir.isEmpty()) return true;
+            QTest::qWait(40);
+            return ui.window->grabWindow().save(captureDir + '/' + page + '-'
+                + QString::number(windowWidth) + 'x' + QString::number(windowHeight) + ".png");
+        };
+
+        auto requireInside = [&](const QString &name) {
+            auto *item = ui.find(name);
+            if (!insideWindow(item, ui.window)) {
+                qWarning().noquote() << name << "outside" << windowWidth << 'x' << windowHeight
+                    << (item ? sceneBounds(item) : QRectF());
+                return false;
+            }
+            return true;
+        };
+        QTRY_VERIFY(requireInside("freeChatModeButton"));
+        QTRY_VERIFY(requireInside("agentWorkbenchModeButton"));
+        QTRY_VERIFY(requireInside("sidebarToggle"));
+        QTRY_VERIFY(requireInside("conversationPrompt"));
+        QTRY_VERIFY(requireInside("sendMessageButton"));
+        auto noOverlap = [&](const QString &first, const QString &second) {
+            auto *a = ui.find(first);
+            auto *b = ui.find(second);
+            return a && b && (sceneBounds(a).intersected(sceneBounds(b)).width() <= 1
+                || sceneBounds(a).intersected(sceneBounds(b)).height() <= 1);
+        };
+        QVERIFY(noOverlap("freeChatModeButton", "agentWorkbenchModeButton"));
+        QVERIFY(noOverlap("conversationPrompt", "sendMessageButton"));
+        QVERIFY(capture("chat"));
+        auto *sidebar = ui.find("conversationSidebar"); QVERIFY(sidebar);
+        if (windowWidth < 1180) {
+            QTRY_VERIFY(!sidebar->isVisible());
+            QTRY_VERIFY(requireInside("compactHistoryButton"));
+            QTRY_VERIFY(requireInside("compactSettingsButton"));
+            QTRY_VERIFY(requireInside("compactMemoryButton"));
+            QVERIFY(noOverlap("compactHistoryButton", "compactSettingsButton"));
+            QVERIFY(noOverlap("compactSettingsButton", "compactMemoryButton"));
+            QVERIFY(ui.click("compactHistoryButton"));
+            QTRY_VERIFY(requireInside("compactNewTaskButton"));
+            QVERIFY(capture("history"));
+            QTest::keyClick(ui.window, Qt::Key_Escape);
+            QTRY_VERIFY([&] { auto *item = ui.find("compactNewTaskButton"); return !item || !item->isVisible(); }());
+        } else {
+            QTRY_VERIFY(sidebar->isVisible());
+            QTRY_VERIFY(requireInside("newTaskButton"));
+            QTRY_VERIFY(requireInside("settingsButton"));
+        }
+
+        QVERIFY(ui.click(windowWidth < 1180 ? "compactMemoryButton" : "memoryManagerButton"));
+        QTRY_VERIFY(requireInside("memoryList"));
+        QTRY_VERIFY(requireInside("summaryMemoryTab"));
+        QTRY_VERIFY(requireInside("closeMemoryButton"));
+        auto *addMemory = ui.find("addMemoryButton"); QVERIFY(addMemory);
+        QTRY_VERIFY(addMemory->isEnabled());
+        QVERIFY(ui.click("addMemoryButton"));
+        QTRY_VERIFY(requireInside("memoryContentInput"));
+        QTRY_VERIFY(requireInside("saveMemoryButton"));
+        QVERIFY(capture("memory"));
+        QTest::keyClick(ui.window, Qt::Key_Escape);
+        QTRY_VERIFY([&] { auto *item = ui.find("memoryContentInput"); return !item || !item->isVisible(); }());
+        QVERIFY(ui.click("closeMemoryButton"));
+        QTRY_VERIFY([&] { auto *item = ui.find("memoryList"); return !item || !item->isVisible(); }());
+
+        QVERIFY(ui.click(windowWidth < 1180 ? "compactSettingsButton" : "settingsButton"));
+        QTRY_VERIFY(requireInside("settingsPanel"));
+        QTRY_VERIFY(requireInside("closeSettingsButton"));
+        QVERIFY(capture("settings"));
+        QVERIFY(ui.click("closeSettingsButton"));
+        QTRY_VERIFY([&] { auto *item = ui.find("settingsPanel"); return !item || !item->isVisible(); }());
+
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QTRY_VERIFY(requireInside("workbenchCenterScroll"));
+        auto *taskCenter = ui.find("missionTaskCenter"); QVERIFY(taskCenter);
+        if (windowWidth < 1080) {
+            QTRY_VERIFY(!taskCenter->isVisible());
+            QTRY_VERIFY(requireInside("workbenchCompactBar"));
+            QTRY_VERIFY(requireInside("workbenchTaskCenterToggle"));
+            QVERIFY(ui.click("workbenchTaskCenterToggle"));
+            QTRY_VERIFY(requireInside("missionTaskCenter"));
+            QTRY_VERIFY(requireInside("missionRequestInput"));
+            QVERIFY(noOverlap("missionTaskCenter", "workbenchCenterScroll"));
+        } else {
+            QTRY_VERIFY(requireInside("missionTaskCenter"));
+            QVERIFY(noOverlap("missionTaskCenter", "workbenchCenterScroll"));
+        }
+        QVERIFY(capture("workbench"));
+
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        if (!details->isVisible()) QVERIFY(ui.click("workbenchDetailsToggle"));
+        QTRY_VERIFY(requireInside("workbenchDetails"));
+        QTRY_VERIFY(requireInside("workbenchTabStripScroll"));
+        QTRY_VERIFY(requireInside("workbenchDetailScroll"));
+        auto *tabStrip = ui.find("workbenchTabStripScroll"); QVERIFY(tabStrip);
+        if (tabStrip->property("contentWidth").toReal() > tabStrip->width() + 1) {
+            auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+            tabs->setProperty("currentIndex", 7);
+            QTRY_VERIFY(tabStrip->property("contentX").toReal() > 0);
+        }
+        QVERIFY(noOverlap("missionTaskCenter", "workbenchDetails"));
+        QVERIFY(capture("details"));
+        if (windowWidth < 1300) {
+            QTRY_VERIFY(requireInside("workbenchReturnButton"));
+            QVERIFY(ui.click("workbenchReturnButton"));
+            QTRY_VERIFY(requireInside("workbenchCenterScroll"));
+        }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void populatedDetailPages_data()
+    {
+        QTest::addColumn<int>("windowWidth");
+        QTest::addColumn<int>("windowHeight");
+        QTest::newRow("minimum-860x640") << 860 << 640;
+        QTest::newRow("desktop-1280x720") << 1280 << 720;
+        QTest::newRow("desktop-1600x900") << 1600 << 900;
+    }
+    void populatedDetailPages()
+    {
+        QFETCH(int, windowWidth);
+        QFETCH(int, windowHeight);
+        Fixture f; Ui ui(f, windowWidth, windowHeight);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        auto *center = ui.find("workbenchCenterScroll"); QVERIFY(center);
+        if (windowWidth < 1300 && details->isVisible()) {
+            QVERIFY(ui.click("workbenchReturnButton"));
+            QTRY_VERIFY(!details->isVisible());
+        }
+        QTRY_VERIFY(insideWindow(center, ui.window));
+        auto *graph = ui.find("taskGraphView"); QVERIFY(graph);
+        QVERIFY(graph->isVisible());
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(captureDir));
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/task-graph-"
+                + QString::number(windowWidth) + 'x' + QString::number(windowHeight) + ".png"));
+        }
+        if (!details->isVisible()) QVERIFY(ui.click("workbenchDetailsToggle"));
+        QTRY_VERIFY(insideWindow(details, ui.window));
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        auto *tabScroll = ui.find("workbenchTabStripScroll"); QVERIFY(tabScroll);
+        auto *detailScroll = ui.find("workbenchDetailScroll"); QVERIFY(detailScroll);
+        const QStringList pages = {"task", "evidence", "plan", "approval", "diff",
+                                   "validation", "review", "delivery"};
+        const QStringList panels = {"taskSpecPanel", "evidencePanel", "executionPlanPanel",
+                                    "approvalPanel", "missionDiffPanel", "validationPanel",
+                                    "reviewPanel", "deliveryPanel"};
+        auto fullyInDetailViewport = [&](QQuickItem *item) {
+            const auto rect = sceneBounds(item);
+            const auto viewport = sceneBounds(detailScroll);
+            return item->isVisible() && rect.left() >= viewport.left() - 1
+                && rect.right() <= viewport.right() + 1
+                && rect.top() >= viewport.top() - 1
+                && rect.bottom() <= viewport.bottom() + 1;
+        };
+        for (int index = 0; index < pages.size(); ++index) {
+            tabs->setProperty("currentIndex", index);
+            QTRY_COMPARE(tabs->property("currentIndex").toInt(), index);
+            QQuickItem *panel = nullptr;
+            QTRY_VERIFY((panel = ui.find(panels.at(index))) && panel->isVisible());
+            QTRY_VERIFY(insideWindow(tabScroll, ui.window));
+            QTRY_VERIFY(insideWindow(detailScroll, ui.window));
+            if (!captureDir.isEmpty()) {
+                QTest::qWait(30);
+                QVERIFY(ui.window->grabWindow().save(captureDir + '/' + pages.at(index) + '-'
+                    + QString::number(windowWidth) + 'x' + QString::number(windowHeight) + ".png"));
+            }
+            if (index == 3 || index == 7) {
+                auto *flickable = qobject_cast<QQuickItem *>(
+                    detailScroll->property("contentItem").value<QObject *>());
+                QVERIFY(flickable);
+                const auto maxY = std::max(0.0,
+                    flickable->property("contentHeight").toReal() - flickable->height());
+                QVERIFY(flickable->setProperty("contentY", maxY));
+                if (index == 3) {
+                    auto *approve = ui.find("missionApproveButton"); QVERIFY(approve);
+                    auto *reject = ui.find("missionRejectButton"); QVERIFY(reject);
+                    QTRY_VERIFY(fullyInDetailViewport(approve));
+                    QTRY_VERIFY(fullyInDetailViewport(reject));
+                    QVERIFY(approve->isEnabled() && reject->isEnabled());
+                } else {
+                    auto *preview = ui.find("missionDeliveryPreviewButton"); QVERIFY(preview);
+                    QTRY_VERIFY(fullyInDetailViewport(preview));
+                }
+            }
+        }
+        tabs->setProperty("currentIndex", 3);
+        auto *approve = ui.find("missionApproveButton"); QVERIFY(approve);
+        auto *flickable = qobject_cast<QQuickItem *>(
+            detailScroll->property("contentItem").value<QObject *>());
+        QVERIFY(flickable);
+        QVERIFY(flickable->setProperty("contentY", std::max(0.0,
+            flickable->property("contentHeight").toReal() - flickable->height())));
+        QTRY_VERIFY(fullyInDetailViewport(approve));
+        QVERIFY(ui.click("missionApproveButton"));
+        QTRY_COMPARE(f.approvalPosts, 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longWorkbenchProseWraps_data()
+    {
+        QTest::addColumn<int>("tab");
+        QTest::addColumn<QString>("panel");
+        QTest::addColumn<QString>("artifactType");
+        QTest::newRow("task") << 0 << QString("taskSpecPanel") << QString("TaskSpec");
+        QTest::newRow("evidence") << 1 << QString("evidencePanel") << QString("EvidenceBundle");
+        QTest::newRow("plan") << 2 << QString("executionPlanPanel") << QString("ExecutionPlan");
+        QTest::newRow("review") << 6 << QString("reviewPanel") << QString("ReviewReport");
+    }
+    void longWorkbenchProseWraps()
+    {
+        QFETCH(int, tab);
+        QFETCH(QString, panel);
+        QFETCH(QString, artifactType);
+        Fixture f;
+        const auto token = QString("GeneratedSymbol") + QString(160, 'W') + ".cpp";
+        auto artifacts = f.artifacts.value("items").toArray();
+        for (int i = 0; i < artifacts.size(); ++i) {
+            auto artifact = artifacts.at(i).toObject();
+            if (artifact.value("artifact_type") != artifactType) continue;
+            auto content = artifact.value("content").toObject();
+            if (artifactType == "EvidenceBundle") {
+                auto items = content.value("items").toArray();
+                auto evidence = items.first().toObject();
+                evidence["claim"] = token;
+                items[0] = evidence;
+                content["items"] = items;
+            } else {
+                content[artifactType == "TaskSpec" ? "objective" : "summary"] = token;
+            }
+            artifact["content"] = content;
+            artifacts[i] = artifact;
+        }
+        f.artifacts["items"] = artifacts;
+        Ui ui(f, 860, 640);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        if (!details->isVisible()) QVERIFY(ui.click("workbenchDetailsToggle"));
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", tab);
+        QQuickItem *label = nullptr;
+        QTRY_VERIFY((label = ui.textItem(ui.find(panel), token)) && label->isVisible());
+        QTRY_VERIFY(label->width() > 0 && label->property("contentWidth").toReal() > 0);
+        QTRY_VERIFY(label->property("lineCount").toInt() > 1);
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(captureDir));
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/long-"
+                + QTest::currentDataTag() + "-860x640.png"));
+        }
+        QVERIFY2(label->property("contentWidth").toReal() <= label->width() + 1,
+                 "The entire unbroken identifier must fit within the text viewport");
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void narrowingWindowReflowsChatAndWorkbench()
+    {
+        Fixture f; Ui ui(f, 1600, 900);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        ui.window->resize(860, 640);
+        QTRY_COMPARE(ui.window->width(), 860);
+        QTRY_COMPARE(ui.window->height(), 640);
+        auto within = [&](const QString &name) { return insideWindow(ui.find(name), ui.window); };
+        auto *sidebar = ui.find("conversationSidebar"); QVERIFY(sidebar);
+        QTRY_VERIFY(!sidebar->isVisible());
+        QTRY_VERIFY(within("compactHistoryButton"));
+        QTRY_VERIFY(within("conversationPrompt"));
+        QTRY_VERIFY(within("sendMessageButton"));
+        ui.window->resize(1600, 900);
+        QTRY_COMPARE(ui.window->width(), 1600);
+        QTRY_COMPARE(ui.window->height(), 900);
+        QTRY_VERIFY(sidebar->isVisible());
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        if (details->isVisible()) {
+            QVERIFY(ui.click("workbenchDetailsToggle"));
+            QTRY_VERIFY(!details->isVisible());
+        }
+        QVERIFY(ui.click("workbenchDetailsToggle"));
+        QTRY_VERIFY(details->isVisible());
+        ui.window->resize(860, 640);
+        QTRY_COMPARE(ui.window->width(), 860);
+        QTRY_COMPARE(ui.window->height(), 640);
+        QTest::qWait(100);
+        qInfo() << "NARROW DETAILS" << details->isVisible() << sceneBounds(details)
+            << "workbench" << sceneBounds(ui.find("agentWorkbenchPage"));
+        QTRY_VERIFY(within("workbenchDetails"));
+        QTRY_VERIFY(within("workbenchReturnButton"));
+        QVERIFY(ui.click("workbenchReturnButton"));
+        QTRY_VERIFY(within("workbenchCenterScroll"));
+        QTRY_VERIFY(within("workbenchTaskCenterToggle"));
+        QVERIFY(ui.click("workbenchTaskCenterToggle"));
+        QTRY_VERIFY(within("missionTaskCenter"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void mcpEditorFooterFitsMinimumWindow()
+    {
+        Fixture f;
+        f.intercept = [](const Request &request) {
+            if (request.path == "/api/v1/mcp/servers") {
+                Source::json(request, {{"items", QJsonArray{}}, {"disabled", false}});
+                return true;
+            }
+            if (request.path == "/api/v1/mcp/presets") {
+                Source::json(request, {{"items", QJsonArray{}}});
+                return true;
+            }
+            return false;
+        };
+        Ui ui(f, 860, 640, true);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("compactSettingsButton"));
+        QVERIFY(ui.click("mcpSettingsTab"));
+        auto *add = ui.find("addMcpButton"); QVERIFY(add);
+        QTRY_VERIFY(add->isEnabled());
+        QVERIFY(ui.click("addMcpButton"));
+        auto within = [&](const QString &name) { return insideWindow(ui.find(name), ui.window); };
+        QTRY_VERIFY(within("mcpEditorScroll"));
+        QTRY_VERIFY(within("closeMcpEditor"));
+        QTRY_VERIFY(within("probeMcpButton"));
+        QTRY_VERIFY(within("saveMcpButton"));
+        QTRY_VERIFY(within("mcpName"));
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(captureDir));
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/mcp-editor-860x640.png"));
+        }
+        QVERIFY(ui.click("closeMcpEditor"));
+        QTRY_VERIFY([&] { auto *item = ui.find("mcpEditorScroll"); return !item || !item->isVisible(); }());
+        QVERIFY(ui.click("closeSettingsButton"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void switchesTopLevelModesWithoutChangingConversationMode()
     {
         Fixture f; Ui ui(f);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(captureDir));
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/free-chat.png"));
+        }
         auto *prompt = ui.find("conversationPrompt"); QVERIFY(prompt);
         prompt->setProperty("text", "Draft stays in free chat");
+        QVERIFY(ui.click("settingsButton"));
+        QTest::qWait(100);
+        if (!captureDir.isEmpty()) QVERIFY(ui.window->grabWindow().save(captureDir + "/settings.png"));
+        QTest::keyClick(ui.window, Qt::Key_Escape);
         auto *workbench = ui.find("agentWorkbenchPage"); QVERIFY(workbench);
         QVERIFY(ui.click("agentWorkbenchModeButton"));
         QTRY_VERIFY(workbench->isVisible());
+        auto *detailTabs = ui.find("workbenchDetailTabs"); QVERIFY(detailTabs);
+        QVERIFY2(detailTabs->width() >= 8 * 60, "Workbench detail tabs must retain readable widths");
+        if (!captureDir.isEmpty()) QVERIFY(ui.window->grabWindow().save(captureDir + "/agent-workbench.png"));
         QCOMPARE(ui.conversations.mode(), QString("chat"));
         QCOMPARE(prompt->property("text").toString(), QString("Draft stays in free chat"));
         QVERIFY(ui.click("freeChatModeButton"));
         QTRY_VERIFY(!workbench->isVisible());
         QVERIFY(ui.find("sendMessageButton"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longChatTitleCanBeReadAndCopied()
+    {
+        Fixture f;
+        const QString longTitle = QStringLiteral("对话标题与完整路径 D:/Development/ForgePilot/深层目录/")
+            + QStringLiteral("包含中文与无空格的长文件名_").repeated(14);
+        f.intercept = [longTitle](const Request &r) {
+            if (r.path.startsWith("/api/v1/conversations?")) {
+                Source::json(r, {{"items", QJsonArray{QJsonObject{{"conversation_id", MissionA}, {"title", longTitle}}}},
+                    {"total", 1}, {"next_cursor", QJsonValue::Null}});
+                return true;
+            }
+            if (r.path == "/api/v1/conversations/" + MissionA) {
+                Source::json(r, {{"conversation_id", MissionA}, {"title", longTitle},
+                    {"repository_path", ""}, {"messages", QJsonArray{}},
+                    {"active_request", QJsonValue::Null}, {"last_request", QJsonValue::Null}});
+                return true;
+            }
+            return false;
+        };
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QTRY_COMPARE(ui.conversations.title(), longTitle);
+        auto *details = ui.find("conversationTitleDetailsButton"); QVERIFY(details);
+        QTRY_VERIFY(details->isVisible());
+        QVERIFY(ui.click("conversationTitleDetailsButton"));
+        auto *fullText = ui.find("conversationTitleFullText"); QVERIFY(fullText);
+        QTRY_COMPARE(fullText->property("text").toString(), longTitle);
+        QVERIFY(ui.click("conversationTitleCopyButton"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longTitle);
+        QTest::keyClick(ui.window, Qt::Key_Escape);
+        QVERIFY(ui.click("conversationMore_" + MissionA));
+        auto *historyTitleAction = ui.find("viewConversationTitle_" + MissionA); QVERIFY(historyTitleAction);
+        QVERIFY(QMetaObject::invokeMethod(historyTitleAction, "triggered"));
+        auto *historyFullText = ui.find("conversationTitleDetail"); QVERIFY(historyFullText);
+        QTRY_COMPARE(historyFullText->property("text").toString(), longTitle);
+        auto *historyCopy = ui.find("conversationTitleDetailCopy"); QVERIFY(historyCopy);
+        QVERIFY(QMetaObject::invokeMethod(historyCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longTitle);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longSettingsErrorCanBeReadAndCopied()
+    {
+        Fixture f; Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("settingsButton"));
+        const QString longError = QStringLiteral("索引失败：D:/Development/ForgePilot/")
+            + QStringLiteral("nested_path_with_no_breaks/").repeated(20)
+            + QStringLiteral("，请核对完整错误。");
+        const QVariantMap rag{{"status", "failed"}, {"statusErrorCode", "rag_index_failed"},
+            {"reachable", true}, {"error", longError}, {"available", false},
+            {"enabled", false}, {"running", false}, {"busy", false},
+            {"fileCount", 0}, {"progress", 0.0}, {"totalFiles", 0},
+            {"useForTasks", false}};
+        ui.window->setProperty("rag", rag);
+        auto *error = ui.find("codeIndexErrorDetail"); QVERIFY(error);
+        QTRY_COMPARE(error->property("text").toString(), longError);
+        auto *copy = ui.find("codeIndexErrorDetailCopy"); QVERIFY(copy);
+        QVERIFY(QMetaObject::invokeMethod(copy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longError);
+        auto *status = ui.find("codeIndexStatusFull"); QVERIFY(status);
+        QVERIFY(!status->property("text").toString().isEmpty());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longWorkbenchHeaderCanExpandScrollAndCopy()
+    {
+        Fixture f;
+        const QString longRequest = QStringLiteral("逐项检查构建、验证与交付路径，保留全部上下文。")
+            + QStringLiteral("详细任务说明与连续中文内容").repeated(80);
+        const QString longPath = QStringLiteral("D:/Development/ForgePilot/")
+            + QStringLiteral("very_long_nested_directory/").repeated(16) + "source.cpp";
+        auto snapshot = f.snapshots.value(MissionA);
+        snapshot["request"] = longRequest;
+        snapshot["repository_path"] = longPath;
+        f.snapshots[MissionA] = snapshot;
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workbenchReturnButton"));
+        auto *titleViewer = ui.find("missionHeaderTitleFullText"); QVERIFY(titleViewer);
+        QTRY_VERIFY(titleViewer->isVisible());
+        auto *titleToggle = ui.find("missionHeaderTitleFullTextToggle"); QVERIFY(titleToggle);
+        QVERIFY(QMetaObject::invokeMethod(titleToggle, "clicked"));
+        QTRY_VERIFY(titleViewer->property("expanded").toBool());
+        auto *titleLoader = ui.find("missionHeaderTitleFullTextLoader"); QVERIFY(titleLoader);
+        QTRY_VERIFY(titleLoader->property("item").value<QObject *>());
+        auto *loaded = qobject_cast<QQuickItem *>(titleLoader->property("item").value<QObject *>());
+        QVERIFY(loaded);
+        auto *fullText = ui.textItem(loaded, longRequest); QVERIFY(fullText);
+        QCOMPARE(fullText->property("text").toString(), longRequest);
+        QTRY_VERIFY(loaded->property("contentHeight").toReal() > loaded->height());
+        auto *titleCopy = ui.find("missionHeaderTitleFullTextCopy"); QVERIFY(titleCopy);
+        QVERIFY(QMetaObject::invokeMethod(titleCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longRequest);
+        auto *pathViewer = ui.find("missionRepositoryPathFullText"); QVERIFY(pathViewer);
+        QVERIFY(pathViewer->isVisible());
+        auto *pathCopy = ui.find("missionRepositoryPathFullTextCopy"); QVERIFY(pathCopy);
+        QVERIFY(QMetaObject::invokeMethod(pathCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longPath);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longTaskCenterInputsRemainReadableAndCopyable()
+    {
+        Fixture f; Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        ui.window->setWidth(900);
+        ui.window->setHeight(680);
+        QTRY_COMPARE(ui.window->width(), 900);
+        const QString longContext = QStringLiteral("来自自由聊天的所选上下文：")
+            + QStringLiteral("逐行说明需求和边界；").repeated(80);
+        const QString longRequest = QStringLiteral("请检查这条任务：")
+            + QStringLiteral("包含连续中文和长路径的完整正文").repeated(100);
+        const QString longPath = QStringLiteral("D:/Development/ForgePilot/")
+            + QStringLiteral("nested_repository_directory/").repeated(15);
+        QVERIFY(QMetaObject::invokeMethod(ui.window, "openTaskDraft", Q_ARG(QVariant, longRequest),
+            Q_ARG(QVariant, QString()), Q_ARG(QVariant, longContext)));
+        auto *taskCenterToggle = ui.find("workbenchTaskCenterToggle");
+        QVERIFY(taskCenterToggle);
+        auto *taskCenter = ui.find("missionTaskCenter");
+        QVERIFY(taskCenter);
+        if (!taskCenter->isVisible()) QVERIFY(ui.click("workbenchTaskCenterToggle"));
+        QTRY_VERIFY(taskCenter->isVisible());
+        auto *request = ui.find("missionRequestInput"); QVERIFY(request);
+        QTRY_COMPARE(request->property("text").toString(), longRequest);
+        auto *requestScroll = ui.find("missionRequestScroll"); QVERIFY(requestScroll);
+        QTRY_VERIFY(requestScroll->property("contentHeight").toReal() > requestScroll->height());
+        auto *context = ui.find("missionContextFull"); QVERIFY(context);
+        QCOMPARE(context->property("text").toString(), longContext);
+        auto *contextCopy = ui.find("missionContextFullCopy"); QVERIFY(contextCopy);
+        QVERIFY(QMetaObject::invokeMethod(contextCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longContext);
+        auto *repository = ui.find("missionRepositoryInput"); QVERIFY(repository);
+        repository->setProperty("text", longPath);
+        auto *path = ui.find("missionRepositoryInputFull"); QVERIFY(path);
+        QTRY_COMPARE(path->property("text").toString(), longPath);
+        auto *pathCopy = ui.find("missionRepositoryInputFullCopy"); QVERIFY(pathCopy);
+        QVERIFY(QMetaObject::invokeMethod(pathCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longPath);
+        auto *missionHeader = ui.find("missionHeader"); QVERIFY(missionHeader);
+        auto *details = ui.find("workbenchDetails"); QVERIFY(details);
+        QVERIFY(ui.click("workbenchDetailsToggle"));
+        QTRY_VERIFY(details->isVisible());
+        QTRY_VERIFY(details->mapToScene(QPointF(0, 0)).x()
+            >= taskCenter->mapToScene(QPointF(taskCenter->width(), 0)).x() - 1);
+        const auto taskRight = taskCenter->mapToScene(QPointF(taskCenter->width(), 0)).x();
+        const auto detailsLeft = details->mapToScene(QPointF(0, 0)).x();
+        QVERIFY(!missionHeader->isVisible());
+        QVERIFY2(taskRight <= detailsLeft + 1, "Task center must not overlap compact details");
+        QVERIFY2(detailsLeft + details->width() <= ui.window->width() + 1, "Details must stay inside the narrow window");
+        QVERIFY(ui.click("workbenchReturnButton"));
+        QTRY_VERIFY(missionHeader->isVisible());
+        const auto centerRight = missionHeader->mapToScene(QPointF(missionHeader->width(), 0)).x();
+        QVERIFY2(centerRight <= ui.window->width() + 1, "Wrapped mission content must stay inside the narrow window");
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void longGraphNodeAndDeliveryPathHaveFullTextActions()
+    {
+        Fixture f;
+        const QString longNode = QStringLiteral("node_") + QStringLiteral("very_long_agent_step_").repeated(12);
+        const QString longPath = QStringLiteral("D:/Development/ForgePilot/")
+            + QStringLiteral("nested_delivery_output/").repeated(14) + "result.patch";
+        auto snapshot = f.snapshots.value(MissionA);
+        snapshot["test_graph_node_id"] = longNode;
+        f.snapshots[MissionA] = snapshot;
+        auto items = f.artifacts.value("items").toArray();
+        for (int i = 0; i < items.size(); ++i) {
+            auto artifact = items[i].toObject();
+            if (artifact.value("artifact_type") != "DeliveryBundle") continue;
+            auto content = artifact.value("content").toObject();
+            content["changed_files"] = QJsonArray{longPath};
+            artifact["content"] = content;
+            items[i] = artifact;
+        }
+        f.artifacts["items"] = items;
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workbenchReturnButton"));
+        auto *nodeFull = ui.find("missionGraphNodeFull"); QVERIFY(nodeFull);
+        QCOMPARE(nodeFull->property("text").toString(), longNode);
+        auto *nodeCopy = ui.find("missionGraphNodeFullCopy"); QVERIFY(nodeCopy);
+        QVERIFY(QMetaObject::invokeMethod(nodeCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longNode);
+        QVERIFY(ui.click("workbenchDetailsToggle"));
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", 7);
+        auto *delivery = ui.find("missionDeliveryBundleDetails"); QVERIFY(delivery);
+        QTRY_VERIFY(delivery->property("text").toString().contains(longPath));
+        auto *deliveryCopy = ui.find("missionDeliveryBundleDetailsCopy"); QVERIFY(deliveryCopy);
+        QVERIFY(QMetaObject::invokeMethod(deliveryCopy, "clicked"));
+        QTRY_VERIFY(QGuiApplication::clipboard()->text().contains(longPath));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void modeSwitchLatencyBaseline()
@@ -296,6 +884,14 @@ private slots:
         QVERIFY2(summary.contains(".git/**"), qPrintable(summary));
         QVERIFY2(summary.contains("8") && summary.contains(ui.missions.approval()->review().value("task_spec_hash").toString()),
                  "Approval must show revision and frozen hashes");
+        auto *approvalFull = ui.find("missionApprovalFullDetails"); QVERIFY(approvalFull);
+        QCOMPARE(approvalFull->property("text").toString(), summary);
+        auto *approvalCopy = ui.find("missionApprovalFullDetailsCopy"); QVERIFY(approvalCopy);
+        QVERIFY(QMetaObject::invokeMethod(approvalCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), summary);
+        auto *approvalToggle = ui.find("missionApprovalFullDetailsToggle"); QVERIFY(approvalToggle);
+        QVERIFY(QMetaObject::invokeMethod(approvalToggle, "clicked"));
+        QTRY_VERIFY(!approvalFull->property("expanded").toBool());
         auto *approve = ui.find("missionApproveButton"); QVERIFY(approve);
         QVERIFY(approve->isEnabled());
         // The click must flow through QML; a second click cannot submit again.
@@ -304,6 +900,84 @@ private slots:
         QTRY_COMPARE(ui.missions.status(), QString("running"));
         QVERIFY(!approve->isEnabled());
         QCOMPARE(f.approvalPosts, 1);
+    }
+    void approvalNoticeTracksPackageChangesInsteadOfExecutionProgress()
+    {
+        Fixture f; Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *panel = ui.find("approvalPanel"); QVERIFY(panel);
+        QTRY_VERIFY(panel->property("changeNotice").toString().isEmpty());
+
+        auto next = f.snapshots.value(MissionA);
+        auto review = next.value("review").toObject();
+        next["status"] = "running";
+        next["current_revision"] = 9;
+        next["last_event_id"] = MissionA + ":9";
+        review["revision"] = 9;
+        next["review"] = review;
+        f.snapshots[MissionA] = next;
+        ui.missions.refresh();
+        QTRY_COMPARE(ui.missions.revision(), 9);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(panel->property("changeNotice").toString().isEmpty());
+
+        next["status"] = "awaiting_human";
+        next["current_revision"] = 10;
+        next["last_event_id"] = MissionA + ":10";
+        review["revision"] = 10;
+        review["plan_hash"] = QString(64, 'd');
+        next["review"] = review;
+        f.snapshots[MissionA] = next;
+        ui.missions.refresh();
+        QTRY_COMPARE(ui.missions.revision(), 10);
+        QTRY_VERIFY(panel->property("changeNotice").toString().contains("Plan Hash"));
+        QVERIFY(!ui.find("missionApproveButton")->isEnabled());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void deliveryShowsExportedArtifactPath_data()
+    {
+        QTest::addColumn<QString>("mode");
+        QTest::newRow("patch") << QString("patch");
+        QTest::newRow("bundle") << QString("bundle");
+    }
+    void deliveryShowsExportedArtifactPath()
+    {
+        QFETCH(QString, mode);
+        const QString exportedPath = "D:/demo/export." + mode;
+        Fixture f;
+        f.snapshots[MissionA] = mission(MissionA, "succeeded");
+        f.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/delivery")) return false;
+            QJsonObject result;
+            if (!r.body.contains("token")) {
+                result = {{"task_id", MissionA}, {"token", QString(64, 'f')}};
+            } else {
+                f.snapshots[MissionA] = mission(MissionA, "succeeded", 9);
+                result = {{"mode", mode}, {"branch", "forgepilot/task-demo"},
+                    {"commit", QString(40, 'a')}, {mode, QJsonObject{{"path", exportedPath},
+                        {"sha256", QString(64, 'b')}, {"size", 367}}}};
+            }
+            Source::json(r, {{"mission", f.snapshots.value(MissionA)}, {"delivery", result}});
+            return true;
+        };
+        Ui ui(f);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionA);
+        QTRY_VERIFY(ui.missions.synchronized());
+        auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
+        tabs->setProperty("currentIndex", 7);
+        auto *panel = ui.find("deliveryPanel"); QVERIFY(panel);
+        ui.missions.delivery()->prepare(mode);
+        QTRY_VERIFY(ui.missions.delivery()->canConfirm());
+        ui.missions.delivery()->confirm();
+        QTRY_COMPARE(ui.missions.delivery()->result().value("mode").toString(), mode);
+        QTRY_VERIFY(panel->property("resultDetails").toString().contains(exportedPath));
+        QVERIFY(panel->property("resultDetails").toString().contains("forgepilot/task-demo"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void activeMissionMustBeCancelledBeforeAbandon_data()
     {
@@ -569,7 +1243,7 @@ private slots:
     }
     void boundsDiffAndValidationText()
     {
-        Fixture f; Ui ui(f);
+        Fixture f; Ui ui(f, 860, 640);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("agentWorkbenchModeButton"));
         ui.missions.selectMission(MissionA);
@@ -582,18 +1256,20 @@ private slots:
             if (artifact.value("artifact_type") == "ValidationReport") report = artifact;
         }
         QVERIFY(!changeSet.isEmpty()); QVERIFY(!report.isEmpty());
-        const auto longPatch = QString("+diff line\n").repeated(3000);
+        const auto longPatch = (QString("+diff line ") + QString(160, 'x') + '\n').repeated(3000);
+        const auto longPath = QString("src/") + QString("deeply_nested_directory/").repeated(14) + "implementation.cpp";
         auto changeContent = changeSet.value("content").toObject();
         auto files = changeContent.value("files").toArray();
         QVERIFY(!files.isEmpty());
-        auto file = files.first().toObject(); file["unified_diff"] = longPatch; files[0] = file;
+        auto file = files.first().toObject(); file["unified_diff"] = longPatch; file["path"] = longPath; files[0] = file;
         changeContent["files"] = files; changeSet["content"] = changeContent;
         ui.missions.diff()->setSnapshot({{"task_id", MissionA}, {"patch", ""}, {"change_sets", QJsonArray{changeSet}}});
-        const auto longOutput = QString("log line\n").repeated(3000);
+        const auto longOutput = (QString("log line ") + QString(160, 'y') + '\n').repeated(3000);
+        const auto longCommand = QString("cmake --build ") + QString("very_deep_build_directory/").repeated(12);
         auto reportContent = report.value("content").toObject();
         auto commands = reportContent.value("commands").toArray();
         QVERIFY(!commands.isEmpty());
-        auto command = commands.first().toObject(); command["output_summary"] = longOutput; commands[0] = command;
+        auto command = commands.first().toObject(); command["output_summary"] = longOutput; command["command_summary"] = longCommand; commands[0] = command;
         reportContent["commands"] = commands; report["content"] = reportContent;
         ui.missions.validation()->setSnapshot({{"task_id", MissionA}, {"items", QJsonArray{report}}, {"latest", report}});
         auto *tabs = ui.find("workbenchDetailTabs"); QVERIFY(tabs);
@@ -608,9 +1284,32 @@ private slots:
         auto *diffText = ui.find("missionDiffText"); QVERIFY(diffText);
         QTRY_COMPARE(diffText->property("text").toString().size(), 12000);
         QCOMPARE(diffText->property("text").toString(), longPatch.left(12000));
+        auto *diffScroll = ui.find("missionDiffScroll"); QVERIFY(diffScroll);
+        QTRY_VERIFY(diffScroll->property("contentHeight").toReal() > diffScroll->height());
+        QTRY_VERIFY(diffScroll->property("contentWidth").toReal() > diffScroll->width());
+        auto *diffFlickable = qobject_cast<QQuickItem *>(
+            diffScroll->property("contentItem").value<QObject *>());
+        QVERIFY(diffFlickable);
+        QVERIFY(diffFlickable->setProperty("contentY", 100));
+        QVERIFY(diffFlickable->setProperty("contentX", 100));
+        QTRY_VERIFY(diffFlickable->property("contentY").toReal() > 0);
+        QTRY_VERIFY(diffFlickable->property("contentX").toReal() > 0);
+        auto *diffPath = ui.find("missionDiffPathFullText"); QVERIFY(diffPath);
+        QVERIFY(diffPath->property("text").toString().contains(longPath));
+        auto *diffPathCopy = ui.find("missionDiffPathFullTextCopy"); QVERIFY(diffPathCopy);
+        QVERIFY(QMetaObject::invokeMethod(diffPathCopy, "clicked"));
+        QTRY_VERIFY(QGuiApplication::clipboard()->text().contains(longPath));
+        auto *diffCopy = ui.find("missionDiffCopyButton"); QVERIFY(diffCopy);
+        QVERIFY(QMetaObject::invokeMethod(diffCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longPatch.left(12000));
         auto *more = ui.find("missionDiffMore"); QVERIFY(more); QVERIFY(more->isEnabled());
         QVERIFY(QMetaObject::invokeMethod(more, "clicked"));
         QTRY_COMPARE(diffText->property("text").toString(), longPatch.mid(12000, 12000));
+        const auto captureDir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+        if (!captureDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(captureDir));
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/long-diff-860x640.png"));
+        }
         tabs->setProperty("currentIndex", 5);
         QTRY_VERIFY(ui.find("missionValidationCommands"));
         QQuickItem *validationRow = nullptr;
@@ -620,6 +1319,26 @@ private slots:
             validationRow->mapToScene(QPointF(validationRow->width()/2, validationRow->height()/2)).toPoint());
         auto *output = ui.find("missionValidationOutput"); QVERIFY(output);
         QTRY_COMPARE(output->property("text").toString(), longOutput.left(12000));
+        auto *validationScroll = ui.find("missionValidationScroll"); QVERIFY(validationScroll);
+        QTRY_VERIFY(validationScroll->property("contentHeight").toReal() > validationScroll->height());
+        QTRY_VERIFY(validationScroll->property("contentWidth").toReal() > validationScroll->width());
+        auto *validationFlickable = qobject_cast<QQuickItem *>(
+            validationScroll->property("contentItem").value<QObject *>());
+        QVERIFY(validationFlickable);
+        QVERIFY(validationFlickable->setProperty("contentY", 100));
+        QVERIFY(validationFlickable->setProperty("contentX", 100));
+        QTRY_VERIFY(validationFlickable->property("contentY").toReal() > 0);
+        QTRY_VERIFY(validationFlickable->property("contentX").toReal() > 0);
+        auto *commandFull = ui.find("missionValidationCommandFull"); QVERIFY(commandFull);
+        QCOMPARE(commandFull->property("text").toString(), longCommand);
+        auto *commandCopy = ui.find("missionValidationCommandFullCopy"); QVERIFY(commandCopy);
+        QVERIFY(QMetaObject::invokeMethod(commandCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longCommand);
+        auto *logCopy = ui.find("missionValidationCopyButton"); QVERIFY(logCopy);
+        QVERIFY(QMetaObject::invokeMethod(logCopy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), longOutput.left(12000));
+        if (!captureDir.isEmpty())
+            QVERIFY(ui.window->grabWindow().save(captureDir + "/long-validation-860x640.png"));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void reconnectsWithoutLosingUiAndReportsBackendExit()

@@ -8,6 +8,7 @@ import "WorkbenchUi.js" as W
 
 Rectangle {
     id: root
+    objectName: "missionTaskCenter"
     required property var mission
     property var mcp: null
     property var rag: null
@@ -44,6 +45,8 @@ Rectangle {
         function onMissionChoicesChanged() { if (root.mcp.missionLoading || !root.mcp.missionChoices.length) root.selectedMcpIds = [] }
     }
     color: Theme.sidebar
+    border.color: Theme.border
+    border.width: 1
     implicitWidth: 244
     Component.onCompleted: {
         if (!mission.historyLoaded && !mission.historyLoading) mission.refreshMissions()
@@ -61,89 +64,53 @@ Rectangle {
     }
     FolderDialog { id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog; onAccepted: repositoryInput.text = root.mission.localPath(selectedFolder) }
     Controls.AppScrollView {
-        id: sidebarScroll; objectName: "missionTaskCenterScroll"
+        id: sidebarScroll
+        objectName: "missionTaskCenterScroll"
         anchors.fill: parent; clip: true; contentWidth: availableWidth
-        contentHeight: sidebarLayout.implicitHeight + 24
+        contentHeight: sidebarLayout.implicitHeight + Theme.spaceMd * 2
         ColumnLayout {
-        id: sidebarLayout; x: 12; y: 12
-        width: Math.max(0, sidebarScroll.availableWidth - 24); spacing: 10
-        Label { text: "任务中心"; font.pixelSize: 17; font.weight: Font.DemiBold }
-        Label { text: root.selectedContext || "创建任务仅使用下方文本与仓库路径。"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 11 }
-        TextArea { id: requestInput; objectName: "missionRequestInput"; Layout.fillWidth: true; Layout.preferredHeight: 94; wrapMode: TextEdit.Wrap; placeholderText: "描述 Agent 任务"; textFormat: TextEdit.PlainText }
-        TextField {
+        id: sidebarLayout
+        x: Theme.spaceMd; y: Theme.spaceMd
+        width: Math.max(0, sidebarScroll.availableWidth - Theme.spaceMd * 2)
+        spacing: Theme.spaceSm
+        Label { text: "任务中心"; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold }
+        Label {
+            id: contextPreview
+            objectName: "missionContextPreview"
+            text: root.selectedContext || "创建任务仅使用下方文本与仓库路径。"
+            color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+            maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText
+            font.pixelSize: Theme.fontSizeSm
+        }
+        Controls.LongText {
+            objectName: "missionContextFull"
+            visible: !!root.selectedContext && (contextPreview.truncated || root.selectedContext.length > 100)
+            Layout.fillWidth: true; title: "来源上下文"; text: root.selectedContext
+            monospace: false; maximumHeight: 170
+        }
+        Controls.AppScrollView {
+            objectName: "missionRequestScroll"
+            Layout.fillWidth: true; Layout.preferredHeight: 94; clip: true; contentWidth: availableWidth
+            Controls.AppTextArea {
+                id: requestInput; objectName: "missionRequestInput"
+                wrapMode: TextEdit.WrapAnywhere; placeholderText: "描述 Agent 任务"
+                textFormat: TextEdit.PlainText
+            }
+        }
+        Controls.AppTextField {
             id: repositoryInput; objectName: "missionRepositoryInput"; Layout.fillWidth: true
             placeholderText: "本地仓库绝对路径"
             onTextChanged: root.resetBaseline()
         }
+        Controls.LongText {
+            objectName: "missionRepositoryInputFull"
+            visible: repositoryInput.text.length > 30
+            Layout.fillWidth: true; title: "完整仓库路径"; text: repositoryInput.text
+            maximumHeight: 150
+        }
         Controls.ActionButton { text: "选择仓库…"; Layout.fillWidth: true; onClicked: folder.open() }
-        ComboBox { id: kind; Layout.fillWidth: true; model: ["自动判断", "修复缺陷", "实现功能"]; Accessible.name: "任务类型" }
-        Controls.ActionButton {
-            objectName: "missionCreateButton"; text: root.mission.busy ? "创建中…" : "创建 Agent 任务"; highlighted: true; Layout.fillWidth: true
-            enabled: !root.mission.busy && root.mission.creationReady && !!requestInput.text.trim()
-                && !!repositoryInput.text.trim() && (!root.baselinePaths.length || baselineConfirmation.checked)
-            onClicked: root.submitMission()
-        }
-        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
-        Label { text: "打开任务 ID"; color: Theme.secondary }
-        RowLayout { Layout.fillWidth: true
-            TextField { id: taskIdInput; objectName: "missionIdInput"; Layout.fillWidth: true; placeholderText: "UUID" }
-            Controls.ActionButton { text: "打开"; enabled: !!taskIdInput.text.trim(); onClicked: root.mission.selectMission(taskIdInput.text.trim()) }
-        }
-        RowLayout {
-            Layout.fillWidth: true; Layout.topMargin: 8
-            Label { text: "任务历史"; color: Theme.text; font.weight: Font.DemiBold; Layout.fillWidth: true }
-            Controls.ActionButton {
-                objectName: "missionHistoryRefresh"; text: "刷新"
-                enabled: !root.mission.historyLoading; onClicked: root.mission.refreshMissions()
-            }
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            TextField {
-                id: repositoryFilterInput; objectName: "missionRepositoryFilter"
-                Layout.fillWidth: true; placeholderText: "按仓库路径筛选（留空为全部）"
-                text: root.mission.repositoryFilter
-                onAccepted: root.mission.repositoryFilter = text
-            }
-            Controls.ActionButton { objectName: "missionApplyRepositoryFilter"; text: "筛选"; onClicked: root.mission.repositoryFilter = repositoryFilterInput.text }
-        }
-        ComboBox {
-            id: statusFilterInput; objectName: "missionStatusFilter"; Layout.fillWidth: true
-            property var values: ["", "pending", "ready", "running", "awaiting_human", "interrupted", "retryable", "succeeded", "failed", "cancelled", "skipped"]
-            model: ["全部状态", "待执行", "已就绪", "执行中", "等待确认", "已中断", "可重试", "已成功", "失败", "已取消", "已跳过"]
-            Accessible.name: "按任务状态筛选"
-            currentIndex: Math.max(0, values.indexOf(root.mission.statusFilter))
-            onActivated: root.mission.statusFilter = values[currentIndex]
-        }
-        Label {
-            objectName: "missionHistoryError"; visible: !!root.mission.historyError
-            text: root.mission.historyError; color: Theme.danger; textFormat: Text.PlainText
-            Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
-        }
-        Label {
-            objectName: "missionHistoryStatus"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap
-            text: root.mission.historyLoading ? "正在读取任务历史…"
-                : root.mission.missions.count ? "已显示 " + root.mission.missions.count + " / " + root.mission.historyTotal + " 个任务"
-                : root.mission.historyError ? "读取失败，请刷新重试。" : "暂无符合条件的任务。"
-        }
-        ListView {
-            id: taskList; objectName: "missionTaskList"; Layout.fillWidth: true; clip: true
-            Layout.preferredHeight: Math.min(260, Math.max(100, contentHeight + 8))
-            model: root.mission.missions; spacing: 5
-            delegate: Controls.ActionButton {
-                required property var record
-                property string taskId: record.taskId
-                objectName: "missionTaskRow"
-                width: taskList.width; height: 62; checked: record.taskId === root.mission.taskId
-                Accessible.name: "选择任务：" + (record.request || record.taskId) + "，" + W.label(record.status)
-                onClicked: root.mission.selectMission(record.taskId)
-                contentItem: Column {
-                    spacing: 3
-                    Label { width: parent.width; text: record.request || record.taskId; elide: Text.ElideRight; textFormat: Text.PlainText; font.weight: Font.DemiBold }
-                    Label { width: parent.width; text: W.icon(record.status) + " " + W.label(record.status) + " · " + (record.repositoryPath || ""); elide: Text.ElideMiddle; color: W.color(record.status); font.pixelSize: 11 }
-                }
-            }
-            ScrollBar.vertical: Controls.AppScrollBar {}
+        Controls.AppComboBox {
+            id: kind; Layout.fillWidth: true; model: ["自动判断", "修复缺陷", "实现功能"]; Accessible.name: "任务类型"
         }
         CheckBox {
             id: useRag; objectName: "missionUseRag"; text: "本次任务使用代码索引（RAG）"
@@ -275,11 +242,111 @@ Rectangle {
             }
         }
         Controls.ActionButton {
+            objectName: "missionCreateButton"; text: root.mission.busy ? "创建中…" : "创建 Agent 任务"; highlighted: true; Layout.fillWidth: true
+            enabled: !root.mission.busy && root.mission.creationReady && !!requestInput.text.trim()
+                && !!repositoryInput.text.trim() && (!root.baselinePaths.length || baselineConfirmation.checked)
+            onClicked: root.submitMission()
+        }
+        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
+        Label { text: "打开任务 ID"; color: Theme.secondary }
+        RowLayout { Layout.fillWidth: true
+            Controls.AppTextField { id: taskIdInput; objectName: "missionIdInput"; Layout.fillWidth: true; placeholderText: "UUID" }
+            Controls.ActionButton { text: "打开"; enabled: !!taskIdInput.text.trim(); onClicked: root.mission.selectMission(taskIdInput.text.trim()) }
+        }
+        RowLayout {
+            Layout.fillWidth: true; Layout.topMargin: 8
+            Label { text: "任务历史"; color: Theme.text; font.weight: Font.DemiBold; Layout.fillWidth: true }
+            Controls.ActionButton {
+                objectName: "missionHistoryRefresh"; text: "刷新"
+                enabled: !root.mission.historyLoading; onClicked: root.mission.refreshMissions()
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            TextField {
+                id: repositoryFilterInput; objectName: "missionRepositoryFilter"
+                Layout.fillWidth: true; placeholderText: "按仓库路径筛选（留空为全部）"
+                text: root.mission.repositoryFilter
+                onAccepted: root.mission.repositoryFilter = text
+            }
+            Controls.ActionButton { objectName: "missionApplyRepositoryFilter"; text: "筛选"; onClicked: root.mission.repositoryFilter = repositoryFilterInput.text }
+        }
+        ComboBox {
+            id: statusFilterInput; objectName: "missionStatusFilter"; Layout.fillWidth: true
+            property var values: ["", "pending", "ready", "running", "awaiting_human", "interrupted", "retryable", "succeeded", "failed", "cancelled", "skipped"]
+            model: ["全部状态", "待执行", "已就绪", "执行中", "等待确认", "已中断", "可重试", "已成功", "失败", "已取消", "已跳过"]
+            Accessible.name: "按任务状态筛选"
+            currentIndex: Math.max(0, values.indexOf(root.mission.statusFilter))
+            onActivated: root.mission.statusFilter = values[currentIndex]
+        }
+        Label {
+            objectName: "missionHistoryError"; visible: !!root.mission.historyError
+            text: root.mission.historyError; color: Theme.danger; textFormat: Text.PlainText
+            Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+        }
+        Label {
+            objectName: "missionHistoryStatus"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap
+            text: root.mission.historyLoading ? "正在读取任务历史…"
+                : root.mission.missions.count ? "已显示 " + root.mission.missions.count + " / " + root.mission.historyTotal + " 个任务"
+                : root.mission.historyError ? "读取失败，请刷新重试。" : "暂无符合条件的任务。"
+        }
+        ListView {
+            id: taskList; objectName: "missionTaskList"
+            Layout.fillWidth: true; Layout.preferredHeight: Math.min(260, Math.max(100, contentHeight + Theme.spaceSm))
+            clip: true; model: root.mission.missions; spacing: Theme.spaceSm
+            delegate: ColumnLayout {
+                id: taskEntry
+                required property var record
+                property string taskId: record.taskId
+                width: taskList.width; spacing: Theme.spaceXs
+                Controls.ActionButton {
+                    id: selectTask
+                    objectName: "missionTaskRow"
+                    property string taskId: taskEntry.taskId
+                    Layout.fillWidth: true
+                    implicitHeight: Math.max(Theme.controlHeight, taskSummary.implicitHeight + taskMetadata.implicitHeight + Theme.spaceSm * 2 + Theme.spaceXs)
+                    checked: taskEntry.record.taskId === root.mission.taskId
+                    Accessible.name: "选择任务：" + (taskEntry.record.request || taskEntry.record.taskId) + "，" + W.label(taskEntry.record.status)
+                    onClicked: root.mission.selectMission(taskEntry.record.taskId)
+                    contentItem: Column {
+                        spacing: Theme.spaceXs
+                        Label {
+                            id: taskSummary
+                            objectName: "missionTaskPreview"
+                            width: parent.width; text: taskEntry.record.request || taskEntry.record.taskId
+                            wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
+                            textFormat: Text.PlainText; font.weight: Font.DemiBold; color: Theme.text
+                        }
+                        Label {
+                            id: taskMetadata
+                            objectName: "missionTaskMetadataPreview"
+                            width: parent.width
+                            text: W.icon(taskEntry.record.status) + " " + W.label(taskEntry.record.status) + " · " + (taskEntry.record.repositoryPath || "")
+                            wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
+                            textFormat: Text.PlainText; color: W.color(taskEntry.record.status); font.pixelSize: Theme.fontSizeSm
+                        }
+                    }
+                }
+                Controls.LongText {
+                    objectName: "missionTaskFull"
+                    visible: taskSummary.truncated || taskMetadata.truncated
+                        || (taskEntry.record.request || "").length > 60 || (taskEntry.record.repositoryPath || "").length > 30
+                    Layout.fillWidth: true; title: "任务标题、状态和路径"
+                    text: "任务：" + (taskEntry.record.request || taskEntry.record.taskId)
+                        + "\n状态：" + W.label(taskEntry.record.status)
+                        + "\n仓库：" + (taskEntry.record.repositoryPath || "—")
+                        + "\n任务 ID：" + taskEntry.record.taskId
+                    monospace: false; maximumHeight: 180
+                }
+            }
+            ScrollBar.vertical: Controls.AppScrollBar {}
+        }
+        Controls.ActionButton {
             objectName: "missionHistoryLoadMore"; text: root.mission.historyLoading ? "读取中…" : "加载更多"
             visible: root.mission.historyHasMore; enabled: !root.mission.historyLoading
             Layout.fillWidth: true; onClicked: root.mission.loadMoreMissions()
         }
-        Label { text: "打开历史只查看状态；中断任务需确认恢复计划后才能继续。"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 10; color: Theme.muted }
+        Label { text: "打开历史只查看状态；中断任务需确认恢复计划后才能继续。"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: Theme.fontSizeXs; color: Theme.muted }
         }
     }
 }

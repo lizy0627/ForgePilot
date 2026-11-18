@@ -10,8 +10,8 @@ AppScrollView {
     property bool testsOnly: false
     clip: true; contentWidth: availableWidth
     ColumnLayout {
-        width: root.availableWidth; spacing: 10
-        Label { visible: !root.controller.buildReports.length; text: root.testsOnly ? "测试 · 未运行" : "配置 · 未运行    /    构建 · 未运行"; color: Theme.muted; padding: 16 }
+        width: root.availableWidth; spacing: Theme.spaceMd
+        Label { visible: !root.controller.buildReports.length; text: root.testsOnly ? "测试 · 未运行" : "配置 · 未运行    /    构建 · 未运行"; color: Theme.muted; padding: Theme.spaceLg }
         Repeater {
             model: root.controller.buildReports
             delegate: Panel {
@@ -25,7 +25,7 @@ AppScrollView {
                     delegate: ColumnLayout {
                         id: stage
                         required property var modelData
-                        Layout.fillWidth: true; spacing: 4
+                        Layout.fillWidth: true; spacing: Theme.spaceXs
                         RowLayout {
                             Layout.fillWidth: true
                             Label { text: stage.modelData.phase === "cmake_configure" ? "配置" : stage.modelData.phase === "cmake_build" ? "构建" : "测试"; font.bold: true; color: Theme.text }

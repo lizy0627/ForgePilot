@@ -4,9 +4,14 @@ import QtQuick.Controls
 import "Ui.js" as Ui
 
 Label {
+    id: badge
     property string status: ""
     text: Ui.status(status); color: Ui.color(status)
-    font.pixelSize: 12; font.bold: true
-    padding: 5; leftPadding: 8; rightPadding: 8
-    background: Rectangle { radius: 5; color: Qt.rgba(parent.color.r,parent.color.g,parent.color.b,0.08) }
+    font.family: Theme.fontFamily; font.pixelSize: Theme.fontSizeSm; font.weight: Font.DemiBold
+    padding: Theme.spaceXs; leftPadding: Theme.spaceSm; rightPadding: Theme.spaceSm
+    background: Rectangle {
+        radius: Theme.radiusSm
+        color: Qt.rgba(badge.color.r, badge.color.g, badge.color.b, 0.13)
+        border.color: Qt.rgba(badge.color.r, badge.color.g, badge.color.b, 0.4)
+    }
 }

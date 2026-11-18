@@ -28,7 +28,7 @@ Palette {
         windowText: Theme.disabledText
         buttonText: Theme.disabledText
         brightText: Theme.disabledText
-        base: Theme.input
+        base: Theme.disabled
         button: Theme.disabled
         highlight: Theme.disabled
         highlightedText: Theme.disabledText

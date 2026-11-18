@@ -19,6 +19,7 @@ class McpController : public QObject {
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(bool disabled READ disabled NOTIFY changed)
+    Q_PROPERTY(bool statusKnown READ statusKnown NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QString notice READ notice NOTIFY changed)
     Q_PROPERTY(bool editorOpen READ editorOpen NOTIFY editorChanged)
@@ -46,6 +47,7 @@ public:
     bool loading() const { return m_loading; }
     bool busy() const { return m_busy; }
     bool disabled() const { return m_disabled; }
+    bool statusKnown() const { return m_statusKnown; }
     QString error() const { return m_error; }
     QString notice() const { return m_notice; }
     bool editorOpen() const { return m_editorOpen; }
@@ -110,7 +112,7 @@ private:
     QNetworkAccessManager m_network;
     QSet<QNetworkReply *> m_pageReplies, m_editorReplies;
     quint64 m_generation = 0, m_editorGeneration = 0;
-    bool m_open = false, m_loading = false, m_busy = false, m_disabled = true;
+    bool m_open = false, m_loading = false, m_busy = false, m_disabled = true, m_statusKnown = false;
     bool m_editorOpen = false, m_editorLoading = false, m_uncertain = false, m_recoveryConflict = false;
     QVariantList m_missionChoices;
     QSet<QNetworkReply *> m_missionReplies;

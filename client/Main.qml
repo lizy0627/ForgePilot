@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import "panels"
@@ -29,12 +30,16 @@ ApplicationWindow {
     property string previousConversationMode: "chat"
     property bool previousHistoryReadOnly: false
     readonly property bool workMode: conversations.mode === "task"
-    readonly property bool sidebarShown: sidebarExpanded && (!detailsExpanded || width >= 1280)
+    readonly property bool compactChat: width < 1180
+    readonly property bool compactWorkDetails: detailsExpanded && width < 1240
+    readonly property bool sidebarShown: !compactChat && sidebarExpanded && (!detailsExpanded || width >= 1280)
     objectName: "forgePilotWindow"
-    width: 1320; height: 900; minimumWidth: 860; minimumHeight: 640
+    width: Math.max(860, Math.min(1320, Screen.desktopAvailableWidth - Theme.spaceLg * 2))
+    height: Math.max(640, Math.min(900, Screen.desktopAvailableHeight - Theme.spaceLg * 2))
+    minimumWidth: 860; minimumHeight: 640
     visible: true; title: "ForgePilot"; color: Theme.background
     onClosing: function(close) { if (window.mcp && !window.mcp.canCloseEditor) close.accepted = false }
-    font.family: "Microsoft YaHei UI"; font.pixelSize: 13
+    font.family: Theme.fontFamily; font.pixelSize: Theme.fontSizeMd
     palette: DarkPalette {}
     Component.onCompleted: {
         conversations.refreshHistory()
@@ -51,6 +56,8 @@ ApplicationWindow {
         }
     }
     RuntimeConfigDialog { id: runtimeConfigDialog; controller: window.runtimeConfig }
+    onCompactChatChanged: if (!compactChat) compactSidebarPopup.close()
+    onAgentModeChanged: if (agentMode) compactSidebarPopup.close()
     Connections {
         target: controller
         function onTaskFinished(state) { controller.refreshTasks() }
@@ -66,7 +73,7 @@ ApplicationWindow {
         function onCodeTaskRequested(prompt, repositoryPath) {
             window.openTaskDraft(prompt, repositoryPath, "来自旧工作入口；仅使用当前输入，请确认任务基线。")
         }
-        function onSelectionChanged() { window.detailsExpanded = false }
+        function onSelectionChanged() { window.detailsExpanded = false; compactSidebarPopup.close() }
         function onChanged() {
             if (window.conversations.mode !== window.previousConversationMode) {
                 window.previousConversationMode = window.conversations.mode
@@ -78,17 +85,22 @@ ApplicationWindow {
         id: modeBar; objectName: "mainModeBar"
         visible: !!window.missions
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        height: 55; color: Theme.panel; border.color: Theme.border; z: 2
+        height: 62; color: Theme.panel; border.color: Theme.border; z: 2
         RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 18; spacing: 8
-            Label { text: "ForgePilot"; font.pixelSize: 17; font.weight: Font.DemiBold; Layout.rightMargin: 22 }
+            anchors.fill: parent; anchors.leftMargin: Theme.spaceLg; anchors.rightMargin: Theme.spaceLg; spacing: Theme.spaceSm
+            Rectangle {
+                Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: Theme.radiusSm
+                color: Theme.accentSubtle; border.color: Theme.accentBorder
+                Label { anchors.centerIn: parent; text: "F"; color: Theme.accent; font.pixelSize: Theme.fontSizeLg; font.weight: Font.Bold }
+            }
+            Label { text: "ForgePilot"; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold; Layout.rightMargin: Theme.spaceLg }
             ActionButton { objectName: "freeChatModeButton"; text: "自由聊天"; checked: !window.agentMode; Accessible.name: "自由聊天模式"; Accessible.checkable: true; Accessible.checked: checked
                 onClicked: { window.agentMode = false; window.conversations.mode = "chat" } }
             ActionButton { objectName: "agentWorkbenchModeButton"; text: "Agent 工作台"; checked: window.agentMode; Accessible.name: "Agent 工作台模式"; Accessible.checkable: true; Accessible.checked: checked
                 onClicked: { window.agentMode = true; window.conversations.mode = "chat" } }
             Item { Layout.fillWidth: true }
             ActionButton { objectName: "workbenchSettingsButton"; text: "设置"; flat: true; visible: window.agentMode; onClicked: settingsDialog.open() }
-            Label { text: window.agentMode ? "Mission Control" : "只读问答 · 不执行代码修改"; color: Theme.muted; font.pixelSize: 11 }
+            Label { visible: window.width >= 1080; text: window.agentMode ? "任务总览" : "只读问答 · 不执行代码修改"; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm }
         }
     }
     RowLayout {
@@ -96,40 +108,70 @@ ApplicationWindow {
         anchors.top: modeBar.visible ? modeBar.bottom : parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; spacing: 0
         Rectangle {
             id: sidebar; objectName: "conversationSidebar"
-            visible: window.sidebarShown; Layout.preferredWidth: 224; Layout.fillHeight: true; color: Theme.sidebar
+            visible: window.sidebarShown
+            Layout.preferredWidth: window.sidebarShown ? 232 : 0; Layout.minimumWidth: 0
+            Layout.fillHeight: true; color: Theme.sidebar; border.color: Theme.border
             ColumnLayout {
-                anchors.fill: parent; anchors.margins: 14; spacing: 12
-                Label { text: "ForgePilot"; font.pixelSize: 19; font.weight: Font.DemiBold; Layout.topMargin: 7; Layout.leftMargin: 10; Layout.bottomMargin: 12 }
+                anchors.fill: parent; anchors.margins: Theme.spaceMd; spacing: Theme.spaceMd
+                Label { visible: !modeBar.visible; text: "ForgePilot"; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold; Layout.topMargin: Theme.spaceSm; Layout.leftMargin: Theme.spaceSm; Layout.bottomMargin: Theme.spaceMd }
                 ActionButton {
-                    objectName: "newTaskButton"; text: "＋  新对话"; flat: true
+                    objectName: "newTaskButton"; text: "＋  新对话"; highlighted: true
                     Layout.fillWidth: true; Layout.preferredHeight: 42
                     enabled: !conversations.busy
                     onClicked: conversations.newConversation()
                 }
-                ConversationHistoryPanel {
-                    conversations: window.conversations; Layout.fillWidth: true; Layout.fillHeight: true
+                Loader {
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    active: !window.compactChat
+                    sourceComponent: ConversationHistoryPanel { conversations: window.conversations }
                 }
                 Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
                 RowLayout {
-                    Layout.fillWidth: true; spacing: 4
+                    Layout.fillWidth: true; spacing: Theme.spaceXs
                     ActionButton { objectName: "settingsButton"; text: "设置"; flat: true; Layout.fillWidth: true; onClicked: settingsDialog.open() }
                     ActionButton { objectName: "memoryManagerButton"; text: "记忆"; flat: true; Layout.fillWidth: true; onClicked: memoryDialog.open() }
                 }
-                Label { text: conversations.serverStatus === "connected" ? "●  已连接本机服务" : "○  本机服务未连接"; color: Theme.muted; font.pixelSize: 11; Layout.leftMargin: 10; Layout.bottomMargin: 2 }
+                Label { text: conversations.serverStatus === "connected" ? "●  已连接本机服务" : "○  本机服务未连接"; color: conversations.serverStatus === "connected" ? Theme.success : Theme.warning; font.pixelSize: Theme.fontSizeSm; Layout.leftMargin: Theme.spaceSm; Layout.bottomMargin: Theme.spaceXs }
             }
         }
         ColumnLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
-            Item {
-                Layout.fillWidth: true; Layout.preferredHeight: 72
+            Layout.fillWidth: true; Layout.fillHeight: true
+            Layout.minimumWidth: 0; Layout.minimumHeight: 0; spacing: 0
+            Rectangle {
+                Layout.fillWidth: true; Layout.preferredHeight: 72; color: Theme.background; border.color: Theme.border
                 RowLayout {
-                    anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 22; spacing: 12
+                    anchors.fill: parent; anchors.leftMargin: Theme.spaceLg; anchors.rightMargin: Theme.spaceLg; spacing: Theme.spaceMd
                     ActionButton {
-                        objectName: "sidebarToggle"; text: "☰"; flat: true; horizontalPadding: 0; Layout.preferredWidth: 36; font.pixelSize: 18
-                        Accessible.name: "切换侧边栏"; ToolTip.visible: hovered; ToolTip.text: "切换侧边栏"
-                        onClicked: { var show = !window.sidebarShown; if (window.detailsExpanded && window.width < 1280) window.detailsExpanded = false; window.sidebarExpanded = show }
+                        objectName: "sidebarToggle"; text: "☰"; flat: true; horizontalPadding: 0; Layout.preferredWidth: 36; font.pixelSize: Theme.fontSizeLg
+                        Accessible.name: window.compactChat ? "历史与设置" : "切换侧边栏"
+                        ToolTip.visible: hovered; ToolTip.text: Accessible.name
+                        onClicked: {
+                            if (window.compactChat) {
+                                if (compactSidebarPopup.opened) compactSidebarPopup.close()
+                                else compactSidebarPopup.open()
+                            } else {
+                                var show = !window.sidebarShown
+                                if (window.detailsExpanded && window.width < 1280) window.detailsExpanded = false
+                                window.sidebarExpanded = show
+                            }
+                        }
                     }
-                    Label { text: conversations.conversationId ? conversations.title : "ForgePilot"; textFormat: Text.PlainText; font.pixelSize: 15; color: Theme.secondary; Layout.fillWidth: true; elide: Text.ElideRight }
+                    Label {
+                        id: conversationTitlePreview
+                        text: conversations.conversationId ? conversations.title : "自由聊天"
+                        textFormat: Text.PlainText; font.pixelSize: Theme.fontSizeLg; color: Theme.text
+                        font.weight: Font.DemiBold; Layout.fillWidth: true; Layout.minimumWidth: 0
+                        wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
+                    }
+                    ActionButton {
+                        objectName: "conversationTitleDetailsButton"
+                        text: "标题全文"; flat: true
+                        visible: !!conversations.conversationId
+                        onClicked: conversationTitleDialog.open()
+                    }
+                    ActionButton { objectName: "compactHistoryButton"; text: "历史"; flat: true; visible: window.compactChat; Layout.preferredWidth: 64; horizontalPadding: Theme.spaceSm; onClicked: compactSidebarPopup.open() }
+                    ActionButton { objectName: "compactSettingsButton"; text: "设置"; flat: true; visible: window.compactChat; Layout.preferredWidth: 64; horizontalPadding: Theme.spaceSm; onClicked: settingsDialog.open() }
+                    ActionButton { objectName: "compactMemoryButton"; text: "记忆"; flat: true; visible: window.compactChat; Layout.preferredWidth: 64; horizontalPadding: Theme.spaceSm; onClicked: memoryDialog.open() }
                     ActionButton { objectName: "compactNewConversationButton"; text: "＋"; flat: true; visible: !window.sidebarShown; Accessible.name: "新对话"; Layout.preferredWidth: 36; horizontalPadding: 0; onClicked: conversations.newConversation() }
                     ActionButton { objectName: "detailsToggle"; text: window.detailsExpanded ? "收起详情" : "工作详情"; flat: true; visible: window.workMode || conversations.activeMode === "task"; onClicked: window.detailsExpanded = !window.detailsExpanded }
                 }
@@ -137,9 +179,9 @@ ApplicationWindow {
             Rectangle {
                 visible: !window.missions
                 Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 184; Layout.preferredHeight: 44; Layout.bottomMargin: 10
-                color: Theme.raised; radius: 22
+                color: Theme.raised; radius: Theme.radiusLg
                 Row {
-                    anchors.centerIn: parent; spacing: 4
+                    anchors.centerIn: parent; spacing: Theme.spaceXs
                     Repeater {
                         model: [{mode: "chat", label: "问答"}, {mode: "task", label: "工作"}]
                         delegate: Button {
@@ -151,38 +193,41 @@ ApplicationWindow {
                             Accessible.name: modelData.label + "模式"; Accessible.checkable: true; Accessible.checked: checked
                             onClicked: window.conversations.mode = modelData.mode
                             contentItem: Label { text: modeButton.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; color: modeButton.checked ? Theme.text : Theme.secondary; font.weight: modeButton.checked ? Font.DemiBold : Font.Normal }
-                            background: Rectangle { radius: 18; color: modeButton.checked ? Theme.panel : modeButton.hovered ? Theme.hover : "transparent"; border.color: modeButton.visualFocus ? Theme.accent : "transparent" }
+                            background: Rectangle { radius: Theme.radiusLg; color: modeButton.checked ? Theme.panel : modeButton.hovered ? Theme.hover : Theme.transparent; border.width: modeButton.visualFocus ? 2 : 1; border.color: modeButton.visualFocus ? Theme.focusRing : Theme.transparent }
                         }
                     }
                 }
             }
             ColumnLayout {
-                Layout.fillWidth: true; Layout.fillHeight: false; Layout.leftMargin: 24; Layout.rightMargin: 24; spacing: 6
-                Label { visible: developmentTest; text: "开发测试 · 离线模型"; color: Theme.warning; font.pixelSize: 11 }
+                Layout.fillWidth: true; Layout.fillHeight: false; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg; spacing: Theme.spaceSm
+                Label { visible: developmentTest; text: "开发测试 · 离线模型"; color: Theme.warning; font.pixelSize: Theme.fontSizeSm }
                 RowLayout {
                     visible: !!window.conversations.error; Layout.fillWidth: true
-                    Label { text: window.conversations.error; color: Theme.danger; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight }
+                    Label { text: window.conversations.error; color: Theme.danger; textFormat: Text.PlainText; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight }
                     ActionButton { objectName: "conversationErrorDetailsButton"; text: "查看详情"; flat: true; onClicked: conversationErrorDialog.open() }
                     ActionButton { text: "×"; flat: true; horizontalPadding: 8; onClicked: window.conversations.clearError() }
                 }
                 RowLayout {
                     visible: !!controller.error; Layout.fillWidth: true
-                    Label { objectName: "errorMessage"; text: controller.error; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: Theme.danger; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight }
+                    Label { objectName: "errorMessage"; text: controller.error; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: Theme.danger; Layout.fillWidth: true; Layout.minimumWidth: 0; maximumLineCount: 2; elide: Text.ElideRight }
                     ActionButton { objectName: "errorDetailsButton"; text: "查看详情"; flat: true; onClicked: errorDialog.open() }
                     ActionButton { text: "×"; flat: true; horizontalPadding: 8; onClicked: controller.clearError() }
                 }
                 RowLayout {
                     visible: !!controller.connectionWarning || controller.connectionState === "reconnecting"; Layout.fillWidth: true
-                    Label { objectName: "connectionWarning"; text: "任务连接中断，可重连后继续查看。"; color: Theme.warning; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { objectName: "connectionWarning"; text: "任务连接中断，可重连后继续查看。"; color: Theme.warning; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap }
                     ActionButton { text: "重连"; onClicked: controller.reconnectEvents() }
                     ActionButton { text: "刷新状态"; onClicked: controller.refreshTask() }
                 }
             }
             RowLayout {
-                Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
+                Layout.fillWidth: true; Layout.fillHeight: true
+                Layout.minimumWidth: 0; Layout.minimumHeight: 0; spacing: 0
                 ConversationPanel {
                     conversations: window.conversations; controller: window.controller
-                    Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
+                    visible: !window.compactWorkDetails
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.minimumWidth: 0; Layout.minimumHeight: 0
                     onOpenWorkDetails: { window.conversations.showActiveTask(); window.detailsExpanded = true }
                     onConvertToAgentTask: function(selectedText, sourceLabel) {
                         window.openTaskDraft(selectedText, "", sourceLabel + "；仅发送所选文本，需另行指定仓库。")
@@ -190,12 +235,14 @@ ApplicationWindow {
                 }
                 Rectangle {
                     objectName: "workDetailsPanel"; visible: window.detailsExpanded
-                    Layout.preferredWidth: Math.min(460, window.width * 0.43); Layout.fillHeight: true; color: Theme.sidebar
+                    Layout.preferredWidth: window.compactWorkDetails ? -1 : Math.min(460, window.width * 0.43)
+                    Layout.fillWidth: window.compactWorkDetails; Layout.fillHeight: true; Layout.minimumWidth: 0
+                    color: Theme.sidebar; border.color: Theme.border
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 12; spacing: 10
+                        anchors.fill: parent; anchors.margins: Theme.spaceMd; spacing: Theme.spaceSm
                         RowLayout {
                             Layout.fillWidth: true
-                            Label { text: controller.canApprove ? "请确认本次工作方案" : "工作详情"; font.weight: Font.DemiBold; font.pixelSize: 16; Layout.fillWidth: true }
+                            Label { text: controller.canApprove ? "请确认本次工作方案" : "工作详情"; font.weight: Font.DemiBold; font.pixelSize: Theme.fontSizeLg; Layout.fillWidth: true }
                             ActionButton { text: "×"; flat: true; horizontalPadding: 6; Accessible.name: "关闭工作详情"; onClicked: window.detailsExpanded = false }
                         }
                         RowLayout {
@@ -230,11 +277,50 @@ ApplicationWindow {
                             }
                             AppScrollView {
                                 id: projectScroll; clip: true; contentWidth: availableWidth
-                                ColumnLayout { width: projectScroll.availableWidth; spacing: 12; RepositoryPanel { controller: window.controller; Layout.fillWidth: true } TaskHistoryPanel { title: "工作记录"; controller: window.controller; Layout.fillWidth: true } }
+                                ColumnLayout { width: projectScroll.availableWidth; spacing: Theme.spaceMd; RepositoryPanel { controller: window.controller; Layout.fillWidth: true } TaskHistoryPanel { title: "工作记录"; controller: window.controller; Layout.fillWidth: true } }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+    Popup {
+        id: compactSidebarPopup; objectName: "compactSidebarPopup"
+        parent: Overlay.overlay
+        x: 0; y: modeBar.visible ? modeBar.height : 0
+        width: Math.min(300, window.width - Theme.spaceLg * 2)
+        height: window.height - y
+        modal: true; focus: true; padding: Theme.spaceMd
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle { color: Theme.sidebar; border.color: Theme.border }
+        contentItem: ColumnLayout {
+            spacing: Theme.spaceMd
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: "历史与设置"; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                ActionButton { text: "×"; flat: true; Accessible.name: "关闭历史与设置"; onClicked: compactSidebarPopup.close() }
+            }
+            ActionButton {
+                objectName: "compactNewTaskButton"; text: "＋  新对话"; highlighted: true
+                Layout.fillWidth: true; enabled: !window.conversations.busy
+                onClicked: { compactSidebarPopup.close(); window.conversations.newConversation() }
+            }
+            Loader {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                active: window.compactChat
+                sourceComponent: ConversationHistoryPanel { conversations: window.conversations }
+            }
+            Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
+            RowLayout {
+                Layout.fillWidth: true; spacing: Theme.spaceXs
+                ActionButton { text: "设置"; flat: true; Layout.fillWidth: true; onClicked: { compactSidebarPopup.close(); settingsDialog.open() } }
+                ActionButton { text: "记忆"; flat: true; Layout.fillWidth: true; onClicked: { compactSidebarPopup.close(); memoryDialog.open() } }
+            }
+            Label {
+                text: window.conversations.serverStatus === "connected" ? "●  已连接本机服务" : "○  本机服务未连接"
+                color: window.conversations.serverStatus === "connected" ? Theme.success : Theme.warning
+                font.pixelSize: Theme.fontSizeSm; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
             }
         }
     }
@@ -268,16 +354,42 @@ ApplicationWindow {
     }
     Loader { active: !!window.mcp; sourceComponent: Component { McpServerDialog { mcp: window.mcp } } }
     Dialog {
+        id: conversationTitleDialog; objectName: "conversationTitleDialog"; title: "对话标题全文"
+        modal: true; anchors.centerIn: parent
+        width: Math.min(window.width - 80, 800); height: Math.min(window.height - 100, 360)
+        contentItem: AppScrollView {
+            clip: true
+            AppTextArea {
+                id: conversationTitleFullText; objectName: "conversationTitleFullText"
+                text: window.conversations.title; textFormat: TextEdit.PlainText
+                readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere
+            }
+        }
+        footer: RowLayout {
+            ActionButton { objectName: "conversationTitleCopyButton"; text: "复制全文"; onClicked: { conversationTitleFullText.selectAll(); conversationTitleFullText.copy(); conversationTitleFullText.deselect() } }
+            Item { Layout.fillWidth: true }
+            ActionButton { text: "关闭"; onClicked: conversationTitleDialog.close() }
+        }
+    }
+    Dialog {
         id: errorDialog; objectName: "errorDialog"; title: "错误详情"; modal: true; anchors.centerIn: parent
         width: Math.min(window.width - 80, 800); height: Math.min(window.height - 100, 500)
-        contentItem: AppScrollView { clip: true; TextArea { text: controller.error; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere } }
-        footer: DialogButtonBox { ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }
+        contentItem: AppScrollView { clip: true; AppTextArea { id: taskErrorFullText; objectName: "taskErrorFullText"; text: controller.error; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere } }
+        footer: RowLayout {
+            ActionButton { objectName: "taskErrorCopyButton"; text: "复制全文"; onClicked: { taskErrorFullText.selectAll(); taskErrorFullText.copy(); taskErrorFullText.deselect() } }
+            Item { Layout.fillWidth: true }
+            ActionButton { text: "关闭"; onClicked: errorDialog.close() }
+        }
     }
     Dialog {
         id: conversationErrorDialog; objectName: "conversationErrorDialog"; title: "对话错误详情"; modal: true; anchors.centerIn: parent
         width: Math.min(window.width - 80, 800); height: Math.min(window.height - 100, 500)
-        contentItem: AppScrollView { clip: true; TextArea { objectName: "conversationErrorContent"; text: window.conversations.error; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere } }
-        footer: DialogButtonBox { ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }
+        contentItem: AppScrollView { clip: true; AppTextArea { id: conversationErrorFullText; objectName: "conversationErrorContent"; text: window.conversations.error; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere } }
+        footer: RowLayout {
+            ActionButton { objectName: "conversationErrorCopyButton"; text: "复制全文"; onClicked: { conversationErrorFullText.selectAll(); conversationErrorFullText.copy(); conversationErrorFullText.deselect() } }
+            Item { Layout.fillWidth: true }
+            ActionButton { text: "关闭"; onClicked: conversationErrorDialog.close() }
+        }
     }
     MemoryDialog { id: memoryDialog; conversations: window.conversations }
 }

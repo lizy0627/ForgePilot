@@ -55,7 +55,7 @@ void RagController::reset()
     stopEvents();
     m_recover.stop(); m_poll.stop();
     m_repositoryId.clear(); m_operationId.clear(); m_revision = 0;
-    m_enabled = m_available = m_reachable = m_running = false; m_status = "disabled";
+    m_enabled = m_available = m_reachable = m_running = m_statusReadFailed = false; m_status = "disabled";
     m_statusErrorCode.clear();
     m_fileCount = m_chunks = m_dirty = m_failedFiles = m_total = m_processed = 0;
     m_lastIndexed.clear(); setError({}); emit changed();
@@ -113,13 +113,14 @@ void RagController::send(const QByteArray &method, const QString &path, const QJ
     clearError();
     const auto generation = m_generation;
     auto *reply = JsonHttp::send(m_network, this, method, url, body, 1024 * 1024,
-        [this, generation](QNetworkReply *completed, const JsonHttp::Response &response) {
+        [this, generation, method](QNetworkReply *completed, const JsonHttp::Response &response) {
             if (generation != m_generation || completed != m_request) return;
             m_request = nullptr; emit changed();
             const auto error = response.body.value("error").toObject();
             if (response.exceededLimit || response.invalidJson || response.status < 200
                     || response.status >= 300 || response.networkError != QNetworkReply::NoError) {
                 m_reachable = response.status > 0;
+                if (method == "GET") m_statusReadFailed = true;
                 emit changed();
                 const auto code = error.value("code").toString("network_error");
                 const auto message = error.value("message").toString("代码索引请求失败，请刷新后重试。");
@@ -128,7 +129,11 @@ void RagController::send(const QByteArray &method, const QString &path, const QJ
                 return;
             }
             m_reachable = true;
-            if (!applyStatus(response.body)) return;
+            if (!applyStatus(response.body)) {
+                if (method == "GET") { m_statusReadFailed = true; emit changed(); }
+                return;
+            }
+            if (m_statusReadFailed) { m_statusReadFailed = false; emit changed(); }
             if (m_running) openEvents();
             else { m_recover.stop(); stopEvents(); }
         });

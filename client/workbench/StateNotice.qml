@@ -11,6 +11,7 @@ Label {
     visible: viewState !== "ready" && (viewState !== "completed" || !hasData)
     text: W.stateText(viewState, emptyText)
     color: viewState === "error" ? Theme.danger : viewState === "interrupted" || viewState === "degraded" ? Theme.warning : Theme.secondary
+    font.pixelSize: Theme.fontSizeSm
     textFormat: Text.PlainText
     wrapMode: Text.Wrap
     Accessible.name: text

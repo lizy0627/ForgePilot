@@ -14,9 +14,18 @@ Controls.Panel {
     Repeater { model: root.mission.evidence
         delegate: ColumnLayout {
             required property var record
-            Layout.fillWidth: true; spacing: 3
+            Layout.fillWidth: true; spacing: Theme.spaceXs
             Label { text: record.evidenceId + " · " + record.claim; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
-            Label { text: (record.path || "来源：" + record.source) + (record.startLine ? ":" + record.startLine + "–" + record.endLine : ""); color: Theme.secondary; Layout.fillWidth: true; elide: Text.ElideMiddle; textFormat: Text.PlainText }
+            Label {
+                id: sourcePreview
+                text: (record.path || "来源：" + record.source) + (record.startLine ? ":" + record.startLine + "–" + record.endLine : "")
+                color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
+                maximumLineCount: 2; elide: Text.ElideMiddle; textFormat: Text.PlainText
+            }
+            Controls.LongText {
+                visible: sourcePreview.truncated || sourcePreview.text.length > 80
+                Layout.fillWidth: true; title: "证据来源"; text: sourcePreview.text
+            }
             Label { visible: !!record.reason; text: record.reason || ""; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         }

@@ -1,7 +1,9 @@
 .pragma library
 .import "Theme.js" as Theme
 
-function statusLabel(status) {
+function statusLabel(status, reachable, statusReadFailed, hasRepository, loading) {
+    if (hasRepository && !reachable && loading && !statusReadFailed) return "正在读取";
+    if (hasRepository && (!reachable || statusReadFailed)) return "状态不可用";
     var labels = {
         disabled: "未启用", unavailable: "不可用", empty: "尚未索引",
         pending: "待更新", indexing: "索引中", cancelling: "正在取消",
@@ -11,8 +13,8 @@ function statusLabel(status) {
     return labels[status] || "状态未知";
 }
 
-function statusColor(status, reachable) {
-    if (!reachable) return Theme.warning;
+function statusColor(status, reachable, statusReadFailed, hasRepository) {
+    if (hasRepository && (!reachable || statusReadFailed)) return Theme.warning;
     if (status === "ready") return Theme.accent;
     if (status === "failed") return Theme.danger;
     if (status === "degraded" || status === "pending" || status === "cancelling") return Theme.warning;
@@ -29,13 +31,19 @@ function safeReason(code) {
         rag_index_failed: "索引任务未能完成，可重试。",
         rag_index_file_failed: "部分文件未能索引，检索会使用可用来源。",
         qdrant_unavailable: "向量存储不可用，检索会降级。",
-        embedding_unavailable: "Embedding 服务不可用，检索会降级。"
+        vector_unavailable: "本地向量存储不可用，检索会使用可用的其他来源。",
+        rag_vector_unavailable: "本地向量存储不可用，检索会使用可用的其他来源。",
+        embedding_unavailable: "Embedding 服务不可用，检索会使用可用的其他来源。",
+        initialization_failed: "Embedding 初始化失败，检索会使用可用的其他来源。"
     };
     return reasons[code] || "";
 }
 
-function statusDetail(status, errorCode, reachable) {
+function statusDetail(status, errorCode, reachable, statusReadFailed, hasRepository, loading) {
+    if (hasRepository === false) return "请先为当前对话选择项目。";
+    if (hasRepository && !reachable && loading && !statusReadFailed) return "正在读取代码索引状态…";
     if (!reachable) return "无法读取后端状态；会自动重连，原任务流程不受影响。";
+    if (statusReadFailed) return "代码索引状态查询失败，请检查本机后端并刷新；原任务流程不受影响。";
     var reason = safeReason(errorCode);
     if (reason) return reason;
     var details = {

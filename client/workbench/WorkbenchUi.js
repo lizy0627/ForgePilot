@@ -1,10 +1,13 @@
 .pragma library
+.import "../panels/Theme.js" as Theme
 var labels = {pending:"待执行", running:"执行中", awaiting_human:"等待确认", succeeded:"已成功", failed:"失败", interrupted:"已中断", skipped:"已跳过", retryable:"可重试", cancelled:"已取消"};
 var icons = {pending:"○", running:"▶", awaiting_human:"!", succeeded:"✓", failed:"×", interrupted:"!", skipped:"–", retryable:"↻", cancelled:"–"};
-var colors = {pending:"#7a7d84", running:"#2866b5", awaiting_human:"#90621a", succeeded:"#268349", failed:"#b42332", interrupted:"#cb6d16", skipped:"#a5a7ac", retryable:"#90621a", cancelled:"#7a7d84"};
+var colors = {pending:Theme.muted, running:Theme.accent, awaiting_human:Theme.warning,
+              succeeded:Theme.success, failed:Theme.danger, interrupted:Theme.warning,
+              skipped:Theme.disabledText, retryable:Theme.purple, cancelled:Theme.muted};
 function label(status) { return labels[status] || (status ? "状态：" + status : "未开始"); }
 function icon(status) { return icons[status] || "•"; }
-function color(status) { return colors[status] || "#62646a"; }
+function color(status) { return colors[status] || Theme.secondary; }
 function artifact(model, type) {
     if (!model) return {};
     var count = model.count;

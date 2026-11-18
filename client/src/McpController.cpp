@@ -179,15 +179,22 @@ void McpController::close()
 {
     if(!canCloseEditor()) return;
     ++m_generation; m_open=false; closeEditor(); abort(false);
-    m_loading=false; m_busy=false; m_disabled=true; m_items.clear(); m_preset={}; m_error.clear(); m_notice.clear(); emit changed();
+    m_loading=false; m_busy=false; m_disabled=true; m_statusKnown=false;
+    m_items.clear(); m_preset={}; m_error.clear(); m_notice.clear(); emit changed();
 }
 void McpController::refresh()
 {
     if(!m_open || m_loading || m_busy) return;
     m_loading=true; m_error.clear(); emit changed();
     request(false,"GET","/servers",{},[this](const Response &r) {
-        if(!ok(r)) { m_loading=false; m_disabled=true; m_error=failure(r); emit changed(); return; }
+        const bool valid=ok(r) && r.body.value("items").isArray() && r.body.value("disabled").isBool();
+        if(!valid) {
+            m_loading=false; m_disabled=true; m_statusKnown=false;
+            m_error=ok(r)?"MCP 状态响应格式无效，请检查本机后端版本后刷新。":failure(r);
+            emit changed(); return;
+        }
         m_items=r.body.value("items").toArray().toVariantList(); m_disabled=r.body.value("disabled").toBool(true);
+        m_statusKnown=true;
         request(false,"GET","/presets",{},[this](const Response &r) {
             m_loading=false;
             if(ok(r)) { const auto items=r.body.value("items").toArray(); m_preset=items.isEmpty()?QJsonObject{}:items.first().toObject(); }
@@ -206,7 +213,7 @@ void McpController::closeEditor()
 }
 void McpController::edit(const QString &id)
 {
-    if(!m_open || m_loading || m_busy || (!id.isEmpty() && !Protocol::validTaskId(id))) return;
+    if(!m_open || !m_statusKnown || m_loading || m_busy || (!id.isEmpty() && !Protocol::validTaskId(id))) return;
     if(!canCloseEditor() || (id.isEmpty() && (m_disabled || m_pending))) return;
     closeEditor(); m_editorOpen=true;
     m_id=id.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):id;
@@ -463,7 +470,7 @@ QString McpController::toolReason(const QString &reason) const
 }
 void McpController::mutate(const QByteArray &method,const QString &path,const QJsonObject &body,const QString &notice)
 {
-    if(!m_open || m_busy || m_loading) return;
+    if(!m_open || !m_statusKnown || m_busy || m_loading) return;
     m_busy=true; m_error.clear(); m_notice.clear(); emit changed();
     request(false,method,path,body,[=,this](const Response &r) {
         m_busy=false;

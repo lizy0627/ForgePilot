@@ -801,7 +801,7 @@ print(json.dumps(result))
         Ui ui(fixture);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("settingsButton"));
-        QTRY_VERIFY(!ui.mcp.disabled() && !ui.mcp.loading());
+        QTRY_VERIFY(ui.mcp.statusKnown() && !ui.mcp.loading());
         ui.mcp.edit();
         auto *chat = ui.find("mcpChatScope"); QVERIFY(chat);
         auto *work = ui.find("mcpTaskScope"); QVERIFY(work);

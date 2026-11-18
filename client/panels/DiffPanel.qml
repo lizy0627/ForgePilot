@@ -8,9 +8,9 @@ AppScrollView {
     required property var controller
     clip: true; contentWidth: availableWidth
     ColumnLayout {
-        width: root.availableWidth; spacing: 8
-        Label { text: "文件差异 · 以首次写入前的内容为基线，保留用户已有修改。"; color: Theme.secondary; padding: 10; Layout.fillWidth: true; wrapMode: Text.Wrap }
-        Label { visible: !root.controller.diffFiles.length; text: "本任务尚无文件修改。任务结束后展示最终差异。"; color: Theme.muted; padding: 10 }
+        width: root.availableWidth; spacing: Theme.spaceSm
+        Label { text: "文件差异 · 以首次写入前的内容为基线，保留用户已有修改。"; color: Theme.secondary; padding: Theme.spaceMd; Layout.fillWidth: true; wrapMode: Text.Wrap }
+        Label { visible: !root.controller.diffFiles.length; text: "本任务尚无文件修改。任务结束后展示最终差异。"; color: Theme.muted; padding: Theme.spaceMd }
         Repeater {
             model: root.controller.diffFiles
             delegate: Panel {

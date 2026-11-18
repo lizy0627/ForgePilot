@@ -222,6 +222,30 @@ private slots:
         QCOMPARE(changed.size(),1); QVERIFY(!rag.useForTasks());
     }
 
+    void ragControllerMarksFailedStatusReadUntilRecovery() {
+        Source source; bool failRead=false;
+        auto valid=[] {
+            return QJsonObject{{"repository_id",QString(64,'a')},{"enabled",true},{"available",true},
+                {"status","ready"},{"total_files",1},{"processed",1},{"skipped",0},{"failed",0},
+                {"chunks",1},{"file_count",1},{"dirty_file_count",0},{"failed_file_count",0},
+                {"last_indexed_at",QJsonValue::Null},{"running",false},{"operation_id",QJsonValue::Null},
+                {"revision",1},{"error_code",QJsonValue::Null}};
+        };
+        source.handle=[&](const Request &r) {
+            if(failRead) Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503);
+            else Source::json(r,valid());
+        };
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/stale-status");
+        QTRY_COMPARE(rag.status(),QString("ready"));
+        QVERIFY(!rag.property("statusReadFailed").toBool());
+        failRead=true; rag.refresh(); QTRY_VERIFY(!rag.busy());
+        QVERIFY(rag.property("statusReadFailed").toBool());
+        QCOMPARE(rag.status(),QString("ready")); // Cached data remains for reference, but no longer claims to be current.
+        failRead=false; rag.refresh(); QTRY_VERIFY(!rag.busy());
+        QVERIFY(!rag.property("statusReadFailed").toBool());
+        QVERIFY(rag.error().isEmpty());
+    }
+
     void feedbackWireRequires202() {
         Source source;
         source.handle=[](const Request &r) { Source::json(r,snapshot(A,"planning"),r.body.value("plan_version").toInt()==7?202:200); };
@@ -613,6 +637,38 @@ private slots:
         Source other; other.handle=[](const Request &r){Source::json(r,{{"items",QJsonArray{}},{"total",0}});};
         tasks.setBaseUrl(other.url()); Source::json(delayed[3],{{"conversation_id",A},{"request_id",A},{"items",QJsonArray{QJsonObject{{"status","succeeded"}}}}});
         QTest::qWait(80); QVERIFY(c.mcpTools().isEmpty()); QVERIFY(c.mcpToolsRequest().isEmpty());
+    }
+    void mcpStatusReadFailureDoesNotActOnStaleItems() {
+        Source source; bool failRead=false, malformedRead=false, backendDisabled=false; int mutations=0;
+        const QJsonObject item{{"server_id",A},{"revision",1},{"name","Read source"},{"enabled",true}};
+        source.handle=[&](const Request &r) {
+            if(r.path.endsWith("/servers") && r.method=="GET") {
+                if(failRead) Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503);
+                else if(malformedRead) Source::json(r,{{"items",QJsonArray{item}}});
+                else Source::json(r,{{"items",QJsonArray{item}},{"disabled",backendDisabled}});
+            } else if(r.path.endsWith("/presets")) Source::json(r,{{"items",QJsonArray{}}});
+            else if(r.method=="PATCH" || r.method=="DELETE") {
+                ++mutations; Source::json(r,{{"server_id",A},{"revision",2},{"enabled",false}});
+            } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"}}}},404);
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks);
+        QVERIFY(!mcp.property("statusKnown").toBool());
+        mcp.open(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(mcp.property("statusKnown").toBool()); QVERIFY(!mcp.disabled()); QCOMPARE(mcp.items().size(),1);
+
+        failRead=true; mcp.refresh(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(!mcp.property("statusKnown").toBool()); QVERIFY(!mcp.error().isEmpty());
+        QCOMPARE(mcp.items().size(),1); // The last list may still be shown for reference.
+        mcp.setEnabled(A,1,false); mcp.remove(A,1);
+        QCOMPARE(mutations,0); // Its revision cannot be trusted after a failed refresh.
+
+        failRead=false; malformedRead=true; mcp.refresh(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(!mcp.property("statusKnown").toBool()); QVERIFY(!mcp.error().isEmpty());
+        mcp.setEnabled(A,1,false); QCOMPARE(mutations,0);
+
+        malformedRead=false; backendDisabled=true; mcp.refresh(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(mcp.property("statusKnown").toBool()); QVERIFY(mcp.disabled());
+        mcp.setEnabled(A,1,false); QTRY_COMPARE(mutations,1); // Real disabled mode still permits stopping a service.
     }
     void mcpValidationAndSecretErrors_data() {
         QTest::addColumn<QString>("errorCode");

@@ -1,9 +1,10 @@
 import QtQuick
 import QtQuick.Controls
+import "Theme.js" as Theme
 
 ScrollView {
     id: control
-    rightPadding: 12
+    rightPadding: Theme.spaceMd
     ScrollBar.vertical: AppScrollBar {
         objectName: "verticalScrollBar"
         parent: control

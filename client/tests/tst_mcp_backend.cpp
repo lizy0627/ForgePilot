@@ -90,14 +90,13 @@ private slots:
         const auto phase=qEnvironmentVariable("FORGEPILOT_MCP_PHASE");
         const bool liveModel=phase=="runtime-model" || phase=="runtime-model-restart";
         if(phase=="runtime" || phase=="runtime-restart" || liveModel) {
-            auto closeTools=[&] { return QMetaObject::invokeMethod(find("mcpToolsDialog"),"close"); };
+            auto closeTools=[&] { conversations.closeMcpTools(); return true; };
             if(phase=="runtime-restart" || phase=="runtime-model-restart") {
                 QTRY_VERIFY(!conversations.conversationId().isEmpty() && !conversations.loading());
                 QCOMPARE(conversations.messages()->count(),liveModel ? 2 : 6);
                 conversations.showMcpTools(conversations.messages()->get(1).value("request_id").toString());
-                QVERIFY(QMetaObject::invokeMethod(find("mcpToolsDialog"),"open"));
-                QTRY_VERIFY(!conversations.mcpToolsLoading()); QCOMPARE(conversations.mcpTools().size(),2);
-                QCOMPARE(conversations.mcpTools().last().toMap().value("tool_name").toString(),QString("tavily-extract"));
+                QTRY_VERIFY(!conversations.mcpToolsLoading()); QCOMPARE(conversations.mcpTools().size(),1);
+                QCOMPARE(conversations.mcpTools().first().toMap().value("tool_name").toString(),QString("tavily-search"));
                 QCOMPARE(conversations.mcpTools().first().toMap().value("sources").toList().size(),1);
                 QVERIFY(capture("runtime-restart-history")); QVERIFY(closeTools());
                 conversations.prepareDelete(conversations.conversationId(),conversations.title());
@@ -113,24 +112,18 @@ private slots:
             QVERIFY(click("closeSettingsButton"));
             QVERIFY(conversations.repositoryPath().isEmpty());
             QVERIFY(input("conversationPrompt",liveModel
-                ? "这是隔离 MCP 验证。请先调用 Search public fixture 搜索 Qt documentation，再调用 Extract public fixture 提取 https://doc.qt.io/qt-6/ 。两种工具各调用一次，失败则如实说明；成功后只依据实际结果给出两句中文概括和来源。无需项目。"
-                : "查询 Qt 文档并提取正文 fixture")); QVERIFY(click("sendMessageButton"));
+                ? "这是隔离 MCP 验证。请调用 Search public fixture 搜索 Qt documentation，然后依据实际结果给出两句中文概括。无需项目。"
+                : "联网查询 Qt 文档 fixture")); QVERIFY(click("sendMessageButton"));
             QTRY_COMPARE_WITH_TIMEOUT(conversations.messages()->count(),2,liveModel ? 240000 : 12000); QTRY_VERIFY(!conversations.active());
             QCOMPARE(conversations.toolActivity().value("status").toString(),QString("succeeded"));
+            QVERIFY(!find("activeMcpToolsButton")); QVERIFY(!find("messageMcpToolsButton"));
             if(liveModel) QVERIFY(!conversations.messages()->get(1).value("content").toString().isEmpty());
             else QVERIFY(conversations.messages()->get(1).value("content").toString().contains("实际查询"));
-            QVERIFY(click("activeMcpToolsButton")); QTRY_VERIFY(!conversations.mcpToolsLoading());
-            QCOMPARE(conversations.mcpTools().size(),2);
-            const auto extract=conversations.mcpTools().last().toMap();
-            QCOMPARE(extract.value("tool_name").toString(),QString("tavily-extract"));
-            QCOMPARE(extract.value("status").toString(),QString("succeeded"));
-            QVERIFY(extract.value("result_excerpt").toString().contains("正文提取 fixture"));
-            QCOMPARE(extract.value("sources").toList().size(),1);
+            conversations.showMcpTools(conversations.messages()->get(1).value("request_id").toString()); QTRY_VERIFY(!conversations.mcpToolsLoading());
+            QCOMPARE(conversations.mcpTools().size(),1);
             const auto sources=conversations.mcpTools().first().toMap().value("sources").toList(); QCOMPARE(sources.size(),1);
             QCOMPARE(sources.first().toMap().value("url").toString(),QString("https://doc.qt.io/qt-6/"));
-            SourceObserver observer; QDesktopServices::setUrlHandler("https",&observer,"visit");
-            QVERIFY(click("mcpSourceLink")); QCOMPARE(observer.opened,QUrl("https://doc.qt.io/qt-6/")); QDesktopServices::unsetUrlHandler("https");
-            QVERIFY(capture("runtime-sources")); QVERIFY(closeTools());
+            QVERIFY(capture("runtime-answer")); QVERIFY(closeTools());
             if(liveModel) { QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join('\n'))); return; }
             // A delayed record response must not reopen a closed dialog.
             QVERIFY(control({{"delay_records",true}})); conversations.showMcpTools(conversations.messages()->get(1).value("request_id").toString());
@@ -139,7 +132,7 @@ private slots:
             QVERIFY(input("conversationPrompt","失败查询 fixture")); QVERIFY(click("sendMessageButton"));
             QTRY_COMPARE_WITH_TIMEOUT(conversations.messages()->count(),4,12000); QTRY_VERIFY(!conversations.active());
             QCOMPARE(conversations.toolActivity().value("status").toString(),QString("failed"));
-            QVERIFY(click("activeMcpToolsButton")); QTRY_VERIFY(!conversations.mcpToolsLoading());
+            conversations.showMcpTools(conversations.messages()->get(3).value("request_id").toString()); QTRY_VERIFY(!conversations.mcpToolsLoading());
             QCOMPARE(conversations.mcpTools().first().toMap().value("error_code").toString(),QString("mcp_tool_error"));
             QVERIFY(capture("runtime-failure")); QVERIFY(closeTools());
             QVERIFY(control({{"mode","hang"},{"fail_on","tools/call"}}));
@@ -147,10 +140,10 @@ private slots:
             QTRY_COMPARE_WITH_TIMEOUT(conversations.toolActivity().value("status").toString(),QString("running"),12000);
             // Running includes lazy initialization. Stop only after the peer has
             // received the hanging business call, so this tests in-flight cleanup.
-            QTRY_COMPARE(http("POST","/fixture/control").value("business_call_count").toInt(),4);
+            QTRY_COMPARE(http("POST","/fixture/control").value("business_call_count").toInt(),3);
             QVERIFY(click("stopAnswerButton")); QTRY_COMPARE_WITH_TIMEOUT(conversations.messages()->count(),6,12000);
             QTRY_VERIFY(!conversations.active()); QCOMPARE(conversations.toolActivity().value("status").toString(),QString("cancelled"));
-            window->resize(860,640); QVERIFY(click("activeMcpToolsButton")); QTRY_VERIFY(!conversations.mcpToolsLoading());
+            window->resize(860,640); conversations.showMcpTools(conversations.messages()->get(5).value("request_id").toString()); QTRY_VERIFY(!conversations.mcpToolsLoading());
             QVERIFY(capture("runtime-cancel-small")); QVERIFY(closeTools());
             QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join('\n'))); return;
         }
@@ -398,9 +391,10 @@ private slots:
         QTest::qWait(300); QVERIFY(click("closeMcpEditor")); QTRY_VERIFY(!mcp.editorOpen()); QVERIFY(click("addMcpButton"));
         const auto fresh=mcp.serverId(); QTest::qWait(900); QCOMPARE(mcp.serverId(),fresh); QCOMPARE(mcp.state(),QString("editing")); QVERIFY(mcp.tools().isEmpty());
         QVERIFY(click("closeMcpEditor"));
-        // Cancel a hanging real HTTP reader on editor close.
+        // Cancel an in-progress probe on editor close.
         QVERIFY(click("addMcpButton")); QVERIFY(choose("mcpKind",1)); QVERIFY(input("mcpEndpoint",endpoint));
-        QVERIFY(control({{"mode","hang"},{"fail_on","tools/list"}})); QVERIFY(click("probeMcpButton")); QTest::qWait(200);
+        QVERIFY(control({{"mode","hang"},{"fail_on","tools/list"},{"auth","none"}})); QVERIFY(click("probeMcpButton"));
+        QTest::qWait(200);
         QVERIFY(mcp.editorBusy()); QVERIFY(click("closeMcpEditor")); QTRY_VERIFY(!mcp.editorOpen()); QVERIFY(control({{"mode","normal"},{"fail_on","initialize"}}));
         // Backend change closes the active editor and clears its sensitive inputs.
         QVERIFY(click("addMcpButton")); QVERIFY(input("mcpKey",secret));

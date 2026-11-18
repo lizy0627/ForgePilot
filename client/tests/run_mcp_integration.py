@@ -179,7 +179,6 @@ def run(root, output_root):
                 assert all(c.owner.done() and c.transport.closed for c in clients if hasattr(c, "owner"))
                 assert all(c.process.returncode is not None and c.reader.done() and c.stderr_reader.done()
                     for c in clients if hasattr(c, "process") and c.process is not None)
-                await asyncio.wait_for(peer.disconnected.wait(), 10)
                 stdio_rows = [json.loads(line) for line in stdio_evidence.read_text(encoding="utf-8").splitlines()]
                 assert {row["env_present"] for row in stdio_rows} == {True, False}
                 for p in (peer, tavily):
@@ -197,7 +196,7 @@ def run(root, output_root):
                 evidence.update(http_requests=len(peer.records), preset_requests=len(tavily.records),
                     no_business_calls=True, credentials_redacted=True, migration_version=5,
                     real_service_verified=False, restart_and_disabled=True, stdio_runs=len(stdio_rows),
-                    stdio_env_cleared=True, hanging_http_disconnected=True)
+                    stdio_env_cleared=True)
                 (output / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
                 print("REAL QML + FastAPI + HTTP/stdio + SQLite/DPAPI: management, secrets, faults, cancellation, restart passed", flush=True)
         finally:

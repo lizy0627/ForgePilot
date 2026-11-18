@@ -1,7 +1,9 @@
 #include "TaskController.h"
 #include "ConversationController.h"
 #include "RagController.h"
+#include "McpController.h"
 #include "ClientUi.h"
+#include "ColorContrast.h"
 #include "HttpFixture.h"
 #include <QGuiApplication>
 #include <QDir>
@@ -178,6 +180,79 @@ private slots:
         QCOMPARE(detail->property("text").toString(),QString("请先在当前页面选择仓库。"));
     }
 
+    void codeIndexPanelDoesNotShowStaleReadyStatus() {
+        Source source; bool failRead=false;
+        const QJsonObject ready{{"repository_id",QString(64,'a')},{"enabled",true},{"available",true},
+            {"status","ready"},{"total_files",1},{"processed",1},{"skipped",0},{"failed",0},
+            {"chunks",1},{"file_count",1},{"dirty_file_count",0},{"failed_file_count",0},
+            {"last_indexed_at",QJsonValue::Null},{"running",false},{"operation_id",QJsonValue::Null},
+            {"revision",1},{"error_code",QJsonValue::Null}};
+        source.handle=[&](const Request &r) {
+            if(failRead) Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503);
+            else Source::json(r,ready);
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); tasks.setRepositoryPath("C:/selected-repo");
+        RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/selected-repo");
+        QTRY_COMPARE(rag.status(),QString("ready"));
+        QQmlEngine engine;
+        const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
+        QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
+        QScopedPointer<QObject> panel(component.createWithInitialProperties({
+            {"controller",QVariant::fromValue(&tasks)},{"rag",QVariant::fromValue(&rag)}}));
+        QVERIFY2(panel,qPrintable(component.errorString()));
+        auto *indexPanel=panel->findChild<QObject*>("codeIndexPanel");
+        auto *status=panel->findChild<QObject*>("codeIndexStatus");
+        auto *detail=panel->findChild<QObject*>("codeIndexStatusDetail");
+        auto *build=panel->findChild<QObject*>("buildCodeIndexButton");
+        auto *remove=panel->findChild<QObject*>("deleteCodeIndexButton");
+        QVERIFY(indexPanel); QVERIFY(status); QVERIFY(detail); QVERIFY(build); QVERIFY(remove);
+        QCOMPARE(indexPanel->property("subtitle").toString(),QString("已就绪"));
+        QCOMPARE(status->property("text").toString(),QString("已就绪"));
+        QVERIFY(build->property("enabled").toBool());
+        QVERIFY(remove->property("enabled").toBool());
+
+        failRead=true; rag.refresh(); QTRY_VERIFY(!rag.busy());
+        QCOMPARE(indexPanel->property("subtitle").toString(),QString("状态不可用"));
+        QCOMPARE(status->property("text").toString(),QString("状态不可用"));
+        QVERIFY(detail->property("text").toString().contains("状态查询失败"));
+        QVERIFY(!build->property("enabled").toBool());
+        QVERIFY(!remove->property("enabled").toBool());
+    }
+
+    void mcpSettingsPanelDistinguishesUnreadFailureAndDisabled() {
+        Source source; bool failRead=false, backendDisabled=false;
+        source.handle=[&](const Request &r) {
+            if(r.path.endsWith("/servers")) {
+                if(failRead) Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503);
+                else Source::json(r,{{"items",QJsonArray{}},{"disabled",backendDisabled}});
+            } else if(r.path.endsWith("/presets")) Source::json(r,{{"items",QJsonArray{}}});
+        };
+        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks);
+        QQmlEngine engine;
+        const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
+        QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/McpSettingsPanel.qml"));
+        QScopedPointer<QObject> panel(component.createWithInitialProperties({{"mcp",QVariant::fromValue(&mcp)}}));
+        QVERIFY2(panel,qPrintable(component.errorString()));
+        auto *availability=panel->findChild<QObject*>("mcpAvailabilityMessage");
+        auto *empty=panel->findChild<QObject*>("mcpEmptyMessage");
+        QVERIFY(availability); QVERIFY(empty);
+        QVERIFY(availability->property("text").toString().contains("尚未读取"));
+        QVERIFY(!empty->property("visible").toBool());
+
+        mcp.open(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(!availability->property("visible").toBool());
+        QVERIFY(empty->property("visible").toBool());
+        failRead=true; mcp.refresh(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(availability->property("text").toString().contains("无法读取"));
+        QVERIFY(availability->property("text").toString().contains("点击刷新"));
+        QVERIFY(!empty->property("visible").toBool());
+
+        failRead=false; backendDisabled=true; mcp.refresh(); QTRY_VERIFY(!mcp.loading());
+        QVERIFY(availability->property("text").toString().contains("已禁用 MCP"));
+        QVERIFY(empty->property("visible").toBool());
+        QVERIFY(empty->property("text").toString().contains("当前没有"));
+    }
+
     void ragQmlPresentationLogicIsExplicitAndSafe() {
         QQmlEngine engine;
         const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
@@ -190,6 +265,11 @@ private slots:
                 property string degraded: RagUi.taskUsage(true, false, "degraded")
                 property string disabled: RagUi.taskUsage(false, false, "not_requested")
                 property string unknownReason: RagUi.statusDetail("failed", "private_stack_value", true)
+                property string offlineLabel: RagUi.statusLabel("ready", false, "", true)
+                property string offlineDetail: RagUi.statusDetail("ready", "", false, "", true)
+                property string failedReadLabel: RagUi.statusLabel("ready", true, true, true)
+                property string failedReadDetail: RagUi.statusDetail("ready", "", true, true, true)
+                property string vectorReason: RagUi.statusDetail("unavailable", "vector_unavailable", true)
             }
         )",QUrl::fromLocalFile(clientRoot+"/tests/RagUiHarness.qml"));
         QScopedPointer<QObject> logic(component.create());
@@ -198,6 +278,11 @@ private slots:
         QCOMPARE(logic->property("degraded").toString(),QString("本次未使用 RAG（检索失败，已降级）"));
         QCOMPARE(logic->property("disabled").toString(),QString("本次未使用 RAG（发送时开关已关闭）"));
         QVERIFY(!logic->property("unknownReason").toString().contains("private_stack_value"));
+        QCOMPARE(logic->property("offlineLabel").toString(),QString("状态不可用"));
+        QVERIFY(logic->property("offlineDetail").toString().contains("无法读取后端状态"));
+        QCOMPARE(logic->property("failedReadLabel").toString(),QString("状态不可用"));
+        QVERIFY(logic->property("failedReadDetail").toString().contains("状态查询失败"));
+        QVERIFY(logic->property("vectorReason").toString().contains("向量存储不可用"));
     }
 
     void codeIndexProductionApiLifecycle() {
@@ -424,7 +509,8 @@ private slots:
             auto *field=find(name); QVERIFY(field);
             const auto foreground=field->property("color").value<QColor>();
             const auto background=field->property("background").value<QObject*>()->property("color").value<QColor>();
-            QVERIFY(foreground.lightnessF()<0.3); QVERIFY(background.lightnessF()>0.8);
+            QVERIFY2(colorContrast(foreground, background) >= 4.5,
+                "Input text must remain readable on its surface");
         }
         if(!output.isEmpty()) QVERIFY(window->grabWindow().save(output+"/empty.png"));
         auto *settingsButton=qobject_cast<QQuickItem*>(find("settingsButton"));

@@ -6,7 +6,7 @@ function status(s) {
     return labels[s] || (s ? "未知状态（" + s + "）" : "未开始");
 }
 function color(s) {
-    if (["completed","succeeded","passed","connected"].indexOf(s)>=0) return Theme.accent;
+    if (["completed","succeeded","passed","connected"].indexOf(s)>=0) return Theme.success;
     if (["failed","error","timeout","timed_out"].indexOf(s)>=0) return Theme.danger;
     if (["waiting_approval","no_tests","reconnecting","reflecting"].indexOf(s)>=0) return Theme.warning;
     return Theme.secondary;

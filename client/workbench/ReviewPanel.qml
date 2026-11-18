@@ -15,7 +15,7 @@ Controls.Panel {
     objectName: "reviewPanel"
     StateNotice { mission: root.mission; hasData: !!root.artifact.artifactId; emptyText: "审查尚未完成。"; Layout.fillWidth: true }
     Label { visible: !!root.review.summary; text: root.review.summary || ""; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText; font.weight: Font.DemiBold }
-    Label { visible: !!root.review.verdict; text: "结论：" + root.review.verdict + " · 建议交付：" + (root.review.recommend_delivery ? "是" : "否"); color: Theme.secondary }
+    Label { visible: !!root.review.verdict; text: "结论：" + root.review.verdict + " · 建议交付：" + (root.review.recommend_delivery ? "是" : "否"); color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
     Repeater { model: root.review.acceptance_criteria || []
         delegate: Label { required property var modelData; text: modelData.criterion_id + " · " + modelData.status + " · " + modelData.evidence; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
     }

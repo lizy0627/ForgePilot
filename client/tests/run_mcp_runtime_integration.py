@@ -54,16 +54,11 @@ def run(root,output_root,*,live_model=False):
                     return reply(calls=[call(selected.name,'{"query":"Qt documentation"}')])
                 result=json.loads(messages[-1]['content'])
                 assert secret not in messages[-1]['content']
-                if self.calls==2 and result['success']:
-                    assert 'TRUNCATED' in result['output']
-                    assert json.loads(result['output'])['sources']==[{'title':'Qt 6 文档','url':'https://doc.qt.io/qt-6/'}]
-                    selected=next(t for t in tools if t.description.startswith('Extract public fixture'))
-                    return reply(calls=[call(selected.name,'{"urls":["https://doc.qt.io/qt-6/"]}')])
-                if self.calls==3:
-                    assert result['success'] and '正文提取 fixture' in messages[-1]['content']
+                assert tools is None
+                if result['success']:
                     assert 'TRUNCATED' in result['output']
                     evidence['long_results_sources_retained']=True
-                return reply('根据实际查询结果：Qt 文档 https://doc.qt.io/qt-6/' if result['success'] else '查询失败，本次没有可引用的搜索结果。')
+                return reply('根据实际查询结果：Qt 6 文档介绍了相关功能。' if result['success'] else '查询失败，本次没有可引用的搜索结果。')
             async def aclose(self): self.closed=True
 
         def chat_factory():
@@ -118,10 +113,7 @@ def run(root,output_root,*,live_model=False):
                     assert [r['status'] for r in requests]==(['completed'] if live_model else ['completed','completed','cancelled'])
                     records=[json.loads(r['mcp_calls_json']) for r in requests]
                     assert [r[0]['status'] for r in records]==(['succeeded'] if live_model else ['succeeded','failed','cancelled'])
-                    assert [r['tool_name'] for r in records[0]]==['tavily-search','tavily-extract']
-                    assert records[0][1]['status']=='succeeded' and '正文提取 fixture' in records[0][1]['result_excerpt']
-                    assert '<html>' not in records[0][1]['result_excerpt'] and 'discard this script' not in records[0][1]['result_excerpt']
-                    assert records[0][1]['sources']==[{'title':'https://doc.qt.io/qt-6/','url':'https://doc.qt.io/qt-6/'}]
+                    assert [r['tool_name'] for r in records[0]]==['tavily-search']
                     assert len(records[0][0]['sources'])==1
                     assert not store.list() and all(c.owner.done() and c.transport.closed for c in clients)
                     for file in Path(folder).glob('api.sqlite3*'):
@@ -140,12 +132,11 @@ def run(root,output_root,*,live_model=False):
                     assert not store._db.execute('PRAGMA foreign_key_check').fetchall()
                 assert len(peer.records)==count and all(m.closed for m in models)
                 assert evidence['delayed_records']==(0 if live_model else 1)
-                calls=[r for r in peer.records if r['body'].get('method')=='tools/call']; assert len(calls)==(2 if live_model else 4)
+                calls=[r for r in peer.records if r['body'].get('method')=='tools/call']; assert len(calls)==(1 if live_model else 3)
                 assert calls[0]['body']['params']['name']=='tavily-search'
                 if not live_model: assert calls[0]['body']['params']['arguments']=={'query':'Qt documentation'}
-                assert calls[1]['body']['params']=={'name':'tavily-extract','arguments':{'urls':['https://doc.qt.io/qt-6/']}}
-                evidence.update(business_calls=len(calls),search_and_extract=True,normal_failure_cancel=not live_model,plain_chat_without_repository=True,
-                    sources_opened_via_http_link=True,restart_history_and_delete=True,credentials_redacted=True,
+                evidence.update(business_calls=len(calls),search_only=True,normal_failure_cancel=not live_model,plain_chat_without_repository=True,
+                    restart_history_and_delete=True,credentials_redacted=True,
                     migration_version=5,real_service_verified=False)
                 encoded=json.dumps(evidence,ensure_ascii=False,indent=2)
                 assert secret not in encoded
