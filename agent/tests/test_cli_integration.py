@@ -112,14 +112,18 @@ async def test_key_never_reaches_trace_even_if_response_echoes_it(cpp_repo, rg_e
     assert KEY not in json.dumps(asdict(result), default=str)
 
 
-def test_cli_help_missing_arguments_and_no_credentials(cpp_repo, monkeypatch):
-    main = Path(__file__).parents[1] / "main.py"
+@pytest.mark.parametrize("entry", [("main.py",), ("-m", "forgepilot.cli")], ids=["script", "module"])
+def test_cli_help_missing_arguments_and_no_credentials(cpp_repo, monkeypatch, entry):
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
     monkeypatch.delenv("FORGEPILOT_API_KEY", raising=False)
-    help_result = subprocess.run([sys.executable, str(main), "--help"], capture_output=True, text=True)
-    assert help_result.returncode == 0 and "repository_path" in help_result.stdout
-    missing = subprocess.run([sys.executable, str(main), str(cpp_repo)], capture_output=True, text=True)
+    command = [sys.executable, *entry]
+    help_result = subprocess.run([*command, "--help"], capture_output=True, text=True)
+    assert help_result.returncode == 0 and "Local Git repository root" in help_result.stdout
+    bogus = subprocess.run([*command, str(cpp_repo), "analyze", "--bogus"], capture_output=True, text=True)
+    assert bogus.returncode == 2 and "--bogus" in bogus.stderr
+    missing = subprocess.run([*command, str(cpp_repo)], capture_output=True, text=True)
     assert missing.returncode == 2
-    no_key = subprocess.run([sys.executable, str(main), str(cpp_repo), "analyze"], capture_output=True, text=True)
+    no_key = subprocess.run([*command, str(cpp_repo), "analyze"], capture_output=True, text=True)
     assert no_key.returncode == 2 and "llm_config" in no_key.stderr
 
 

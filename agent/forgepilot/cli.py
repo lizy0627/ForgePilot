@@ -230,3 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("cancelled: Interrupted", file=sys.stderr)
         return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
