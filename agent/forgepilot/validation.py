@@ -23,7 +23,7 @@ from .artifacts.models import ChangeSet, CommandResult, TaskSpec, ValidationRepo
 from .build import BuildPipeline
 from .build_process import BuildCancelled, build_environment, run_build_process
 from .errors import ForgePilotError
-from .integrity import IntegrityMonitor, IntegritySnapshot, Registration
+from .integrity import IntegrityMonitor, IntegritySnapshot, IntegrityTaskSpec, Registration
 from .path_identity import path_key, path_within, same_path
 from .presets import MissionBuildSelection
 from .repository import Repository
@@ -36,6 +36,7 @@ PIPELINE_STAGES = (
     "Workspace Integrity", "Test Integrity", "CMake Configure", "Build", "CTest",
     "Protected Oracle", "Diff Scope Check", "ValidationReport",
 )
+PUBLIC_PIPELINE_STAGES = (*PIPELINE_STAGES[:5], "Protected Oracle (not run)", *PIPELINE_STAGES[6:])
 _INFRASTRUCTURE = re.compile(
     r"command not found|not recognized as an internal|unable to find executable|"
     r"could not find.*(?:compiler|ninja|cmake|package)|no cmake_cxx_compiler|"
@@ -80,7 +81,8 @@ class ValidationService:
     def __init__(self, workspace_manager, profile: ToolchainProfile, *, build_root: Path,
                  oracle: ProtectedOracle | None, configuration="Debug", generator=None,
                  architecture=None, make_program=None, timeout=120, output_limit=65_536,
-                 log_sink=None, redactor=None):
+                 log_sink=None, redactor=None, process_runner=None,
+                 oracle_runner=None, integrity_task_spec=None):
         if not isinstance(profile, ToolchainProfile):
             raise TypeError("Validator requires a host-owned ToolchainProfile")
         if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 3600
@@ -93,6 +95,11 @@ class ValidationService:
         self.architecture, self.make_program = architecture, make_program
         self.timeout, self.output_limit = timeout, output_limit
         self.log_sink, self.redactor = log_sink, redactor or Redactor()
+        if integrity_task_spec is not None and not isinstance(integrity_task_spec, IntegrityTaskSpec):
+            raise TypeError("Trusted validation integrity scope must be an IntegrityTaskSpec")
+        self.process_runner = process_runner
+        self.oracle_runner = oracle_runner
+        self.integrity_task_spec = integrity_task_spec
         self._monitors = {}
         self._selection_hashes = {}
         self._lock = asyncio.Lock()
@@ -234,15 +241,26 @@ class ValidationService:
     async def _run(self, command, is_cancelled):
         if is_cancelled():
             raise asyncio.CancelledError()
-        task = asyncio.create_task(run_build_process(command.argv, command.cwd,
-            timeout=self.timeout, output_limit=self.output_limit, env=build_environment()))
+        operation = (self.process_runner(command.argv, command.cwd,
+                     timeout=self.timeout, env=build_environment())
+                     if self.process_runner is not None else
+                     run_build_process(command.argv, command.cwd,
+                         timeout=self.timeout, output_limit=self.output_limit,
+                         env=build_environment()))
+        task = asyncio.create_task(operation)
         try:
             while not task.done():
                 if is_cancelled():
                     task.cancel()
                     break
                 await asyncio.wait({task}, timeout=0.02)
-            return await task
+            try:
+                return await task
+            except (BuildCancelled, ForgePilotError):
+                raise
+            except Exception:
+                raise ForgePilotError("validation_infrastructure",
+                    "Isolated validation process failed before producing a trustworthy result") from None
         except asyncio.CancelledError:
             task.cancel()
             while not task.done():
@@ -261,11 +279,14 @@ class ValidationService:
     def _save_baseline(self, task_id, record, spec, monitor):
         state = {"version": 1, "workspace_id": record["workspace_id"],
                  "base_ref": record["base_ref"], "spec_hash": content_sha256(spec),
+                 "integrity_rules_sha256": (content_sha256(asdict(self.integrity_task_spec))
+                                            if self.integrity_task_spec is not None else None),
                  "snapshot": asdict(monitor.snapshot), "tests": sorted(monitor._tests),
                  "approved": sorted(monitor._approved),
                  "modifiable_test_files": list(monitor.task_spec.test_files_to_modify),
                  "file_hashes": monitor._validation_manifest,
                  "oracle_manifest": monitor._validation_oracle,
+                 "oracle_required": getattr(monitor, "_validation_oracle_required", True),
                  "approval_checkpoint_hash": getattr(monitor, "_validation_approval_checkpoint", None),
                  "files": {path: base64.b64encode(data).decode("ascii")
                            for path, data in monitor._baseline.items()}}
@@ -280,13 +301,16 @@ class ValidationService:
         try:
             raw = json.loads(self.guard.read(task_id + "/integrity.json", max_bytes=16_777_216))
             if (raw["version"] != 1 or raw["workspace_id"] != record["workspace_id"]
-                    or raw["base_ref"] != record["base_ref"] or raw["spec_hash"] != content_sha256(spec)):
+                    or raw["base_ref"] != record["base_ref"] or raw["spec_hash"] != content_sha256(spec)
+                    or raw.get("integrity_rules_sha256") != (
+                        content_sha256(asdict(self.integrity_task_spec))
+                        if self.integrity_task_spec is not None else None)):
                 raise ValueError()
             selection = self._build_selection(task_id, record, root)
             if raw.get("build_selection_sha256") != (content_sha256(selection.to_dict()) if selection is not None else None):
                 raise ForgePilotError("build_selection_changed", "Validation baseline requires its original frozen build selection")
             snapshot = raw["snapshot"]
-            monitor = IntegrityMonitor(Repository(root, ""), spec)
+            monitor = IntegrityMonitor(Repository(root, ""), self.integrity_task_spec or spec)
             monitor.snapshot = IntegritySnapshot(snapshot["plan_version"],
                 tuple(tuple(item) for item in snapshot["test_hashes"]),
                 tuple(snapshot["ctest_names"]), tuple(Registration(**item) for item in snapshot["registrations"]),
@@ -297,7 +321,12 @@ class ValidationService:
             monitor._ctest_bound = snapshot["ctest_inventory_source"] == "ctest"
             monitor._validation_manifest = raw["file_hashes"]
             monitor._validation_oracle = raw.get("oracle_manifest")
+            monitor._validation_oracle_required = raw.get("oracle_required", True)
             monitor._validation_approval_checkpoint = raw.get("approval_checkpoint_hash")
+            if type(monitor._validation_oracle_required) is not bool:
+                raise ValueError()
+            if not monitor._validation_oracle_required and monitor._validation_oracle is not None:
+                raise ValueError()
             if any(monitor._validation_manifest.get(path) != sha256(data).hexdigest()
                    for path, data in monitor._baseline.items()):
                 raise ValueError()
@@ -306,12 +335,16 @@ class ValidationService:
             raise ForgePilotError("validation_policy", "Validation approval baseline is invalid") from None
 
     async def capture(self, task_id, spec, *, approved_test_files=(), plan_version=1,
-                      is_cancelled=lambda: False, approval_checkpoint=None):
+                      is_cancelled=lambda: False, require_oracle=True, approval_checkpoint=None):
         """Capture before writes; an existing baseline is never replaced by edits."""
         spec = TaskSpec.model_validate(spec)
         if spec.repository.toolchain_profile != self.profile.profile_id:
             raise ForgePilotError("validation_policy", "Configured ToolchainProfile differs from the frozen TaskSpec")
-        if self.oracle is None:
+        if type(require_oracle) is not bool:
+            raise ForgePilotError("validation_policy", "Protected Oracle requirement must be explicit")
+        oracle_required = (require_oracle or self.integrity_task_spec is not None
+            or any(item.verification == "protected_test" for item in spec.acceptance_criteria))
+        if oracle_required and self.oracle is None:
             raise ForgePilotError("validation_infrastructure", "Protected Oracle is not configured")
         async with self._lock:
             record, root, build = self._paths(task_id)
@@ -326,16 +359,24 @@ class ValidationService:
                 if (monitor._validation_approval_checkpoint != checkpoint_hash or
                         monitor._validation_manifest != dict(expected.file_hashes)):
                     raise ForgePilotError("validation_policy", "Stored baseline differs from the approved checkpoint")
+                if monitor._validation_oracle_required != oracle_required:
+                    raise ForgePilotError("validation_policy", "Protected Oracle requirement differs from approval baseline")
                 monitor.capture(plan_version, approved_test_files=approved_test_files)
                 self._save_baseline(task_id, record, spec, monitor)
                 self._monitors[task_id] = monitor
                 return monitor.report()
-            monitor = IntegrityMonitor(Repository(root, ""), spec)
+            if self.integrity_task_spec is not None and (
+                    self.integrity_task_spec.task_type != spec.task_type or
+                    self.integrity_task_spec.test_files_to_modify !=
+                    spec.test_policy.modifiable_existing_test_patterns):
+                raise ForgePilotError("validation_policy", "Trusted test-integrity rules differ from the frozen TaskSpec")
+            monitor = IntegrityMonitor(Repository(root, ""), self.integrity_task_spec or spec)
             monitor.capture(plan_version, approved_test_files=approved_test_files)
             monitor._validation_manifest = dict(expected.file_hashes)
             monitor._validation_oracle = None
+            monitor._validation_oracle_required = oracle_required
             monitor._validation_approval_checkpoint = checkpoint_hash
-            if self.oracle is not None:
+            if oracle_required:
                 oracle_root = Path(self.oracle.source_dir)
                 if (not oracle_root.is_absolute() or path_within(oracle_root, root)
                         or path_within(root, oracle_root) or path_within(oracle_root, self.guard.root)):
@@ -453,7 +494,9 @@ class ValidationService:
                 command = self._command(phase, values, hidden=hidden, selection=selection)
                 result = await self._run(command, is_cancelled)
             except ForgePilotError as exc:
-                category = "infrastructure_failure" if exc.code in {"command_denied", "build_job", "platform_unsupported"} else "policy_failure"
+                category = "infrastructure_failure" if exc.code in {
+                    "command_denied", "build_job", "platform_unsupported", "validation_infrastructure"
+                } else "policy_failure"
                 raise _Failure(category, "Configured validation command could not be executed") from None
             except BuildCancelled as exc:
                 result = exc.result
@@ -527,47 +570,82 @@ class ValidationService:
                 raise test_failure
             if failed:
                 raise _Failure("code_failure", "CTest reported failed tests")
-            stages.append(PIPELINE_STAGES[5])
-            if self.oracle is None:
-                raise _Failure("infrastructure_failure", "Protected Oracle is not configured")
-            oracle_root = Path(self.oracle.source_dir)
-            if (not oracle_root.is_absolute() or not oracle_root.is_dir()
-                    or not same_path(oracle_root.resolve(), oracle_root)
-                    or path_within(oracle_root, root) or path_within(root, oracle_root)
-                    or path_within(oracle_root, self.guard.root)):
-                raise _Failure("policy_failure", "Protected Oracle is not an isolated external source")
-            oracle_guard = Guard(oracle_root)
-            oracle_files = manifest(oracle_root)
-            if monitor._validation_oracle is None:
-                raise _Failure("infrastructure_failure", "Protected Oracle was not bound at approval")
-            if oracle_files != monitor._validation_oracle:
-                raise _Failure("policy_failure", "Protected Oracle changed after approval")
-            self.guard.mkdir(task_id + "/protected-build")
-            oracle_build = self.guard.path(task_id + "/protected-build")
-            oracle_values = self._values(oracle_root, oracle_build,
-                report_path=oracle_build / ("ctest-" + uuid4().hex + ".xml"))
-            oracle_values.update(workspace_dir=str(root), target_build_dir=str(build))
-            try:
-                with oracle_guard.protect():
-                    for phase in ("cmake_configure", "cmake_build", "run_tests"):
-                        await execute(phase, oracle_values, hidden=True)
-                    _, _, oracle_failed, oracle_skipped = self._tests(Path(oracle_values["report_path"]))
-                    if oracle_failed or oracle_skipped:
-                        raise _Failure("code_failure", "Protected Oracle failed; hidden diagnostics withheld")
-                    if manifest(oracle_root) != oracle_files:
-                        raise _Failure("policy_failure", "Protected Oracle integrity changed")
-            except _Failure:
-                state["hidden_oracle"] = "failed"
-                raise
-            except (ForgePilotError, OSError, ValueError):
-                state["hidden_oracle"] = "failed"
-                raise _Failure("infrastructure_failure", "Protected Oracle infrastructure failed; hidden diagnostics withheld") from None
-            state["hidden_oracle"] = "passed"
+            if monitor._validation_oracle_required:
+                stages.append(PIPELINE_STAGES[5])
+                if self.oracle is None:
+                    raise _Failure("infrastructure_failure", "Protected Oracle is not configured")
+                oracle_root = Path(self.oracle.source_dir)
+                if (not oracle_root.is_absolute() or not oracle_root.is_dir()
+                        or not same_path(oracle_root.resolve(), oracle_root)
+                        or path_within(oracle_root, root) or path_within(root, oracle_root)
+                        or path_within(oracle_root, self.guard.root)):
+                    raise _Failure("policy_failure", "Protected Oracle is not an isolated external source")
+                oracle_guard = Guard(oracle_root)
+                oracle_files = manifest(oracle_root)
+                if monitor._validation_oracle is None:
+                    raise _Failure("infrastructure_failure", "Protected Oracle was not bound at approval")
+                if oracle_files != monitor._validation_oracle:
+                    raise _Failure("policy_failure", "Protected Oracle changed after approval")
+                self.guard.mkdir(task_id + "/protected-build")
+                oracle_build = self.guard.path(task_id + "/protected-build")
+                oracle_values = self._values(oracle_root, oracle_build,
+                    report_path=oracle_build / ("ctest-" + uuid4().hex + ".xml"))
+                oracle_values.update(workspace_dir=str(root), target_build_dir=str(build))
+                try:
+                    with oracle_guard.protect():
+                        if self.oracle_runner is None:
+                            for phase in ("cmake_configure", "cmake_build", "run_tests"):
+                                await execute(phase, oracle_values, hidden=True)
+                            _, _, oracle_failed, oracle_skipped = self._tests(Path(oracle_values["report_path"]))
+                            if oracle_failed or oracle_skipped:
+                                raise _Failure("code_failure", "Protected Oracle failed; hidden diagnostics withheld")
+                        else:
+                            started = _now()
+                            if is_cancelled():
+                                raise asyncio.CancelledError()
+                            result = await self.oracle_runner(root)
+                            if is_cancelled():
+                                raise asyncio.CancelledError()
+                            if (not isinstance(result, dict) or result.get("status") not in {"passed", "failed"}
+                                    or not isinstance(result.get("reason"), str)
+                                or result["reason"] not in {"passed", "tool_missing", "path_unsupported",
+                                    "isolation_failed", "configure_failed", "build_failed",
+                                    "test_failed", "timeout", "execution_error", "oracle_failed",
+                                    "external_oracle_failed", "in_process_oracle_integrity_unverified",
+                                    "evaluator_worker_failed", "invalid_evaluator_worker_result"}):
+                                raise _Failure("infrastructure_failure", "Protected Oracle adapter returned an invalid result")
+                            success = result["status"] == "passed" and result["reason"] == "passed"
+                            commands.append(CommandResult(kind="protected_test",
+                                command_summary="Protected Oracle locked evaluator check",
+                                started_at=started, finished_at=_now(), exit_code=0 if success else 1,
+                                output_summary="Protected Oracle passed" if success else
+                                               "Protected Oracle failed; hidden diagnostics withheld"))
+                            if not success:
+                                category = ("code_failure" if result["reason"] in {
+                                    "configure_failed", "build_failed", "test_failed", "oracle_failed",
+                                    "external_oracle_failed"}
+                                    else "infrastructure_failure")
+                                raise _Failure(category, "Protected Oracle failed; hidden diagnostics withheld")
+                        if manifest(oracle_root) != oracle_files:
+                            raise _Failure("policy_failure", "Protected Oracle integrity changed")
+                except _Failure:
+                    state["hidden_oracle"] = "failed"
+                    raise
+                except Exception:
+                    state["hidden_oracle"] = "failed"
+                    raise _Failure("infrastructure_failure", "Protected Oracle infrastructure failed; hidden diagnostics withheld") from None
+                state["hidden_oracle"] = "passed"
+            else:
+                stages.append(PUBLIC_PIPELINE_STAGES[5])
             stages.append(PIPELINE_STAGES[6])
             monitor.verify(ctest_names=test_names)
             self._scope(task_id, spec, changes, expected, monitor)
             state["diff_scope"] = "passed"
             record_check("Final checkpoint diff and hashes are inside the frozen approved scope")
+            if not monitor._validation_oracle_required:
+                reason = "not configured" if self.oracle is None else "not required for this task"
+                summary = ("CMake/CTest, workspace/test integrity and diff scope passed; "
+                    f"Protected Oracle {reason} and not run")
         except asyncio.CancelledError:
             classification, status, summary = "cancelled", "cancelled", "Validation cancelled; owned process tree terminated"
         except _Failure as exc:

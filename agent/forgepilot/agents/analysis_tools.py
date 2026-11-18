@@ -20,7 +20,7 @@ from ..tools.retrieval_tools import register_retrieval_tool
 from ..tools.symbol_tools import register_symbol_tools
 
 
-ANALYST_ROLES = frozenset({"root_cause_analyst", "impact_test_analyst"})
+ANALYST_ROLES = frozenset({"root_cause_analyst", "impact_test_analyst", "generalist"})
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,7 +11,7 @@ ForgePilot 是一个面向本地 CMake、C++ 和 Qt 仓库的 Windows 桌面研�
 | 组件 | 支持范围 |
 | --- | --- |
 | 操作系统 | Windows 10/11 x64；其他系统未适配或验证 |
-| Python | CPython 3.12.x；后端声明为 `>=3.12,<3.13` |
+| Python | 开发版需要 CPython 3.12.x；后端声明为 `>=3.12,<3.13`。冻结发布版无需安装 Python |
 | Visual Studio | Visual Studio 2022，MSVC v143，x64 C++ 工具链 |
 | Qt | Qt 6.8.x；CMake 配置的最低要求为 6.8，当前实际验证版本为 6.8.3，不对其他版本作兼容性承诺；需要 MSVC x64 Kit，以及 Network、Quick、Qml、QuickControls2、QuickDialogs2、Concurrent 和 Test 组件 |
 | CMake | 3.21 或更高 |
@@ -53,6 +53,7 @@ notepad .\scripts\local-env.cmd
 | `FORGEPILOT_NINJA` | 可选的 `ninja.exe` 绝对路径 | 选择 Ninja 生成器的构建或测试 |
 | `FORGEPILOT_RG` | 可选的 `rg.exe` 绝对路径 | 更快的仓库文本搜索 |
 | `FORGEPILOT_CLANGD` | 可选的 `clangd.exe` 绝对路径 | C/C++ 定义和引用的语义查询 |
+| `FORGEPILOT_ARTIFACT_ROOT` | 可选的本机任务数据根目录；Visual Studio 路径过长时可选较短的本地路径 | 新建 Agent 任务前设置，已有任务不能直接搬迁 |
 
 检查完整开发环境：
 
@@ -90,25 +91,25 @@ cmake --list-presets -S client
 
 ## 预构建 Windows 包
 
-本地打包入口会复用已完成的 Release 客户端构建，并生成 `artifacts/ForgePilot-<version>-windows-x64.zip` 和对应的 `.sha256` 校验文件：
+本地打包入口会复用已完成的 Release 客户端构建，冻结 Python 后端，并生成 `artifacts/ForgePilot-<version>-windows-x64.zip` 和对应的 `.sha256` 校验文件。`-Verify` 会在不提供 Python 和 uv 的隔离 `PATH` 下解压运行离线自检与停止入口：
 
 ```powershell
 .\scripts\Build-Client.cmd
 .\scripts\Package-Windows.cmd -Version 0.1.0 -Verify
 ```
 
-发布包包含预编译的 `ForgePilotClient.exe`、Qt 运行库和插件、Python 后端源码与锁文件、四个根启动入口、安装和自检脚本，以及 `local-env.example.cmd`。它不包含模型配置、API Key、DPAPI 密钥、日志、数据库、测试缓存或编译中间文件。
+发布包包含预编译的 `ForgePilotClient.exe`、Qt 运行库和插件、冻结后的 Python 后端 `bin/ForgePilotAgent.exe`、四个根启动入口与离线自检脚本。它不包含模型配置、API Key、DPAPI 密钥、日志、数据库、测试缓存或编译中间文件。目标 Windows x64 机器无需安装 CPython 或 uv；构建发布包的开发机仍需锁定的 Python 环境和 uv。
 
-该 ZIP 不是完全自包含包。目标 Windows x64 机器仍需预先安装 CPython 3.12.x，并把 uv 放入 `PATH`；首次解压后运行：
+首次解压后运行：
 
 ```powershell
-.\scripts\Setup-Agent.cmd
 .\scripts\Check-Release.cmd
 .\Configure-ForgePilot.cmd
 .\Start-ForgePilot.cmd
+.\Stop-ForgePilot.cmd
 ```
 
-普通问答无需安装 Visual Studio、Qt SDK 或 CMake。Qt 运行库已随包部署；包内带有 `vc_redist.x64.exe`，但目标机器缺少 Microsoft Visual C++ Runtime 时仍需由用户安装该运行库。`Check-Release.cmd` 只使用占位模型配置在本机回环地址启动后端并读取 OpenAPI，不会调用真实模型或公网 MCP。
+普通问答无需安装 Visual Studio、Qt SDK 或 CMake。Qt 运行库已随包部署；包内带有 `vc_redist.x64.exe`，但目标机器缺少 Microsoft Visual C++ Runtime 时仍需由用户安装该运行库。`Check-Release.cmd` 检查 Qt/QML 客户端加载，并使用占位模型配置在本机回环地址启动后端、读取 OpenAPI；不会调用真实模型或公网 MCP。`Configure-ForgePilot.cmd` 与 `Check-Model.cmd` 会发送真实模型请求，可能产生费用。
 
 ## 首次模型配置
 
@@ -122,10 +123,10 @@ cmake --list-presets -S client
 
 - Base URL：兼容 OpenAI Chat Completions 的服务根地址。
 - 缺省模型：旧配置和未单独指定用途时使用的模型标识。
-- 普通聊天、代码任务、对话摘要模型：可分别选择低延迟、高质量或低成本模型。
+- 普通聊天、代码任务、独立审查、对话摘要模型：可分别选择低延迟、高质量或低成本模型。Mission 工作流还需为任务模型和审查模型填写不同的模型家族。
 - API Key：在隐藏输入框中输入；配置程序会对每个实际不同的模型各发送一次最多等待 30 秒的简短请求，并指出失败用途。
 
-也可以在当前 PowerShell 进程中设置 `FORGEPILOT_BASE_URL`、`FORGEPILOT_MODEL`、`FORGEPILOT_CHAT_MODEL`、`FORGEPILOT_TASK_MODEL`、`FORGEPILOT_SUMMARY_MODEL` 和 `FORGEPILOT_API_KEY`，作为交互配置的默认值或密钥来源。`CHAT_MODEL` 和 `TASK_MODEL` 未设置时分别回退到 `FORGEPILOT_MODEL`；`SUMMARY_MODEL` 未设置时先使用 `CHAT_MODEL`，再回退到 `FORGEPILOT_MODEL`。只含 `model` 字段的旧 `config.json` 无需迁移即可继续使用。
+也可以在当前 PowerShell 进程中设置 `FORGEPILOT_BASE_URL`、`FORGEPILOT_MODEL`、`FORGEPILOT_CHAT_MODEL`、`FORGEPILOT_TASK_MODEL`、`FORGEPILOT_REVIEW_MODEL`、`FORGEPILOT_TASK_MODEL_FAMILY`、`FORGEPILOT_REVIEW_MODEL_FAMILY`、`FORGEPILOT_SUMMARY_MODEL` 和 `FORGEPILOT_API_KEY`，作为交互配置的默认值或密钥来源。`CHAT_MODEL` 和 `TASK_MODEL` 未设置时分别回退到 `FORGEPILOT_MODEL`；`SUMMARY_MODEL` 未设置时先使用 `CHAT_MODEL`，再回退到 `FORGEPILOT_MODEL`。只含 `model` 字段的旧 `config.json` 无需迁移即可继续使用。
 
 例如，让普通聊天优先低延迟，同时保留高质量代码任务模型：
 
@@ -156,10 +157,10 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 # 请求当前 ForgePilot 实例正常停止
 .\Stop-ForgePilot.cmd
 
-# 重新填写并验证 Base URL、各用途模型和 API Key
+# 重新填写并验证 Base URL、各用途模型和 API Key（真实请求）
 .\Configure-ForgePilot.cmd
 
-# 使用已保存配置和密钥检查模型连接
+# 使用已保存配置和密钥检查模型连接（真实请求）
 .\Check-Model.cmd
 ```
 
@@ -183,14 +184,34 @@ API Key 单独保存在同目录的 `api-key.dpapi`，使用当前 Windows 账�
 
 缺少构建工具时普通问答仍可用，但工作任务不会伪造构建成功；它会返回明确的工具不可用或构建配置错误。取消、拒绝或失败不会自动还原已经写入的文件。
 
+### API v2 多 Agent 任务配置
+
+普通问答和旧版任务可以使用上述交互式模型配置。按 [Mission API v2](docs/api-v2.md) 运行多 Agent 任务时，在本机 `config.json` 的现有 `server_args` 数组中追加 `--model-config` 和可信模型配置 JSON 的绝对路径。该 JSON 需包含 `task`、`chat`、`summary`、`orchestration`、`analysis`、`implementation`、`review`、`repair` 路由；两个 Analyst 可以共用 `analysis`。各任务角色的主模型和回退模型均须支持 Tool Calling。模型配置默认要求 Reviewer 与 Implementer 使用不同家族；若只有一个可用模型，可显式关闭 `enforce_review_family_separation`，但审查失去跨模型独立性。格式与密钥引用见 [模型网关配置](docs/model-gateway.md)；不要在 JSON 中保存明文 API Key。缺少完整角色路由时，API v2 会返回 `llm_config`，不会自动改用旧版任务模型。
+
+使用云端模型处理任务仓库内容时，还需在 `server_args` 中显式加入 `--mission-allow-cloud-model`。普通 API v2 工作任务若冻结的验收条件和计划都未要求 `protected_test`，可以不配置 Protected Oracle：执行批准后捕获 CMake/CTest、测试及工作区完整性基线；交付前必须实际通过构建、CTest、变更范围和完整性检查，报告会明确标记受保护测试 `not_run`。如果冻结的验收条件或计划要求 `protected_test`，缺少 Oracle 会在批准后的基线节点报告 `validation_infrastructure` 并暂停，不能借普通任务路径降级。为需要受保护测试的**当前选定任务仓库**准备受信任的 Protected Oracle CMake 测试项目，并通过 `--mission-oracle` 指向其绝对目录；Oracle 必须位于任务仓库及其 Worktree 之外，不能跨仓库复用。正式锁定的 15+5 真实任务评测始终要求 Oracle 及完整隔离验证，不会因普通工作任务可用而解锁。
+
+例如，需要受保护测试时，保留 `server_args` 原有条目，并按实际路径追加以下参数（本地模型无需云模型开关；普通任务未要求受保护测试时可省略 `--mission-oracle` 及其路径）：
+
+```json
+[
+  "--model-config", "C:/Users/你的用户名/AppData/Local/ForgePilot/mission-models.json",
+  "--mission-allow-cloud-model",
+  "--mission-oracle", "D:/TrustedOracles/当前任务仓库"
+]
+```
+
+更换任务仓库或修正 Oracle / 模型配置后，先运行 `Stop-ForgePilot.cmd`，核对并更新本机 `config.json` 中的 `server_args`，再运行 `Start-ForgePilot.cmd`。对已暂停的任务，先查看当前任务状态与 revision，再按界面提示执行恢复或重试；不要直接批准旧的任务方案或复用不匹配的 Oracle。
+
+若 Visual Studio 的 CMake/MSBuild 配置因任务目录过深而报 `MSB3491`（路径超过 260 字符），可在开始新的任务前于本机 `scripts/local-env.cmd` 设置短路径，例如 `set "FORGEPILOT_ARTIFACT_ROOT=D:\ForgePilotData"`，然后停止并重启程序。该目录保存任务 Artifact 和 Worktree；已有任务的绝对路径与原目录绑定，不能只改变量后直接迁移或重试旧任务。
+
 ## 可选能力与降级
 
-- MCP：可在客户端设置中连接服务器、发现目录并选择兼容的只读工具。未配置、连接失败或凭据不可用时，MCP 状态会显示不可用，内置功能仍可使用。外部 MCP 指令和结果被视为不可信参考数据。
+- MCP：可在客户端设置中连接服务器、发现目录并选择兼容的只读工具。设置页区分尚未配置、后端已禁用、状态读取失败及服务连接错误；状态读取失败时历史配置仅供参考，刷新成功前不能按过期修订修改配置。内置聊天和工作任务不依赖外部 MCP 服务，外部 MCP 指令和结果被视为不可信参考数据。
 - clangd：存在有效编译数据库和 clangd 时，可做 C/C++ 定义与引用查询。clangd、编译数据库或语义查询不可用时，会退回文本候选，结果标记为非语义，并附带实际 `fallback_reason`；不会偷偷运行 CMake 来生成数据库。
 - ripgrep：存在时用于更快的文本搜索；缺少时需要仓库搜索的工作功能会明确不可用，普通聊天不受影响。
 - CMake/CTest：只在客户端构建、测试和获批的工作任务中使用。缺失时相关操作失败并报告不可用，不影响普通聊天。
 - Ninja：仅在选择 Ninja 生成器时需要；Visual Studio preset 不依赖它。
-- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。设置页会分别显示 `已就绪 / 索引中 / 降级可用 / 索引失败 / 未启用`，支持更新、取消、清空和自动重连。“新任务使用 RAG”只影响之后发送的工作任务，不会启动后端、删除索引或改变已经运行的任务；工作详情会明确显示本次是否实际使用了 RAG。实现与管理接口见 [RAG 源码](agent/forgepilot/rag/)。
+- Code RAG：可选的本地增量索引、Qdrant Local 向量搜索和确定性混合重排；未配置或故障时不影响原工作流。设置页区分 `已就绪 / 索引中 / 降级可用 / 索引失败 / 未启用`，后端状态读取失败时显示 `状态不可用` 与刷新提示，不沿用旧的“已就绪”；Embedding 或向量存储故障会说明可用来源的降级。支持更新、取消、清空和自动重连。“新任务使用 RAG”只影响之后发送的工作任务，不会启动后端、删除索引或改变已经运行的任务；工作详情会明确显示本次是否实际使用了 RAG。实现与管理接口见 [RAG 源码](agent/forgepilot/rag/)。
 
 ### 启用 Code RAG
 
@@ -287,7 +308,7 @@ Remove-Item Env:FORGEPILOT_EMBEDDING_API_KEY
 
 报告对同一组三条固定、无敏感内容的提示给出首字延迟、完整耗时、响应字符数的 P50/P95，以及每个模型的成功率；报告不包含提示词、回答、Base URL 或密钥。真实模式可能产生费用。
 
-`.github/workflows/ci.yml` 在 Windows Server 2022、Python 3.12 和固定的 uv 0.12.15 上，从干净 checkout 运行锁定安装，检查根 `agent.venv`、锁文件、Python 编译、离线核心 Agent 测试和协议重新导出。当前 CI 不构建 Qt 客户端；Qt 构建和 CTest 仍由上述本地命令验证。
+`.github/workflows/ci.yml` 在 Windows Server 2022、Python 3.12 和固定的 uv 0.12.15 上，从干净 checkout 运行锁定安装、Python 测试、协议导出、Qt 构建与 CTest，并验证解压后的 Windows 发布包。发布包的离线检查不调用真实模型。
 
 ## 常见问题
 
@@ -356,4 +377,4 @@ cmake --list-presets -S client
 | `protocol/` | OpenAPI、事件 Schema 和接口示例 JSON |
 | `scripts/` | 安装、环境检查、构建、启动、测试和评测入口 |
 
-根目录的四个 `.cmd` 文件分别负责启动、停止、重新配置和连接检查。仓库不依赖额外的 Markdown 文档；本文件是唯一受版本控制的项目说明。
+根目录的四个 `.cmd` 文件分别负责启动、停止、重新配置和连接检查；发布包还包含 `scripts/Check-Release.cmd` 离线自检入口。

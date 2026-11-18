@@ -11,6 +11,7 @@ import pytest
 from forgepilot.errors import ForgePilotError
 
 from forgepilot.artifacts.models import ChangeSet, ChangedFile, TaskSpec, TestPolicy as ArtifactTestPolicy
+from forgepilot.agents.delivery import validation_passed
 from forgepilot.artifacts import create_artifact
 from forgepilot.build_process import CommandResult
 from forgepilot.sqlite_store import SqliteEventStore
@@ -190,6 +191,73 @@ async def test_missing_oracle_pauses_before_baseline_and_can_be_configured(valid
     validator.oracle = oracle
     baseline = await validator.capture(task, spec)
     assert baseline["ctest_inventory_source"] == "ctest"
+
+
+@pytest.mark.asyncio
+async def test_public_validation_without_oracle_keeps_baseline_and_reports_unrun_hidden_tests(validator_case):
+    manager, task, root, validator, spec, _, build = validator_case
+    validator.oracle = None
+    baseline = await validator.capture(task, spec, require_oracle=False)
+    assert baseline["ctest_inventory_source"] == "ctest"
+    changes = edit(validator_case)
+    restarted = ValidationService(manager, validator.profile, build_root=build,
+        oracle=None, generator="Ninja", make_program=shutil.which("ninja"))
+    report = await restarted.validate(task, spec, changes)
+    assert report.status == "passed", report
+    assert report.workspace_integrity == report.test_integrity == report.diff_scope == "passed"
+    assert report.hidden_oracle == "not_run"
+    assert "not configured" in report.summary.lower()
+    assert "not run" in report.summary.lower()
+    assert {item.kind for item in report.commands} >= {"configure", "build", "test", "integrity"}
+    assert not any(item.kind == "protected_test" for item in report.commands)
+    assert validation_passed(report, require_oracle=False)
+    assert not validation_passed(report)
+
+
+@pytest.mark.asyncio
+async def test_protected_criterion_cannot_downgrade_when_oracle_is_missing(validator_case):
+    _, task, _, validator, spec, _, _ = validator_case
+    spec = spec.model_copy(update={"acceptance_criteria": tuple(
+        item.model_copy(update={"verification": "protected_test"})
+        for item in spec.acceptance_criteria)})
+    validator.oracle = None
+    with pytest.raises(ForgePilotError, match="Protected Oracle is not configured"):
+        await validator.capture(task, spec, require_oracle=False)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_isolated_runner_error_is_retryable_infrastructure(validator_case):
+    _, task, _, validator, spec, _, _ = validator_case
+    await validator.capture(task, spec)
+    changes = edit(validator_case)
+    async def broken_runner(*args, **kwargs):
+        raise RuntimeError("isolated worker crashed")
+    validator.process_runner = broken_runner
+    report = await validator.validate(task, spec, changes)
+    assert report.status == "failed"
+    assert report.failure_classification == "infrastructure_failure"
+    assert report.hidden_oracle == "not_run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,classification", [
+    ("external_oracle_failed", "code_failure"),
+    ("in_process_oracle_integrity_unverified", "infrastructure_failure"),
+    ("evaluator_worker_failed", "infrastructure_failure"),
+    ("invalid_evaluator_worker_result", "infrastructure_failure"),
+])
+async def test_real_oracle_adapter_reason_preserves_failure_classification(validator_case, reason, classification):
+    _, task, _, validator, spec, _, _ = validator_case
+    await validator.capture(task, spec)
+    changes = edit(validator_case)
+    async def oracle_runner(_root):
+        return {"status": "failed", "reason": reason, "commands": []}
+    validator.oracle_runner = oracle_runner
+    report = await validator.validate(task, spec, changes)
+    assert report.status == "failed"
+    assert report.failure_classification == classification
+    assert report.hidden_oracle == "failed"
+    assert "hidden diagnostics withheld" in report.summary
 
 
 @pytest.mark.asyncio

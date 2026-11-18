@@ -16,6 +16,7 @@ class Role(StrEnum):
     ORCHESTRATOR = "orchestrator"
     ANALYST = "analyst"
     IMPLEMENTER = "implementer"
+    GENERALIST = "generalist"
     REVIEWER = "reviewer"
     VALIDATOR = "validator"
     WORKSPACE_MANAGER = "workspace_manager"
@@ -42,6 +43,9 @@ ROLE_CAPABILITIES = MappingProxyType({
     Role.ORCHESTRATOR: frozenset({Capability.READ, Capability.SEARCH, Capability.RAG}),
     Role.ANALYST: _READ | {Capability.RAG, Capability.MCP_READ},
     Role.IMPLEMENTER: _READ | {Capability.RAG, Capability.PATCH},
+    # The single-Agent baseline receives the union of the same reviewed tools.
+    # Stage registries still restrict analysis to reads and review to no tools.
+    Role.GENERALIST: _READ | {Capability.RAG, Capability.PATCH, Capability.MCP_READ},
     Role.REVIEWER: _READ | {Capability.RAG},
     Role.VALIDATOR: _READ | {Capability.BUILD, Capability.TEST},
     Role.WORKSPACE_MANAGER: frozenset({Capability.READ, Capability.COMMIT, Capability.DELIVER}),

@@ -22,7 +22,7 @@ _TEXT_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
                   ".py", ".js", ".ts", ".cmake", ".json", ".txt", ".pro", ".pri"}
 _ASSERTION = re.compile(
     r"\b(?:assert|static_assert|Q_ASSERT(?:_X)?|QVERIFY\w*|QCOMPARE\w*|QFAIL|"
-    r"ASSERT_\w+|EXPECT_\w+|REQUIRE\w*|CHECK\w*|TEST(?:_F|_P|_CASE|_SUITE)?|"
+    r"ASSERT_\w+|EXPECT_\w+|expect|REQUIRE\w*|CHECK\w*|TEST(?:_F|_P|_CASE|_SUITE)?|"
     r"assert\w+|pytest\s*\.\s*raises)\s*\(")
 _SUPPRESSION = re.compile(
     r"\b(?:NDEBUG|QT_NO_DEBUG|DOCTEST_CONFIG_DISABLE|CATCH_CONFIG_DISABLE|"
@@ -31,7 +31,7 @@ _SUPPRESSION = re.compile(
     r"CTEST_CUSTOM_TESTS_IGNORE|CTEST_TEST_EXCLUDE|CTEST_TEST_ARGS)\b|"
     r"\bDISABLED_\w+|\bpytest\s*\.\s*(?:mark\s*\.\s*)?(?:skip\w*|xfail)|\bunittest\s*\.\s*(?:skip\w*|SkipTest)|"
     r"\b(?:skip|xfail|skipif)\s*\(|#\s*if\s+0\b|"
-    r"#\s*(?:define|undef)\s+(?:assert|ASSERT_\w+|EXPECT_\w+|CHECK\w*|REQUIRE\w*|QVERIFY\w*|QCOMPARE\w*)\b|"
+    r"#\s*(?:define|undef)\s+(?:assert|expect|ASSERT_\w+|EXPECT_\w+|CHECK\w*|REQUIRE\w*|QVERIFY\w*|QCOMPARE\w*)\b|"
     r"#\s*pragma\s+warning\s*\(\s*disable|"
     r"-Wno-[\w-]+|(?<!\w)-w\b|/W0\b|"
     r"\b(?:BUILD_TESTING|ENABLE_TESTS|BUILD_TESTS|ENABLE_TESTING)\s*(?::\w+)?\s*[= \t]\s*(?:OFF|FALSE|NO|0)\b|"

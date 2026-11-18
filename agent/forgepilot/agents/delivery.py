@@ -29,14 +29,22 @@ LEGACY_DELIVERY_GRAPH_IDS = frozenset({
 })
 
 
-def validation_passed(report):
+def validation_passed(report, *, require_oracle=True):
     """The sole success predicate used before independent review and delivery."""
-    from ..validation import PIPELINE_STAGES
+    from ..validation import PIPELINE_STAGES, PUBLIC_PIPELINE_STAGES
+    oracle_state = report.hidden_oracle
+    if require_oracle:
+        oracle_passed = oracle_state == "passed"
+    else:
+        oracle_passed = oracle_state in {"passed", "not_run"}
+    expected_stages = PIPELINE_STAGES if oracle_state == "passed" else PUBLIC_PIPELINE_STAGES
+    kinds = {item.kind for item in report.commands}
     return (report.status == "passed" and report.failure_classification == "none"
         and report.workspace_integrity == report.test_integrity == report.diff_scope == "passed"
-        and report.hidden_oracle == "passed" and report.tests_passed > 0 and report.tests_failed == 0
-        and tuple(report.pipeline_stages) == tuple(PIPELINE_STAGES)
-        and {item.kind for item in report.commands} >= {"configure", "build", "test", "protected_test"}
+        and oracle_passed and report.tests_passed > 0 and report.tests_failed == 0
+        and tuple(report.pipeline_stages) == tuple(expected_stages)
+        and kinds >= {"configure", "build", "test", "integrity"}
+        and ("protected_test" in kinds) == (oracle_state == "passed")
         and all(item.exit_code == 0 for item in report.commands))
 
 
@@ -53,8 +61,8 @@ class DeliveryWorkflow(ImplementationService):
         self.validator = validator
         if validator.workspace is not workspace_manager:
             raise ForgePilotError("workspace_unavailable", "Validator must own the same WorkspaceManager")
-        self.reviewer = ReviewerService(gateway)
-        self.repair_definition = self.agents.get("repair.v1")
+        self.reviewer = ReviewerService(gateway, single_agent=self.single_agent)
+        self.repair_definition = self.agents.get("generalist.v1" if self.single_agent else "repair.v1")
         gateway.router.validate_agent(self.repair_definition)
         if workspace_manager.artifacts is None:
             workspace_manager.artifacts = events.artifacts
@@ -97,7 +105,7 @@ class DeliveryWorkflow(ImplementationService):
                     dependencies=("execution_approval", validation, review), agent_id=self.repair_definition.agent_id,
                     agent_definition_hash=self.repair_definition.definition_hash,
                     settings={"repair_round": round_number + 1,
-                              "limits": self.repair_definition.limits.model_dump(mode="json")}))
+                    "limits": self.repair_definition.limits.model_dump(mode="json")}))
                 edges.extend((EdgeDefinition(validation, repair, EdgeCondition(route="repair")),
                               EdgeDefinition(review, repair, EdgeCondition(route="repair"))))
         reviews = tuple(f"reviewer_{i}" for i in range(MAX_REPAIR_ROUNDS + 1))
@@ -106,15 +114,19 @@ class DeliveryWorkflow(ImplementationService):
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
         version = (4 if getattr(self, "mission_tool_selection", None) is not None else
                    3 if getattr(self, "mission_source_baseline", None) is not None else 2)
-        return GraphDefinition(f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
+        return GraphDefinition(f"validated-delivery-single.v{version}" if self.single_agent
+                               else f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
-    def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
-        analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
+    def _analysis_graph(self, task_id, request, *, locked_task_spec=None,
+                        allow_locked_test_scope=False):
+        analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec,
+            allow_locked_test_scope=allow_locked_test_scope)
         execution = self.graph()
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
-        return GraphDefinition("task-analysis-delivery-locked.v2" if locked_task_spec is not None
-                               else f"task-analysis-delivery.v{execution.version}", execution.version,
+        graph_id = ("task-analysis-delivery-single-locked.v2" if self.single_agent else
+                    "task-analysis-delivery-locked.v2") if locked_task_spec is not None else f"task-analysis-delivery.v{execution.version}"
+        return GraphDefinition(graph_id, execution.version,
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
@@ -123,15 +135,18 @@ class DeliveryWorkflow(ImplementationService):
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
                 "(请重新创建任务并审批执行方案)")
-        if graph.graph_id in {"validated-delivery.v2", "validated-delivery.v3", "validated-delivery.v4"}:
+        if graph.graph_id in {"validated-delivery.v2", "validated-delivery-single.v2",
+                              "validated-delivery.v3", "validated-delivery-single.v3", "validated-delivery.v4", "validated-delivery-single.v4"}:
             expected = self.graph()
-        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2"}:
+        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2",
+                               "task-analysis-delivery-single-locked.v2"}:
             from .analysis import AnalysisRequest
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None
             expected = self._analysis_graph(task_id,
                 AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
-                locked_task_spec=locked)
+                locked_task_spec=locked,
+                allow_locked_test_scope=bool(draft.settings.get("allow_locked_test_scope", False)))
         else:
             raise ForgePilotError("graph_definition", "Task is not a validated delivery graph")
         if expected.definition_hash != graph.definition_hash:
@@ -147,6 +162,14 @@ class DeliveryWorkflow(ImplementationService):
         inputs = tuple(item.artifact_id for item in artifacts if isinstance(
             item.content, (TaskSpec, ExecutionPlan, EvidenceBundle)))
         return super()._package(task_id, inputs)
+
+    def _requires_oracle(self, task_id, spec, plan):
+        # Only ordinary HTTP missions may use the public validation path.
+        # A frozen criterion or plan that asks for protected tests stays strict.
+        if self._stored_graph(task_id).graph_id not in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4"}:
+            return True
+        return (any(item.verification == "protected_test" for item in spec.content.acceptance_criteria)
+            or any("protected_test" in step.verification for step in plan.content.steps))
 
     def _await(self, coroutine):
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
@@ -167,10 +190,11 @@ class DeliveryWorkflow(ImplementationService):
         with self.gateway.accounting.scoped_sink(lambda record: self._model_record(context, record)):
             return await super()._agent(context)
 
-    async def _review_agent(self, context, spec, changes, validation, evidence, budget):
+    async def _review_agent(self, context, spec, changes, validation, evidence, budget, *, require_oracle):
         with self.gateway.accounting.scoped_sink(lambda record: self._model_record(context, record)):
             return await self.reviewer.review(spec, changes, validation, evidence=evidence,
-                budget=budget, is_cancelled=lambda: self._cancelled(context))
+                budget=budget, is_cancelled=lambda: self._cancelled(context),
+                require_oracle=require_oracle)
 
     def _baseline_handler(self, context):
         spec, plan, _ = self._package(context.task_id, context.input_artifact_ids)
@@ -182,12 +206,80 @@ class DeliveryWorkflow(ImplementationService):
                 if self._granted(context.task_id, spec, plan, "existing_tests") else ())
             self._await(self.validator.capture(context.task_id, spec.content,
                 approved_test_files=approved_tests, approval_checkpoint=checkpoint,
-                is_cancelled=lambda: self._cancelled(context)))
+                is_cancelled=lambda: self._cancelled(context),
+                require_oracle=self._requires_oracle(context.task_id, spec, plan)))
         except (FutureCancelledError, asyncio.CancelledError):
             return NodeResult(NodeStatus.CANCELLED)
         except ForgePilotError as exc:
             return self._service_error(exc)
         return NodeResult(NodeStatus.SUCCEEDED, decision_summary="Approved execution baseline captured")
+
+    def recover_storage_failure(self, task_id, *, expected_revision):
+        """Publish observed writer bytes after an explicit storage-recovery request.
+
+        This only reopens an unfinished storage-aborted writer. It never marks
+        a node successful: the ordinary recovery confirmation must verify the
+        ChangeSet and create a checkpoint before validation can run.
+        """
+        with self.runner._exclusive_control():
+            self._stored_graph(task_id)
+            with self.events.missions.consistent_view():
+                snapshot = self.runner.store.snapshot(task_id)
+                if snapshot.revision != expected_revision:
+                    raise ForgePilotError("graph_conflict", "Storage recovery revision changed")
+                if snapshot.status is not NodeStatus.FAILED:
+                    return False
+                failure = self.delivery_records.latest_failure(task_id)
+                if failure is None or failure.get("error_code") != "graph_storage":
+                    return False
+                unfinished = [node for node in snapshot.nodes if node.status is NodeStatus.RUNNING]
+                if len(unfinished) != 1 or unfinished[0].node_id != "implementer":
+                    raise ForgePilotError("storage_recovery_blocked", "Storage recovery requires one unfinished Implementer")
+                writer = unfinished[0]
+                if writer.result is not None:
+                    raise ForgePilotError("storage_recovery_blocked", "Writer already has a published result")
+                attempt = self.runner.store.attempt_record(task_id, writer.node_id, writer.attempt)
+                if attempt["finished_at"] is not None:
+                    raise ForgePilotError("storage_recovery_blocked", "Writer attempt is already finished")
+                frozen = self.runner.store.frozen_inputs(task_id, writer.node_id, writer.attempt)
+                if frozen is None:
+                    raise ForgePilotError("storage_recovery_blocked", "Writer has no frozen inputs")
+                self.runner.recovery._verify_pairs(task_id, frozen)
+                spec, plan, _ = self._package(task_id, tuple(item[0] for item in frozen))
+                if not self._granted(task_id, spec, plan, "execution"):
+                    raise ForgePilotError("approval_stale", "Storage recovery requires the original execution approval")
+                baseline = self.runner.checkpoints.latest(task_id)
+                if baseline is None or baseline.checkpoint_type != "plan_approved":
+                    raise ForgePilotError("storage_recovery_blocked", "Writer has no approved baseline checkpoint")
+                self.runner.checkpoints.verify(baseline)
+                candidates = [item for item in self.events.artifacts.list_for_task(task_id)
+                    if isinstance(item.content, ChangeSet) and item.producer_node == writer.node_id]
+                if len(candidates) > 1:
+                    raise ForgePilotError("storage_recovery_blocked", "Writer ChangeSet provenance is ambiguous")
+            observed = self.workspace.recover_observed_change_set(task_id, spec, plan, baseline)
+            if candidates:
+                artifact = candidates[0]
+                if (artifact.content != observed or artifact.parent_artifact_ids != tuple(item[0] for item in frozen)
+                        or artifact.producer != "workspace.v1"):
+                    raise ForgePilotError("storage_recovery_blocked", "Stored recovery ChangeSet does not match observed bytes")
+            else:
+                artifact = create_artifact(task_id=task_id, producer="workspace.v1", producer_node=writer.node_id,
+                    parent_artifact_ids=tuple(item[0] for item in frozen), content=observed)
+            with self.events.missions.consistent_view():
+                current = self.runner.store.snapshot(task_id)
+                if current.revision != expected_revision or current.status is not NodeStatus.FAILED:
+                    raise ForgePilotError("graph_conflict", "Graph changed during storage inspection")
+                if not candidates:
+                    self.events.artifacts.put(artifact)
+                current = self.runner.store.snapshot(task_id)
+                self.runner.store.transition(task_id, writer.node_id, expected_revision=current.revision,
+                    source=NodeStatus.RUNNING, target=NodeStatus.INTERRUPTED,
+                    graph_status=NodeStatus.INTERRUPTED, event_type="storage_recovery_requested",
+                    payload={"reason": "graph_storage", "artifact_id": artifact.artifact_id,
+                             "content_sha256": artifact.content_sha256})
+                self.delivery_records.request_observed_writer_recovery(task_id,
+                    writer.node_id, writer.attempt, artifact.artifact_id)
+            return True
 
     async def resume_infrastructure(self, task_id):
         snapshot = self.runner.store.snapshot(task_id)
@@ -263,7 +355,7 @@ class DeliveryWorkflow(ImplementationService):
             outputs = (artifact.artifact_id,)
             if self._cancelled(context) or report.status == "cancelled":
                 return NodeResult(NodeStatus.CANCELLED, output_artifact_ids=outputs)
-            if validation_passed(report):
+            if validation_passed(report, require_oracle=self._requires_oracle(context.task_id, spec, plan)):
                 return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=outputs, next_route="review",
                                   decision_summary="Full deterministic validation passed")
             if report.failure_classification == "infrastructure_failure":
@@ -282,7 +374,7 @@ class DeliveryWorkflow(ImplementationService):
             return self._service_error(exc)
 
     def _extra_agent_payload(self, context):
-        if context.node.agent_id != "repair.v1":
+        if not context.node.node_id.startswith("repair_"):
             return {}
         round_number = context.node.settings["repair_round"]
         if not 1 <= round_number <= MAX_REPAIR_ROUNDS:
@@ -292,7 +384,8 @@ class DeliveryWorkflow(ImplementationService):
         report = validation.content
         failures = report.summary
         source = "validation"
-        if validation_passed(report):
+        spec, plan, _ = self._package(context.task_id, context.input_artifact_ids)
+        if validation_passed(report, require_oracle=self._requires_oracle(context.task_id, spec, plan)):
             review = self._node_artifact(context.task_id, f"reviewer_{round_number - 1}", ReviewReport)
             if review.content.recommend_delivery:
                 raise ForgePilotError("repair_policy", "An approved review cannot trigger Repair")
@@ -302,7 +395,6 @@ class DeliveryWorkflow(ImplementationService):
             source = "reviewer"
         elif report.failure_classification != "code_failure":
             raise ForgePilotError("repair_policy", "Only deterministic code failures can trigger Repair")
-        spec, _, _ = self._package(context.task_id, context.input_artifact_ids)
         return {"previous_change_set": changes.content.model_dump(mode="json"),
                 "validation_report": report.model_dump(mode="json"),
                 "failure_classification": "code_failure", "failure_source": source,
@@ -311,10 +403,10 @@ class DeliveryWorkflow(ImplementationService):
                 "repair_round": round_number}
 
     def _review_handler(self, context):
-        spec, _, evidence = self._package(context.task_id, context.input_artifact_ids)
+        spec, plan, evidence = self._package(context.task_id, context.input_artifact_ids)
         round_number = context.node.settings["repair_round"]
         validation = self._node_artifact(context.task_id, f"validation_{round_number}", ValidationReport)
-        if not validation_passed(validation.content):
+        if not validation_passed(validation.content, require_oracle=self._requires_oracle(context.task_id, spec, plan)):
             return self._service_error(ForgePilotError("review_validation", "Review requires full validation"))
         changes = self._changes_parent(validation)
         try:
@@ -323,9 +415,11 @@ class DeliveryWorkflow(ImplementationService):
                 if context.attempt > 1:
                     raise ForgePilotError("llm_budget", "Restart cannot replenish Reviewer budget")
                 self._budgets[key] = ModelBudget.from_limits(self.reviewer.definition.limits)
-            report = self._await(self._review_agent(context, spec, changes, validation, evidence, self._budgets[key]))
+            report = self._await(self._review_agent(context, spec, changes, validation, evidence,
+                self._budgets[key], require_oracle=self._requires_oracle(context.task_id, spec, plan)))
             validate_review_coverage(spec.content, report)
-            artifact = self._save(context, report, "reviewer.v1", (spec.artifact_id, changes.artifact_id, validation.artifact_id))
+            artifact = self._save(context, report, self.reviewer.definition.agent_id,
+                                  (spec.artifact_id, changes.artifact_id, validation.artifact_id))
             if self._cancelled(context):
                 return NodeResult(NodeStatus.CANCELLED, output_artifact_ids=(artifact.artifact_id,))
             approved = report.verdict == "approve" and report.recommend_delivery and not report.blocking_issues and all(
@@ -344,7 +438,7 @@ class DeliveryWorkflow(ImplementationService):
             return self._service_error(ForgePilotError("review_contract", "Invalid independent review"))
 
     def _delivery_handler(self, context):
-        spec, _, _ = self._package(context.task_id, context.input_artifact_ids)
+        spec, plan, _ = self._package(context.task_id, context.input_artifact_ids)
         reviews = [self.events.artifacts.get(item) for item in context.input_artifact_ids
                    if isinstance(self.events.artifacts.get(item).content, ReviewReport)
                    and self.events.artifacts.get(item).content.recommend_delivery]
@@ -353,7 +447,8 @@ class DeliveryWorkflow(ImplementationService):
         review = reviews[0]
         validations = [self.events.artifacts.get(item) for item in review.parent_artifact_ids
                        if isinstance(self.events.artifacts.get(item).content, ValidationReport)]
-        if len(validations) != 1 or not validation_passed(validations[0].content):
+        if len(validations) != 1 or not validation_passed(validations[0].content,
+                require_oracle=self._requires_oracle(context.task_id, spec, plan)):
             return self._service_error(ForgePilotError("delivery_validation", "Delivery requires complete validation"))
         validation = validations[0]
         changes = self._changes_parent(validation)
@@ -368,7 +463,9 @@ class DeliveryWorkflow(ImplementationService):
                 commit=current.head_commit,
                 build_test_summary=(f"{validation.content.toolchain_profile}: configure/build passed; "
                     f"CTest {validation.content.tests_passed} passed, {validation.content.tests_failed} failed; "
-                    "Protected Oracle, workspace/test integrity and diff scope all passed."),
+                    + ("Protected Oracle passed; " if validation.content.hidden_oracle == "passed" else
+                       "Protected Oracle not run; ")
+                    + "workspace/test integrity and diff scope passed."),
                 reviewer_conclusion=review.content.summary, changed_files=tuple(item.path for item in changes.content.files),
                 usage_instructions=("Review the attached patch and reports, then choose squash, keep_branch or patch export using final delivery approval. "
                     f"Configure, build and run CTest with ToolchainProfile {validation.content.toolchain_profile}.\n"

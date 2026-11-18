@@ -120,7 +120,8 @@
         "analysis",
         "implementation",
         "review",
-        "repair"
+        "repair",
+        "task"
       ],
       "title": "Model Route",
       "type": "string"
@@ -156,7 +157,8 @@
         "impact_test_analyst",
         "implementer",
         "reviewer",
-        "repair"
+        "repair",
+        "generalist"
       ],
       "title": "Role",
       "type": "string"

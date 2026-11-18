@@ -158,6 +158,27 @@ async def test_index_excludes_secret_filename_and_scrubs_symbol_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_excluded_directory_does_not_exhaust_index_scan_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr("forgepilot.repository.MAX_SCAN_ENTRIES", 8)
+    reports = tmp_path / "src" / "Generated-Reports"
+    reports.mkdir(parents=True)
+    for number in range(12):
+        (reports / f"report{number}.py").write_text("VALUE = 0\n", encoding="utf-8")
+    (reports.parent / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    events = SqliteEventStore()
+    embeddings, vectors = RecordingEmbeddings(), MemoryVectors()
+    try:
+        settings = RagConfig(enabled=True, exclude=("generated-*",))
+        subject = RepositoryIndexer("repository-a", repository(tmp_path), settings,
+                                    embeddings, vectors, RagFileStore(events))
+        result = await subject.index_repository()
+        assert result.status == "ready" and result.total_files == 1
+        assert set(vectors.files) == {("repository-a", "src/main.py")}
+    finally:
+        events.close()
+
+
+@pytest.mark.asyncio
 async def test_first_index_then_unchanged_repository_uses_no_more_embeddings(tmp_path):
     (tmp_path / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("class Beta:\n    pass\n", encoding="utf-8")

@@ -729,7 +729,8 @@ class MissionRepository:
 
     def save_approval(self, *, approval_id: str, task_id: str, task_spec_artifact_id: str,
                       plan_artifact_id: str, scope_hash: str, approved_by: str,
-                      approval_type: str = "execution", created_at: str | None = None) -> dict[str, Any]:
+                      approval_type: str = "execution", created_at: str | None = None,
+                      audit_event: Mapping[str, Any] | None = None) -> dict[str, Any]:
         for value, label in ((approval_id, "approval ID"), (task_id, "task ID"),
                              (approved_by, "approver"), (approval_type, "approval type")):
             _identifier(value, label)
@@ -758,6 +759,11 @@ class MissionRepository:
                     by_id[plan_artifact_id]["content_sha256"], scope_hash, approved_by,
                     created_at or _now(),
                 ))
+                if audit_event is not None:
+                    from .mission_events import append_mission_event
+                    append_mission_event(self.events, task_id, audit_event["event_type"],
+                        {**audit_event["data"], "approval_id": approval_id},
+                        actor=audit_event.get("actor"))
             return self.get_approval(approval_id)
         except sqlite3.IntegrityError:
             raise ForgePilotError("approval_conflict", "Approval already exists or is invalid") from None

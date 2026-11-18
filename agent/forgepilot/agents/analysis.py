@@ -43,6 +43,8 @@ STAGES = {
     "root_cause_analysis": ("root-cause-analyst.v1", EvidenceBundle),
     "impact_test_analysis": ("impact-test-analyst.v1", EvidenceBundle),
     "generate_plan": ("orchestrator.v1", ExecutionPlan),
+    "generalist_analysis": ("generalist.v1", EvidenceBundle),
+    "generalist_plan": ("generalist.v1", ExecutionPlan),
 }
 
 
@@ -55,13 +57,17 @@ class AnalysisService:
     """
 
     def __init__(self, event_store, repository, gateway, *, retrieval=None,
-                 intelligence=None, approved_mcp=(), approved_server_ids=(), policy=None):
+                 intelligence=None, approved_mcp=(), approved_server_ids=(), policy=None,
+                 single_agent=False):
         self.events, self.repository, self.gateway = event_store, repository, gateway
         self.retrieval, self.intelligence = retrieval, intelligence
         self.approved_mcp = tuple(approved_mcp)
         self.approved_server_ids = tuple(approved_server_ids)
-        self.agents = AgentRegistry()
-        for agent_id in {value[0] for value in STAGES.values()}:
+        self.single_agent = single_agent
+        self.agents = AgentRegistry(include_generalist=single_agent)
+        stages = ("generalist_analysis", "generalist_plan") if single_agent else (
+            "draft_task_spec", "root_cause_analysis", "impact_test_analysis", "generate_plan")
+        for agent_id in {STAGES[stage][0] for stage in stages}:
             gateway.router.validate_agent(self.agents.get(agent_id))
         self.reviews = AnalysisReviewStore(event_store)
         handlers = {stage: self._agent_handler for stage in STAGES}
@@ -76,14 +82,16 @@ class AnalysisService:
         self._pending = {}
         self._cancel_requests = set()
 
-    def graph(self, request, *, locked_task_spec=None):
+    def graph(self, request, *, locked_task_spec=None, allow_locked_test_scope=False):
         request = AnalysisRequest.model_validate(request)
+        if allow_locked_test_scope and locked_task_spec is None:
+            raise ForgePilotError("policy_denied", "Editable test scope requires a locked TaskSpec")
         if locked_task_spec is not None:
             locked_task_spec = validate_task_spec(locked_task_spec)
             if (locked_task_spec.repository != request.repository
                     or locked_task_spec.data_policy != request.data_policy):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted repository or data policy")
-            self._validate_test_policy(locked_task_spec)
+            self._validate_test_policy(locked_task_spec, allow_locked_test_scope=allow_locked_test_scope)
         def agent(stage, dependencies):
             definition = self.agents.get(STAGES[stage][0])
             settings = {"request": request.model_dump(mode="json")} if stage == "draft_task_spec" else {}
@@ -92,7 +100,20 @@ class AnalysisService:
         draft = (agent("draft_task_spec", ()) if locked_task_spec is None else
                  NodeDefinition("draft_task_spec", NodeType.DETERMINISTIC, "locked_task_spec",
                      settings={"request": request.model_dump(mode="json"),
-                               "task_spec": locked_task_spec.model_dump(mode="json")}))
+                               "task_spec": locked_task_spec.model_dump(mode="json"),
+                               "allow_locked_test_scope": allow_locked_test_scope}))
+        if self.single_agent:
+            if locked_task_spec is None:
+                raise ForgePilotError("policy_denied", "Single-Agent baseline requires a locked TaskSpec")
+            return GraphDefinition("task-analysis-single-locked.v1", 1, (
+                draft,
+                agent("generalist_analysis", ("draft_task_spec",)),
+                NodeDefinition("join_evidence", NodeType.JOIN, "join_evidence",
+                    dependencies=("generalist_analysis",)),
+                agent("generalist_plan", ("draft_task_spec", "join_evidence")),
+                NodeDefinition("execution_approval", NodeType.HUMAN_GATE, "execution_approval",
+                    dependencies=("draft_task_spec", "join_evidence", "generalist_plan")),
+            ))
         return GraphDefinition("task-analysis-locked.v1" if locked_task_spec is not None else "task-analysis.v1", 1, (
             draft,
             NodeDefinition("analyst_fanout", NodeType.PARALLEL_FANOUT, "parallel_fanout", dependencies=("draft_task_spec",)),
@@ -119,7 +140,8 @@ class AnalysisService:
         spec = validate_task_spec(_plain_json(context.node.settings["task_spec"]))
         if spec.repository != request.repository or spec.data_policy != request.data_policy:
             raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted repository or data policy")
-        self._validate_test_policy(spec)
+        self._validate_test_policy(spec, allow_locked_test_scope=bool(
+            context.node.settings.get("allow_locked_test_scope", False)))
         artifact = create_artifact(task_id=context.task_id, producer="orchestrator.v1",
             producer_node="draft_task_spec", content=spec)
         with self.events.missions.consistent_view():
@@ -244,7 +266,7 @@ class AnalysisService:
 
     async def _agent(self, context):
         stage = context.node.node_id
-        definition = self.agents.get(STAGES[stage][0])
+        definition = self.agents.get(context.node.agent_id or STAGES[stage][0])
         schema = output_schema(stage)
         spec_artifact = None
         if stage == "draft_task_spec":
@@ -262,7 +284,7 @@ class AnalysisService:
             spec_artifact = specs[0]
             data_policy = spec_artifact.content.data_policy
             payload = {"task_spec": spec_artifact.model_dump(mode="json")}
-            if stage == "generate_plan":
+            if stage in {"generate_plan", "generalist_plan"}:
                 schema = output_schema(stage, task_spec=spec_artifact.content)
                 evidence = self._inputs(context, EvidenceBundle)
                 if len(evidence) != 1:
@@ -276,7 +298,7 @@ class AnalysisService:
         # explicit and never resumes an unaccounted model stream.
         budget = self._budget_for(context, definition)
         client = self.gateway.for_agent(definition, budget=budget)
-        mcp_enabled = "analyst" in definition.role and data_policy.external_mcp_allowed
+        mcp_enabled = stage in {"root_cause_analysis", "impact_test_analysis", "generalist_analysis"} and data_policy.external_mcp_allowed
         registry = build_analysis_registry(self.repository, role=definition.role,
             retrieval=self._retrieval_for(data_policy), intelligence=self.intelligence,
             approved_mcp=self.approved_mcp if mcp_enabled else (),
@@ -285,8 +307,29 @@ class AnalysisService:
             redactor=self.gateway.redactor)
         messages = [{"role": "system", "content": get_prompt(definition.agent_id, stage)},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        if stage in {"generate_plan", "generalist_plan"}:
+            criteria = spec_artifact.content.acceptance_criteria
+            messages.append({"role": "user", "content": (
+                "Return only one JSON object with exactly task_spec_artifact_id, steps, summary. "
+                f"task_spec_artifact_id must be {spec_artifact.artifact_id}. "
+                "Each step must have exactly step_id (STEP-1 etc.), owner (implementer), "
+                "depends_on (array), expected_files (array of concrete repository-relative files "
+                "to edit), action, verification (array), risk, adds_tests (boolean), and "
+                "acceptance_criteria_ids (array). A single step is sufficient for a small fix. "
+                "Cover every criterion with its exact verification method; the required pairs are "
+                + json.dumps([(item.id, item.verification) for item in criteria]) + ". "
+                "Do not plan changes to read-only existing tests or forbidden files. No Markdown."
+            )})
         before = (budget.model_calls, budget.tool_calls, budget.input_tokens + budget.output_tokens)
-        with registry.as_capabilities(definition.capabilities):
+        # A generalist never receives writer tools during analysis, nor the
+        # analyst-only extras during planning. The same reviewed stage tools
+        # are available to the corresponding multi-Agent nodes.
+        capabilities = (() if stage == "draft_task_spec" else
+                        self.agents.get("root-cause-analyst.v1").capabilities
+                        if stage == "generalist_analysis" else
+                        self.agents.get("orchestrator.v1").capabilities
+                        if stage == "generalist_plan" else definition.capabilities)
+        with registry.as_capabilities(capabilities):
             tools = registry.get_specs()
             while True:
                 if context.is_cancelled():
@@ -297,9 +340,20 @@ class AnalysisService:
                     break
                 # Validate the whole batch before dispatch. Even if a provider
                 # returns a forbidden call, it never reaches an adapter.
-                for call in response.message.tool_calls:
-                    validate_tool(self.events, context, registry, call.function.name,
-                                  call.function.arguments, capabilities=definition.capabilities)
+                try:
+                    for call in response.message.tool_calls:
+                        validate_tool(self.events, context, registry, call.function.name,
+                                      call.function.arguments, capabilities=capabilities)
+                except ForgePilotError as exc:
+                    if exc.code not in {"repository_path", "repository_boundary"}:
+                        raise
+                    # No tool in this batch has run. Return a bounded, generic
+                    # correction to the model without relaxing path validation.
+                    messages.append(response.message.model_dump(exclude_none=True))
+                    for call in response.message.tool_calls:
+                        messages.append({"role": "tool", "tool_call_id": call.id,
+                                         "content": "Invalid path. Use an existing repository-relative path from the task tree."})
+                    continue
                 budget.consume_tools(len(response.message.tool_calls))
                 messages.append(response.message.model_dump(exclude_none=True))
                 for call in response.message.tool_calls:
@@ -322,7 +376,36 @@ class AnalysisService:
                             continue
                         raise ForgePilotError("analysis_tool_failed", "Read-only analysis tool failed")
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result.output})
-        content = STAGES[stage][1].model_validate_json(response.message.content)
+        if stage in {"generate_plan", "generalist_plan"}:
+            def checked_plan(message):
+                plan = ExecutionPlan.model_validate_json(message.content)
+                validate_execution_plan(spec_artifact.content, plan)
+                self._validate_plan_paths(spec_artifact.content, plan)
+                return plan
+
+            try:
+                content = checked_plan(response.message)
+            except ValueError:
+                # JSON Schema cannot express every dependency, Artifact, file
+                # scope, or test-policy invariant. One correction is permitted;
+                # Repository/permission ForgePilotError denials are not caught.
+                if budget.model_calls >= budget.max_model_calls:
+                    raise
+                if context.is_cancelled():
+                    return NodeResult(NodeStatus.CANCELLED)
+                messages.append({"role": "user", "content": (
+                    "The ExecutionPlan failed a dependency, acceptance-criterion, file-scope, "
+                    "or test-policy check. Regenerate the complete ExecutionPlan from the "
+                    "supplied TaskSpec and evidence. Keep steps acyclic, use exact concrete "
+                    "file paths within the approved scope and file budget, and honor the "
+                    "existing/new test policy. Do not change task policy or request tools.")})
+                response = await model_call(self.events, context, definition, client,
+                                            messages, [], output_schema=schema)
+                if response.message.tool_calls:
+                    raise ForgePilotError("policy_denied", "Plan correction cannot request tools")
+                content = checked_plan(response.message)
+        else:
+            content = STAGES[stage][1].model_validate_json(response.message.content)
         if isinstance(content, TaskSpec):
             validate_task_spec(content)
             if content.data_policy != request.data_policy or content.repository != request.repository:
@@ -330,11 +413,32 @@ class AnalysisService:
             self._validate_test_policy(content)
         elif isinstance(content, EvidenceBundle):
             validate_evidence_bundle(content)
-            registry.validate_evidence(content)
+            try:
+                registry.validate_evidence(content)
+            except ForgePilotError as exc:
+                # A syntactically valid bundle can still cite a missing file,
+                # stale hash, or invalid line span. Give the Analyst one chance
+                # to correct its own citations without relaxing the evidence
+                # boundary or granting another tool call.
+                if (exc.code not in {"repository_path", "evidence_location", "evidence_stale"}
+                        or budget.model_calls >= budget.max_model_calls):
+                    raise
+                if context.is_cancelled():
+                    return NodeResult(NodeStatus.CANCELLED)
+                messages.append({"role": "user", "content": (
+                    "The EvidenceBundle contains a missing or stale repository evidence location. "
+                    "Regenerate the complete EvidenceBundle using only repository files and "
+                    "hashes already verified by the read-only tool results. Include exact "
+                    "repository-relative paths, line spans, symbols, and full current file hashes. "
+                    "Do not request tools or change the task policy.")})
+                response = await model_call(self.events, context, definition, client,
+                                            messages, [], output_schema=schema)
+                if response.message.tool_calls:
+                    raise ForgePilotError("policy_denied", "Evidence correction cannot request tools")
+                content = EvidenceBundle.model_validate_json(response.message.content)
+                validate_evidence_bundle(content)
+                registry.validate_evidence(content)
             self._receipts[key] = registry.external_receipts
-        else:
-            validate_execution_plan(spec_artifact.content, content)
-            self._validate_plan_paths(spec_artifact.content, content)
         artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
             producer_node=stage, parent_artifact_ids=context.input_artifact_ids, content=content)
         with self.events.missions.consistent_view():
@@ -379,16 +483,20 @@ class AnalysisService:
 
     def _join(self, context):
         bundles = self._inputs(context, EvidenceBundle)
-        if (len(bundles) != 2 or {a.producer for a in bundles} !=
-                {"root-cause-analyst.v1", "impact-test-analyst.v1"}):
-            raise NodeExecutionError(FailureKind.MODEL_CONTRACT_VIOLATION, "Both Analyst artifacts are required")
+        expected = {"generalist.v1"} if self.single_agent else {
+            "root-cause-analyst.v1", "impact-test-analyst.v1"}
+        if len(bundles) != len(expected) or {a.producer for a in bundles} != expected:
+            raise NodeExecutionError(FailureKind.MODEL_CONTRACT_VIOLATION, "Expected Analyst artifacts are required")
         items = []
         try:
             for bundle in bundles:
                 self._verify_evidence(context.task_id, bundle.content)
                 for item in bundle.content.items:
                     items.append(item.model_copy(update={"evidence_id": f"EV-{len(items)+1}"}))
-            merged = EvidenceBundle(items=tuple(items), summary="Root Cause and Impact/Test evidence joined; original provenance retained in parent artifacts.")
+            summary = ("Verified single-Agent analysis evidence joined; original provenance retained in parent artifact."
+                       if self.single_agent else
+                       "Root Cause and Impact/Test evidence joined; original provenance retained in parent artifacts.")
+            merged = EvidenceBundle(items=tuple(items), summary=summary)
             artifact = create_artifact(task_id=context.task_id, producer="orchestrator.v1",
                 producer_node="join_evidence", parent_artifact_ids=tuple(a.artifact_id for a in bundles), content=merged)
             with self.events.missions.consistent_view():
@@ -480,8 +588,17 @@ class AnalysisService:
                     raise ValueError("TaskSpec does not permit new tests")
 
     @staticmethod
-    def _validate_test_policy(spec):
-        if not spec.test_policy.existing_tests_read_only or spec.test_policy.modifiable_existing_test_patterns:
+    def _validate_test_policy(spec, *, allow_locked_test_scope=False):
+        policy = spec.test_policy
+        if policy.existing_tests_read_only and not policy.modifiable_existing_test_patterns:
+            return
+        if (allow_locked_test_scope and not policy.existing_tests_read_only
+                and policy.modifiable_existing_test_patterns
+                and all(not any(char in path for char in "*?[") for path in policy.modifiable_existing_test_patterns)):
+            # This only admits exact paths into the frozen specification. The
+            # writer and validator still need a separate plan-bound test grant.
+            return
+        if not policy.existing_tests_read_only or policy.modifiable_existing_test_patterns:
             raise ForgePilotError("policy_denied", "Existing tests require independent user approval")
 
 

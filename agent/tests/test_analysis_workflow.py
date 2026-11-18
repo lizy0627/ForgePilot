@@ -241,7 +241,7 @@ async def test_analyst_failure_never_fabricates_join_or_plan(cpp_repo, tmp_path,
         result = await service.run(str(uuid4()), request())
         assert result.status == NodeStatus.FAILED
         assert "plan" not in provider.counts
-        assert provider.counts["root"] == (2 if mode == "contract" else 4)
+        assert provider.counts["root"] == (2 if mode == "contract" else 6)
         root = next(n for n in result.nodes if n.node_id == "root_cause_analysis")
         assert not root.result.output_artifact_ids
         assert next(n for n in result.nodes if n.node_id == "join_evidence").attempt == 0

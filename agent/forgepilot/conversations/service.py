@@ -84,6 +84,13 @@ def web_mcp_snapshots(snapshots) -> tuple:
                  if getattr(snapshot.config,'transport',None)=='streamable_http')
 
 
+def web_search_tools(selected) -> set[str]:
+    """Skip Tavily's slow research/crawl tools for ordinary web chat."""
+    return {alias for alias,(snapshot,remote) in selected.items()
+            if getattr(snapshot.config.connection,'preset_id',None)!='tavily'
+            or remote in {'tavily-search','tavily_search','tavily-extract','tavily_extract'}}
+
+
 def _tool_access_notice(route: ChatToolRoute, *, project_available: bool,
                         web_tool_count: int) -> str:
     if route.project and project_available and route.web and web_tool_count:
@@ -266,7 +273,7 @@ class ChatService:
             raise ForgePilotError('chat_event_publish','内部回答事件发布失败，本轮已停止。') from None
 
     async def _event_message(self, prepared, specs, segment_id, callback,
-                             diagnostics: StreamMetrics | None = None):
+                             diagnostics: StreamMetrics | None = None, defer_content=False):
         await self._publish(callback,ChatAnswerEvent('segment_started',segment_id))
         model_started=monotonic()
         if diagnostics: diagnostics.llm_started()
@@ -277,7 +284,8 @@ class ChatService:
         async def publish_content(chunks):
             for text in chunks:
                 safe_content.append(text)
-                await self._publish(callback,ChatAnswerEvent('content',segment_id,text=text))
+                if not defer_content:
+                    await self._publish(callback,ChatAnswerEvent('content',segment_id,text=text))
 
         async def feed_content(text):
             try:
@@ -297,6 +305,9 @@ class ChatService:
             streamed=''.join(safe_content)
             if streamed!=self.redactor.text(raw_content):
                 raise ForgePilotError('stream_redaction','模型流增量脱敏校验不一致，本轮已停止。')
+            if defer_content:
+                for text in safe_content:
+                    await self._publish(callback,ChatAnswerEvent('content',segment_id,text=text))
             return streamed
 
         stream=getattr(self.llm,'stream_chat',None)
@@ -522,14 +533,19 @@ class ChatService:
                                                     cache_hit=repository_cache_hit)
             register_repository_tools(self.registry,repository)
             project_available=True
-        web_tools={name for name,(snapshot,_) in self.mcp.selected.items()
-                   if getattr(snapshot.config,'transport',None)=='streamable_http'}
+        web_tools=web_search_tools({name:entry for name,entry in self.mcp.selected.items()
+                    if getattr(entry[0].config,'transport',None)=='streamable_http'})
         allowed_tools=(None if legacy_tools else
             ((READ_TOOLS if project_available else frozenset()) | (web_tools if route.web else set())))
         access_notice='' if legacy_tools else _tool_access_notice(
             route,project_available=project_available,web_tool_count=len(web_tools) if route.web else 0)
+        web_style_notice=('联网问答先调用可用搜索工具，再给出最终回答。最终回答只写结论和必要解释，'
+            '不要展示搜索步骤、原始结果、来源清单、来源链接或引文；用户明确要求来源时，只引用实际返回的来源。'
+            if route.web and web_tools else '')
         messages=[{'role':'system','content':CHAT_SYSTEM+'\n'+MCP_RULES+'\n'+MEMORY_RULES+
-                   (('\n'+access_notice) if access_notice else '')+(('\n'+notice) if notice else '')}]
+                   (('\n'+access_notice) if access_notice else '')+
+                   (('\n'+web_style_notice) if web_style_notice else '')+
+                   (('\n'+notice) if notice else '')}]
         history=[{'role':m['role'],'content':m['content']} for m in history if m['role'] in {'user','assistant'}]
         history_length=len(history)
         messages.append({'role':'user','content':prompt})
@@ -584,7 +600,8 @@ class ChatService:
                     if diagnostics: diagnostics.model_finished(model_started)
                 message=self.redactor.data(reply.message.model_dump(exclude_none=True))
             else:
-                message=await self._event_message(prepared,specs,f'segment-{request_index+1}',on_event,diagnostics)
+                message=await self._event_message(prepared,specs,f'segment-{request_index+1}',on_event,
+                    diagnostics,defer_content=bool(route.web and not legacy_tools and specs))
             calls=message.get('tool_calls') or []
             if not calls:
                 return message.get('content') or '模型未返回回答，请重新提问。'
@@ -625,6 +642,8 @@ class ChatService:
                     finishing=True
                 observation['content']=json.dumps(fitted,ensure_ascii=False)
             messages.extend(batch)
+            if route.web and not legacy_tools:
+                finishing=True
         raise ForgePilotError('step_limit','本轮已达到 8 次模型请求上限，请缩小问题范围后继续提问。')
 
     async def close(self):

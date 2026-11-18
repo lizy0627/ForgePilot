@@ -125,7 +125,7 @@ class ConversationHost:
             content=await service.answer(history,request['prompt'],request['repository_path'],notice,
                 background=lambda:self.store.memory_background(request['conversation_id'],request['repository_path']),
                 on_event=broker.publish,diagnostics=broker.metrics,tool_mode=tool_mode)
-            status='completed'
+            status,error,error_code='completed',None,'none'
         except asyncio.CancelledError:
             status='cancelled'
         except ForgePilotError as exc:

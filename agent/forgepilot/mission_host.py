@@ -11,6 +11,7 @@ from inspect import signature
 import json
 import logging
 from pathlib import Path
+import re
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -58,7 +59,7 @@ class _SourcePreview:
 class MissionHost:
     def __init__(self, task_host=None, workflow_factory=None, *, runtime=None, capacity=None,
                  store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None,
-                 development_config=None):
+                 development_config=None, locked_approval_authority=None):
         # Positional TaskHost remains an in-process compatibility adapter only.
         # Production composition injects these shared components explicitly.
         self.runtime = runtime if runtime is not None else task_host.runtime
@@ -71,6 +72,7 @@ class MissionHost:
             raise ValueError("Mission dependencies must use the host event store")
         self.dependencies = dependencies
         self._development_config = development_config or (lambda: dependencies)
+        self.locked_approval_authority = locked_approval_authority
         self.graphs = GraphStore(self.store)
         self._services = {}
         self._previews: dict[str, _SourcePreview] = {}
@@ -109,9 +111,10 @@ class MissionHost:
             raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection changed; start a new mission")
         return snapshots
 
-    def _workflow(self, task_id, *, mcp_server_ids=None):
+    def _workflow(self, task_id, *, mcp_server_ids=None, single_agent=None):
         restoring = mcp_server_ids is None
         if task_id not in self._services:
+            metadata = None
             if mcp_server_ids is None:
                 metadata = self._metadata(task_id)
                 if (metadata.get("source_baseline") is None and self.graphs.snapshot(task_id).graph_id in {
@@ -127,24 +130,37 @@ class MissionHost:
                     raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection cannot be restored")
             else:
                 expected_revisions = None
+            if single_agent is None:
+                single_agent = (metadata or {}).get("orchestration_mode") == "single_agent"
             snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
             if self.factory is None:
                 from .mission_factory import build_mission_workflow
                 if self.dependencies is None:
                     raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
-                workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots)
+                workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots,
+                                                  single_agent=single_agent)
                 workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
             else:
+                kwargs = {}
                 if mcp_server_ids:
+                    kwargs["mcp_snapshots"] = snapshots
+                if single_agent:
+                    kwargs["single_agent"] = True
+                if kwargs:
                     try:
-                        signature(self.factory).bind(self.store, mcp_snapshots=())
+                        signature(self.factory).bind(self.store, **kwargs)
                     except (TypeError, ValueError):
-                        raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
-                    workflow = self.factory(self.store, mcp_snapshots=snapshots)
-                    workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
+                        if mcp_server_ids:
+                            raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
+                        raise ForgePilotError("mission_unavailable", "Mission factory does not support the requested topology") from None
+                    workflow = self.factory(self.store, **kwargs)
+                    if mcp_server_ids:
+                        workflow.mission_mcp_revisions = tuple(item.revision for item in kwargs["mcp_snapshots"])
                 else:
                     workflow = self.factory(self.store)
             workflow.mission_mcp_snapshots = snapshots
+            if bool(getattr(workflow, "single_agent", False)) != bool(single_agent):
+                raise ForgePilotError("mission_unavailable", "Mission workflow topology differs from the locked request")
             if restoring and metadata.get("source_baseline") is not None:
                 from .presets import MissionBuildSelection
                 config = self._build_config(metadata)
@@ -389,23 +405,32 @@ class MissionHost:
     async def create(self, **fields):
         return await self.runtime.submit(self._execute_control(self._admit, fields))
 
-    async def create_locked(self, task_spec, **fields):
+    async def create_locked(self, task_spec, *, allow_locked_test_scope=False,
+                            locked_authorization_ref=None, **fields):
         """Trusted in-process entry for a pre-registered TaskSpec.
 
         The HTTP CreateMission schema has no such field. A caller must bind the
         exact frozen content to the repository, toolchain, and task request.
+        Editable named tests still require a separate plan-bound approval.
         """
-        return await self.runtime.submit(self._execute_control(self._admit, fields, locked_task_spec=task_spec))
+        return await self.runtime.submit(self._execute_control(self._admit, fields, locked_task_spec=task_spec,
+            allow_locked_test_scope=allow_locked_test_scope,
+            locked_authorization_ref=locked_authorization_ref))
 
-    async def _admit(self, fields, *, locked_task_spec=None):
+    async def _admit(self, fields, *, locked_task_spec=None, allow_locked_test_scope=False,
+                     locked_authorization_ref=None):
         with self.capacity.admission("Mission capacity reached"):
             operation = asyncio.current_task()
             self._admissions.add(operation)
             try:
                 if fields.get("preview_token"):
                     async with self._source_lock:
-                        return await self._create(fields, locked_task_spec=locked_task_spec)
-                return await self._create(fields, locked_task_spec=locked_task_spec)
+                        return await self._create(fields, locked_task_spec=locked_task_spec,
+                            allow_locked_test_scope=allow_locked_test_scope,
+                            locked_authorization_ref=locked_authorization_ref)
+                return await self._create(fields, locked_task_spec=locked_task_spec,
+                    allow_locked_test_scope=allow_locked_test_scope,
+                    locked_authorization_ref=locked_authorization_ref)
             finally:
                 self._admissions.discard(operation)
 
@@ -425,13 +450,23 @@ class MissionHost:
             worker.result()
             raise
 
-    async def _create(self, fields, *, locked_task_spec=None):
+    async def _create(self, fields, *, locked_task_spec=None, allow_locked_test_scope=False,
+                      locked_authorization_ref=None):
         if self._stopping or self.runtime.stopping:
             raise ForgePilotError("server_stopping", "Runtime is stopping")
         if fields["toolchain_profile"] not in {"auto", "cmake", "cmake-ctest-v1"}:
             raise ForgePilotError("invalid_toolchain_profile", "Unknown trusted toolchain profile")
-        if fields["orchestration_mode"] != "multi_agent":
-            raise ForgePilotError("invalid_mode", "Mission mode must be multi_agent")
+        if fields["orchestration_mode"] not in {"multi_agent", "single_agent"}:
+            raise ForgePilotError("invalid_mode", "Unknown mission topology")
+        if fields["orchestration_mode"] == "single_agent" and locked_task_spec is None:
+            raise ForgePilotError("policy_denied", "Single-Agent baseline requires a trusted locked TaskSpec")
+        if allow_locked_test_scope and locked_task_spec is None:
+            raise ForgePilotError("policy_denied", "Editable test scope requires a locked TaskSpec")
+        if allow_locked_test_scope and (not isinstance(locked_authorization_ref, str)
+                or re.fullmatch(r"[0-9a-f]{64}", locked_authorization_ref) is None):
+            raise ForgePilotError("policy_denied", "Locked editable test scope requires an auditable manifest hash")
+        if not allow_locked_test_scope and locked_authorization_ref is not None:
+            raise ForgePilotError("policy_denied", "Manifest authorization cannot be attached to a normal mission")
         if locked_task_spec is not None:
             from .agents.contracts import validate_task_spec
             locked_task_spec = validate_task_spec(locked_task_spec)
@@ -459,7 +494,8 @@ class MissionHost:
             if source["source_head"] != preview.source_head or source["file_hashes"] != preview.file_hashes:
                 raise ForgePilotError("baseline_changed", "Source HEAD or selected files changed; preview and confirm again")
         task_id = preview.task_id if preview else str(uuid4())
-        workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()))
+        workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()),
+                                  single_agent=fields["orchestration_mode"] == "single_agent")
         try:
             # Trusted profile selection never accepts executable paths or shell text.
             profile = workflow.validator.profile.profile_id
@@ -522,12 +558,13 @@ class MissionHost:
                 definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request)
             else:
                 definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request,
-                                                     locked_task_spec=locked_task_spec)
+                                                     locked_task_spec=locked_task_spec,
+                                                     allow_locked_test_scope=allow_locked_test_scope)
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
             record = workflow.workspace.record(task_id)
             self.store.missions.admit_mission(task_id, record,
-                {**fields, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))})
+                {**fields, "locked_authorization_ref": locked_authorization_ref, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))})
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
         except BaseException:
@@ -544,6 +581,12 @@ class MissionHost:
                         raise ForgePilotError("baseline_cleanup",
                             "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
                 self._services.pop(task_id, None)
+                candidate = getattr(workflow, "mission_candidate_runner", None)
+                if candidate is not None:
+                    try:
+                        await asyncio.to_thread(candidate.close)
+                    except Exception:
+                        pass
                 self.store.missions.discard_unadmitted_graph(task_id)
             raise
 
@@ -574,7 +617,13 @@ class MissionHost:
                         pass
                 try:
                     if self.graphs.snapshot(task_id).status in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
-                        self._services.pop(task_id, None)
+                        workflow = self._services.pop(task_id, None)
+                        candidate = getattr(workflow, "mission_candidate_runner", None)
+                        if candidate is not None:
+                            try:
+                                await asyncio.to_thread(candidate.close)
+                            except Exception:
+                                pass
                 except ForgePilotError:
                     pass
         running = asyncio.create_task(drive())
@@ -592,6 +641,58 @@ class MissionHost:
 
     async def approve(self, task_id, **fields):
         return await self.runtime.submit(self._execute_control(self._approve, task_id, fields))
+
+    async def approve_existing_tests(self, task_id, *, expected_revision,
+                                     task_spec_hash, plan_hash, scope_hash,
+                                     exact_paths, authorization_source,
+                                     authorization_ref, approved_by):
+        """Separate trusted approval of named existing tests before execution.
+
+        This is deliberately absent from HTTP mission creation and execution
+        approval. A benchmark adapter must explicitly bind the frozen manifest's
+        exact paths and review hashes; a TaskSpec alone grants no test edits.
+        """
+        return await self.runtime.submit(self._execute_control(self._approve_existing_tests, task_id,
+            expected_revision=expected_revision, task_spec_hash=task_spec_hash,
+            plan_hash=plan_hash, scope_hash=scope_hash, exact_paths=exact_paths,
+            authorization_source=authorization_source,
+            authorization_ref=authorization_ref, approved_by=approved_by))
+
+    async def _approve_existing_tests(self, task_id, *, expected_revision,
+                                      task_spec_hash, plan_hash, scope_hash,
+                                      exact_paths, authorization_source,
+                                      authorization_ref, approved_by):
+        async with self._control(task_id):
+            self._check_revision(task_id, expected_revision)
+            self._idle(task_id)
+            workflow = self._workflow(task_id)
+            workflow._stored_graph(task_id)
+            with self.store.missions.consistent_view():
+                review = workflow.review(task_id)
+                if (task_spec_hash != review.task_spec_hash or plan_hash != review.plan_hash
+                        or scope_hash != review.scope_hash):
+                    raise _approval_conflict()
+                spec = self.store.artifacts.get(review.task_spec_artifact_id).content
+                named = tuple(spec.test_policy.modifiable_existing_test_patterns)
+                if (not isinstance(exact_paths, (tuple, list)) or tuple(exact_paths) != named
+                        or not named or any(any(char in path for char in "*?[") for path in named)):
+                    raise ForgePilotError("test_approval_required", "Exact named test paths must match the frozen TaskSpec")
+                locked_ref = self._metadata(task_id).get("locked_authorization_ref")
+                if (authorization_source != "locked_benchmark_manifest"
+                        or authorization_ref != locked_ref or not locked_ref
+                        or approved_by != "benchmark-evaluator/" + locked_ref):
+                    raise ForgePilotError("test_approval_required", "Test approval lacks the locked manifest authorization")
+                if (self.locked_approval_authority is None or
+                        self.locked_approval_authority(spec, authorization_source,
+                            authorization_ref, approved_by) is not True):
+                    raise ForgePilotError("test_approval_required", "No trusted authority verified the locked test grant")
+                approval = workflow.approve_existing_tests(review, approved_by=approved_by,
+                    audit_event={"event_type": "approval.existing_tests", "data": {
+                        "paths": list(named), "review_hash": review.review_hash,
+                        "authorization_source": authorization_source,
+                        "authorization_ref": authorization_ref, "approved_by": approved_by},
+                        "actor": "benchmark-evaluator"})
+            return safe_event_data(self.store.redactor, approval)
 
     async def _approve(self, task_id, fields):
         async with self._control(task_id):
@@ -685,6 +786,12 @@ class MissionHost:
             workflow = self._workflow(task_id)
             graph = workflow._stored_graph(task_id)
             if token is None:
+                recover_storage = getattr(workflow, "recover_storage_failure", None)
+                if snapshot.status is NodeStatus.FAILED and recover_storage is not None:
+                    recovered = await asyncio.to_thread(recover_storage, task_id, expected_revision=revision)
+                    if recovered:
+                        snapshot = self.graphs.snapshot(task_id)
+                        revision = snapshot.revision
                 if snapshot.status not in {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}:
                     self.store.missions.request_recovery(task_id, revision)
                 plan = await asyncio.to_thread(workflow.runner.prepare_recovery, task_id, graph)
@@ -750,6 +857,10 @@ class MissionHost:
         await asyncio.gather(*late, return_exceptions=True)
         for token in tuple(self._previews):
             await self._discard_preview(token)
+        for workflow in self._services.values():
+            candidate = getattr(workflow, "mission_candidate_runner", None)
+            if candidate is not None:
+                await asyncio.to_thread(candidate.close)
 
 
 __all__ = ["MissionHost"]

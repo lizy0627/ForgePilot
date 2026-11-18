@@ -210,7 +210,7 @@ def test_analysis_definitions_prompts_budgets_and_capabilities_are_bound():
         assert definition.prompt_version == prompt_version
         assert prompt_version in get_prompt(agent_id)
         assert "repository.patch" not in definition.capabilities
-        assert definition.limits.max_model_calls == (3 if agent_id == "orchestrator.v1" else 4)
+        assert definition.limits.max_model_calls == (3 if agent_id == "orchestrator.v1" else 6)
         assert ("mcp.read" in definition.capabilities) == (agent_id != "orchestrator.v1")
     with pytest.raises(ValueError):
         get_prompt("root-cause-analyst.v1", "generate_plan")

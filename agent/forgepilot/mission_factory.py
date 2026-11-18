@@ -37,7 +37,9 @@ class MissionDependencies:
 
 
 def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=None, cloud_model_allowed=False,
-                           mcp_snapshots=()) -> DeliveryWorkflow:
+                           mcp_snapshots=(), single_agent=False,
+                           validation_profile=None, process_runner=None,
+                           oracle_runner=None, integrity_task_spec=None) -> DeliveryWorkflow:
     """Lazy composition: OpenAPI and v1 startup need no graph/model/build tools.
 
     The composition root supplies trusted configuration and a borrowed gateway.
@@ -59,7 +61,7 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
     try:
         # Validate every built-in role before allocating workspace directories.
         # Incomplete legacy configurations still serve API v1 unchanged.
-        AgentRegistry(router=gateway.router)
+        AgentRegistry(router=gateway.router, include_generalist=single_agent)
     except ForgePilotError:
         raise ForgePilotError("llm_config",
             "Missions require configured orchestration, analysis, implementation, review and repair "
@@ -76,7 +78,7 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
     root = events.artifacts.root / "mission-workspaces"
     workspace = WorkspaceManager(root, git_executable=dependencies.git_executable,
                                  artifacts=events.artifacts)
-    profile = ToolchainProfile(
+    profile = validation_profile or ToolchainProfile(
         cmake=config.cmake if config else executable(None, "cmake"),
         ctest=config.ctest if config else executable(None, "ctest"),
     )
@@ -86,7 +88,8 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
         architecture=config.architecture if config else None,
         make_program=config.make_program if config else None,
         timeout=max(config.configure_timeout, config.build_timeout, config.test_timeout) if config else 300,
-        redactor=dependencies.redactor)
+        redactor=dependencies.redactor, process_runner=process_runner,
+        oracle_runner=oracle_runner, integrity_task_spec=integrity_task_spec)
     # The host admits exact saved server snapshots. Adapters are handed only to
     # fresh Analyst registries; all other roles have no MCP tool instance.
     mcp_manager = MCPManager(tuple(mcp_snapshots), redactor=dependencies.redactor,
@@ -95,7 +98,8 @@ def build_mission_workflow(dependencies: MissionDependencies, *, oracle_source=N
                        "approved_server_ids": tuple(s.server_id for s in mcp_manager.snapshots)}
     workflow = DeliveryWorkflow(events, workspace, gateway, validator=validator,
                                 rg_executable=dependencies.rg_executable,
-                                analysis_kwargs=analysis_kwargs)
+                                analysis_kwargs=analysis_kwargs,
+                                single_agent=single_agent)
     workflow.mission_rag_manager = dependencies.rag_manager
     workflow.mission_intelligence_config = dependencies.intelligence_config
     workflow.mission_mcp_manager = mcp_manager

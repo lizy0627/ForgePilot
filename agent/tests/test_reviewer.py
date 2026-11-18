@@ -7,12 +7,13 @@ import pytest
 
 from forgepilot.agents.prompts import get_prompt
 from forgepilot.agents.registry import AgentRegistry
-from forgepilot.agents.review import ReviewerService, validate_review
+from forgepilot.agents.review import ReviewerService, require_complete_validation, validate_review
 from forgepilot.artifacts.models import CommandResult, ReviewReport
 from forgepilot.artifacts.validation import create_artifact
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from forgepilot.validation import PUBLIC_PIPELINE_STAGES
 from conftest import call, reply
 from test_artifact_protocol import TASK_ID, all_contents
 
@@ -117,6 +118,42 @@ async def test_incomplete_validation_cannot_be_overruled_by_reviewer(change):
         with pytest.raises(ForgePilotError, match="review_validation"):
             await ReviewerService(gateway).review(spec, changes, validation)
     assert not provider.seen
+
+
+@pytest.mark.asyncio
+async def test_public_validation_review_requires_explicit_policy_and_no_protected_criterion():
+    spec, changes, validation, _, expected = inputs(hidden_oracle="not_run")
+    report = validation.content.model_copy(update={"commands": tuple(item for item in
+        validation.content.commands if item.kind != "protected_test")})
+    with pytest.raises(ForgePilotError, match="review_validation"):
+        require_complete_validation(report)
+    with pytest.raises(ForgePilotError, match="review_validation"):
+        require_complete_validation(report, require_oracle=False)
+    report = report.model_copy(update={"workspace_integrity": "passed", "diff_scope": "passed",
+        "pipeline_stages": PUBLIC_PIPELINE_STAGES})
+    require_complete_validation(report, require_oracle=False)
+    validation = create_artifact(task_id=TASK_ID, producer="validator.v1",
+        producer_node="test-node", content=report,
+        parent_artifact_ids=(changes.artifact_id,))
+    provider = Provider(reply(expected.model_dump_json()))
+    async with gateway_for(provider) as gateway:
+        with pytest.raises(ForgePilotError, match="review_validation"):
+            await ReviewerService(gateway).review(spec, changes, validation, require_oracle=False)
+    assert not provider.seen
+    public_spec = create_artifact(task_id=TASK_ID, producer="orchestrator.v1",
+        producer_node="test-node", content=spec.content.model_copy(update={
+            "acceptance_criteria": tuple(item.model_copy(update={"verification": "ctest"})
+                if item.verification == "protected_test" else item
+                for item in spec.content.acceptance_criteria)}))
+    public_review = expected.model_copy(update={
+        "test_review": "Public CTest passed; Protected Oracle not run",
+        "acceptance_criteria": tuple(item.model_copy(update={"evidence": "Public validation passed"})
+            for item in expected.acceptance_criteria)})
+    provider = Provider(reply(public_review.model_dump_json()))
+    async with gateway_for(provider) as gateway:
+        assert (await ReviewerService(gateway).review(public_spec, changes, validation,
+            require_oracle=False)).recommend_delivery
+    assert len(provider.seen) == 1
 
 
 @pytest.mark.asyncio

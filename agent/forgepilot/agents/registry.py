@@ -26,7 +26,7 @@ BUILTIN_AGENT_DEFINITIONS = (
         prompt_version="orchestrator-prompt.v1", model_route="orchestration",
         input_artifacts=("TaskSpec", "EvidenceBundle"), output_artifacts=("TaskSpec", "ExecutionPlan", "DeliveryBundle"),
         capabilities=("repository.read", "repository.search", "repository.rag"),
-        limits=_limits(model=3, input_tokens=30_000),
+        limits=_limits(model=3, input_tokens=80_000),
     ),
     AgentDefinition(
         agent_id="root-cause-analyst.v1", display_name="Root Cause Analyst", role="root_cause_analyst",
@@ -34,7 +34,7 @@ BUILTIN_AGENT_DEFINITIONS = (
         prompt_version="root-cause-analyst-prompt.v1", model_route="analysis",
         input_artifacts=("TaskSpec",), output_artifacts=("EvidenceBundle",),
         capabilities=("repository.read", "repository.search", "repository.symbols", "repository.references", "repository.rag", "mcp.read"),
-        limits=_limits(model=4, tools=50, input_tokens=40_000),
+        limits=_limits(model=6, tools=50, input_tokens=80_000),
     ),
     AgentDefinition(
         agent_id="impact-test-analyst.v1", display_name="Impact and Test Analyst", role="impact_test_analyst",
@@ -42,7 +42,7 @@ BUILTIN_AGENT_DEFINITIONS = (
         prompt_version="impact-test-analyst-prompt.v1", model_route="analysis",
         input_artifacts=("TaskSpec",), output_artifacts=("EvidenceBundle",),
         capabilities=("repository.read", "repository.search", "repository.symbols", "repository.references", "repository.rag", "mcp.read"),
-        limits=_limits(model=4, tools=50, input_tokens=40_000),
+        limits=_limits(model=6, tools=50, input_tokens=80_000),
     ),
     AgentDefinition(
         agent_id="implementer.v1", display_name="Implementer", role="implementer",
@@ -72,17 +72,34 @@ BUILTIN_AGENT_DEFINITIONS = (
     ),
 )
 
+# Opt-in baseline role. Ordinary multi-Agent missions keep their existing
+# registry and routes; a trusted single-Agent mission explicitly installs it.
+GENERALIST_DEFINITION = AgentDefinition(
+    agent_id="generalist.v1", display_name="Generalist", role="generalist",
+    role_description="Sequentially analyzes, plans, edits, reviews and repairs one locked task.",
+    prompt_version="generalist-prompt.v1", model_route="task",
+    input_artifacts=("TaskSpec", "EvidenceBundle", "ExecutionPlan", "ChangeSet", "ValidationReport"),
+    output_artifacts=("TaskSpec", "EvidenceBundle", "ExecutionPlan", "ChangeSet", "ReviewReport"),
+    capabilities=("repository.read", "repository.search", "repository.symbols",
+                  "repository.references", "repository.rag", "repository.patch",
+                  "validation.read", "mcp.read"),
+    limits=_limits(model=8, tools=50, input_tokens=64_000, output_tokens=12_000),
+)
+
 
 class AgentRegistry:
-    def __init__(self, definitions=BUILTIN_AGENT_DEFINITIONS, *, prompt_versions=None, router=None):
+    def __init__(self, definitions=BUILTIN_AGENT_DEFINITIONS, *, prompt_versions=None, router=None,
+                 include_generalist=False):
         # This is a manifest of known prompt versions, not executable prompts.
         # Custom declarations must supply a trusted version->role manifest.
         self._prompt_versions = dict(prompt_versions) if prompt_versions is not None else {
             definition.prompt_version: definition.role for definition in BUILTIN_AGENT_DEFINITIONS
         }
+        if include_generalist:
+            self._prompt_versions.setdefault(GENERALIST_DEFINITION.prompt_version, GENERALIST_DEFINITION.role)
         self._router = router
         self._definitions: dict[str, AgentDefinition] = {}
-        for definition in definitions:
+        for definition in (*definitions, *((GENERALIST_DEFINITION,) if include_generalist else ())):
             self.register(definition)
 
     def register(self, definition: AgentDefinition) -> None:

@@ -98,12 +98,16 @@ _INPUTS = {
     "root_cause_analysis": AnalystInput,
     "impact_test_analysis": AnalystInput,
     "generate_plan": GeneratePlanInput,
+    "generalist_analysis": AnalystInput,
+    "generalist_plan": GeneratePlanInput,
 }
 _OUTPUTS = {
     "draft_task_spec": AnalysisTaskSpec,
     "root_cause_analysis": AnalysisEvidenceBundle,
     "impact_test_analysis": AnalysisEvidenceBundle,
     "generate_plan": ExecutionPlan,
+    "generalist_analysis": AnalysisEvidenceBundle,
+    "generalist_plan": ExecutionPlan,
 }
 
 
@@ -149,7 +153,7 @@ def output_schema(stage: str, *, task_spec: TaskSpec | None = None) -> dict:
                 ]}},
             }},
         }]
-    elif stage == "generate_plan" and task_spec is not None:
+    elif stage in {"generate_plan", "generalist_plan"} and task_spec is not None:
         schema["$defs"]["PlanStep"]["properties"]["acceptance_criteria_ids"]["items"]["enum"] = [
             item.id for item in task_spec.acceptance_criteria]
         schema["properties"]["steps"]["allOf"] = [
@@ -185,10 +189,11 @@ def validate_execution_plan(spec: TaskSpec, plan: ExecutionPlan | dict) -> Execu
     return checked
 
 
-def contract_schemas() -> dict[str, dict]:
+def contract_schemas(*, include_generalist=False) -> dict[str, dict]:
     return {
         f"agent-{stage.replace('_', '-')}-{direction}.v1.schema.json": factory(stage)
-        for stage in _INPUTS for direction, factory in (("input", input_schema), ("output", output_schema))
+        for stage in _INPUTS if include_generalist or not stage.startswith("generalist_")
+        for direction, factory in (("input", input_schema), ("output", output_schema))
     }
 
 

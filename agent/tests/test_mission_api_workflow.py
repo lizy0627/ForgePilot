@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from closed_loop_support import ORIGINAL, make_loop_case
+from closed_loop_support import ORIGINAL, make_loop_case, review_response
 from conftest import reply
 from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.api import create_app
@@ -33,8 +33,9 @@ def frames(text):
 
 
 class AnalysisProvider:
-    def __init__(self, case):
+    def __init__(self, case, *, public_only=False):
         self.case = case
+        self.public_only = public_only
 
     async def chat(self, messages, tools=None):
         payload = json.loads(next(message["content"] for message in messages if message["role"] == "user"))
@@ -42,9 +43,14 @@ class AnalysisProvider:
             result = self.case.spec.content.model_dump(mode="json")
             result["repository"] = payload["repository"]
             result["data_policy"] = payload["data_policy"]
+            if self.public_only:
+                result["acceptance_criteria"][0].update(
+                    description="Public regression behavior passes", verification="ctest")
         elif "evidence" in payload:
             result = self.case.plan.content.model_dump(mode="json")
             result["task_spec_artifact_id"] = payload["task_spec"]["artifact_id"]
+            if self.public_only:
+                result["steps"][0]["verification"] = ["build", "ctest"]
         else:
             result = {"items": [{"evidence_id": "EV-1", "claim": "Negative input is returned unchanged",
                 "reason": "The value function returns its input", "confidence": 0.9,
@@ -55,6 +61,73 @@ class AnalysisProvider:
 
     async def aclose(self):
         pass
+
+
+@pytest.mark.asyncio
+async def test_http_public_mission_without_oracle_reaches_truthful_delivery(tmp_path, git_exe):
+    case = await make_loop_case(tmp_path, git_exe)
+    base = case.gateway.router.configuration
+    providers = {**case.providers, "analysis": AnalysisProvider(case, public_only=True)}
+    response = review_response()
+    public_review = json.loads(response.message.content)
+    public_review["test_review"] = "Public CTest passed; Protected Oracle was not run"
+    providers["review"].responses = [reply(json.dumps(public_review), usage=response.usage)]
+    config = ModelConfiguration(profiles=(*base.profiles, ModelProfile(profile_id="analysis",
+        base_url="http://127.0.0.1:1/v1", api_key_ref="env:FORGEPILOT_API_KEY", model="fake-analysis",
+        family="analyst", max_output_tokens=2048)), routes=(*base.routes,
+        ModelRoute(route_id="analysis", primary="analysis"), ModelRoute(route_id="orchestration", primary="analysis")))
+    gateway = ModelGateway(config, secret_resolver=lambda _: "offline-only",
+        provider_factory=lambda profile, _: providers[profile.profile_id])
+    validator = ValidationService(case.manager, case.validator.profile, build_root=case.validator.guard.root,
+        oracle=None, generator="Visual Studio 17 2022", architecture="x64")
+    app = create_app(lambda trace: None, store=case.events,
+        mission_factory=lambda events: DeliveryWorkflow(events, case.manager, gateway, validator=validator))
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                    base_url="http://127.0.0.1") as client:
+                created = await client.post("/api/v2/missions", json={
+                    "repository_path": str(case.root), "request": "Fix negative input behavior",
+                    "task_type": "bug_fix"})
+                assert created.status_code == 202, created.text
+                path = f"/api/v2/missions/{created.json()['task_id']}"
+                waiting = await poll(client, path, {"awaiting_human", "failed", "retryable"})
+                assert waiting["status"] == "awaiting_human", (await client.get(path + "/graph")).json()
+                assert (await client.get(path + "/graph")).json()["graph_id"] == "task-analysis-delivery.v4"
+                review = waiting["review"]
+                approved = await client.post(path + "/approvals", json={
+                    "expected_revision": waiting["current_revision"], "decision": "approved",
+                    **{field: review[field] for field in ("task_spec_hash", "plan_hash", "scope_hash")}})
+                assert approved.status_code == 202, approved.text
+                completed = await poll(client, path, {"succeeded", "failed", "retryable", "cancelled"})
+                assert completed["status"] == "succeeded", (await client.get(path + "/graph")).json()
+                validation = (await client.get(path + "/validation")).json()["latest"]["content"]
+                assert validation["status"] == "passed"
+                assert validation["hidden_oracle"] == "not_run"
+                assert "not configured and not run" in validation["summary"]
+                assert "Protected Oracle (not run)" in validation["pipeline_stages"]
+                assert not any(item["kind"] == "protected_test" for item in validation["commands"])
+                artifacts = (await client.get(path + "/artifacts")).json()["items"]
+                delivery = next(item["content"] for item in artifacts if item["artifact_type"] == "DeliveryBundle")
+                assert "Protected Oracle not run" in delivery["build_test_summary"]
+                preview = await client.post(path + "/delivery", json={
+                    "expected_revision": completed["current_revision"]})
+                assert preview.status_code == 200, preview.text
+                denied = await client.post(path + "/delivery", json={
+                    "expected_revision": preview.json()["mission"]["current_revision"],
+                    "mode": "patch", "token": "0" * 64})
+                assert denied.status_code == 403 and denied.json()["error"]["code"] == "delivery_approval"
+                preview = await client.post(path + "/delivery", json={
+                    "expected_revision": (await client.get(path)).json()["current_revision"]})
+                assert preview.status_code == 200, preview.text
+                exported = await client.post(path + "/delivery", json={
+                    "expected_revision": preview.json()["mission"]["current_revision"],
+                    "mode": "patch", "token": preview.json()["delivery"]["token"]})
+                assert exported.status_code == 200, exported.text
+                assert exported.json()["delivery"]["mode"] == "patch"
+    finally:
+        await gateway.aclose()
+        await case.gateway.aclose()
 
 
 async def poll(client, path, statuses):

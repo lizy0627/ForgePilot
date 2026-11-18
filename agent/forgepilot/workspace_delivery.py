@@ -7,16 +7,21 @@ An interrupted merge is deliberately never retried or rolled back automatically.
 from __future__ import annotations
 
 from hashlib import sha256
+import difflib
+from fnmatch import fnmatchcase
 import hmac
 import json
 from pathlib import Path
 import re
 import secrets
 
-from .artifacts.models import ChangedFile, ChangeSet, DeliveryBundle, ReviewReport, ValidationReport
+from .artifacts.models import (ChangedFile, ChangeSet, DeliveryBundle, ExecutionPlanArtifact,
+                               ReviewReport, TaskSpecArtifact, ValidationReport)
 from .artifacts.validation import validate_artifact
 from .errors import ForgePilotError
-from .workspace_safety import manifest, validate_relative
+from .integrity import _assertions, is_test_path
+from .path_identity import path_key
+from .workspace_safety import Guard, manifest, validate_relative
 
 
 _HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -34,6 +39,103 @@ def _fail(code, message):
 
 
 class DeliveryMixin:
+    def recover_observed_change_set(self, task_id, spec_artifact, plan_artifact, baseline):
+        """Describe only a recorded interrupted writer's unambiguous production edits.
+
+        This host-only operation returns observed data, never a model completion
+        or permission grant. RecoveryManager still owns adoption/checkpointing,
+        and deterministic validation plus independent review remain mandatory.
+        Source bytes, workspace state, Artifacts and graph state are not written.
+        """
+        spec_artifact = TaskSpecArtifact.model_validate(validate_artifact(spec_artifact))
+        plan_artifact = ExecutionPlanArtifact.model_validate(validate_artifact(plan_artifact))
+        if (spec_artifact.task_id != task_id or plan_artifact.task_id != task_id
+                or plan_artifact.content.task_spec_artifact_id != spec_artifact.artifact_id):
+            _fail("workspace_recovery", "Observed recovery requires the same task and frozen plan")
+        spec, plan = spec_artifact.content, plan_artifact.content
+        criteria = {criterion.id for criterion in spec.acceptance_criteria}
+        if (getattr(baseline, "task_id", None) != task_id
+                or not getattr(baseline, "workspace_id", None)
+                or not getattr(baseline, "head_commit", None)):
+            _fail("workspace_recovery", "Observed recovery requires a complete approved baseline")
+        baseline_files = dict(baseline.file_hashes)
+        if any(value is None for value in baseline_files.values()):
+            _fail("workspace_recovery", "Observed recovery requires a complete existing-file baseline")
+        frozen = set(getattr(baseline, "input_artifacts", ())) | set(getattr(baseline, "output_artifacts", ()))
+        if frozen and not {(spec_artifact.artifact_id, spec_artifact.content_sha256),
+                           (plan_artifact.artifact_id, plan_artifact.content_sha256)} <= frozen:
+            _fail("workspace_recovery", "Recovery Artifacts differ from the approved checkpoint")
+        with self._operation(task_id, recover=True) as state:
+            before, observed = state.get("writer_before"), state.get("writer_observed")
+            if (state["status"] != "interrupted_writer" or state.get("intent") or not before or not observed
+                    or state["workspace_id"] != baseline.workspace_id
+                    or before.get("head") != baseline.head_commit or before.get("files") != baseline_files
+                    or state["expected_head"] != baseline.head_commit
+                    or state["expected_files"] != baseline_files):
+                _fail("workspace_recovery", "Interrupted writer does not start at the approved baseline")
+            current = self._snapshot(state)
+            index_hash = self._index_hash(state)
+            if (current.head_commit != baseline.head_commit or current.head_commit != observed.get("head")
+                    or dict(current.file_hashes) != observed.get("files")
+                    or index_hash != state["expected_index"]):
+                _fail("workspace_changed", "Interrupted output, HEAD or index changed after observation")
+            checkpoint_id = getattr(baseline, "checkpoint_id", None)
+            if checkpoint_id:
+                self.verify_checkpoint(self.record(task_id), checkpoint_id, baseline.head_commit, baseline_files)
+            git = self._git(state)
+            self._verify_commit(state, baseline.head_commit, baseline_files)
+            original = self._tree_bytes(git, baseline.head_commit)
+            if {name: sha256(data).hexdigest() for name, data in original.items()} != baseline_files:
+                _fail("workspace_recovery", "Git baseline bytes differ from the frozen manifest")
+            if set(current.file_hashes) != set(baseline_files):
+                _fail("workspace_recovery", "Observed recovery does not support additions or deletions")
+            changed = sorted(name for name in baseline_files if baseline_files[name] != current.file_hashes[name])
+            if not changed or len(changed) > spec.allowed_scope.max_changed_files:
+                _fail("workspace_recovery", "Observed changes are empty or exceed the frozen file budget")
+            approved = {path_key(name) for name in (state.get("approved_paths") or ())}
+            files = []
+            guard = Guard(state["worktree_path"])
+            for path in changed:
+                validate_relative(path)
+                key = path_key(path)
+                allowed = any(fnmatchcase(key, path_key(pattern)) for pattern in spec.allowed_scope.path_patterns)
+                forbidden = any(fnmatchcase(key, path_key(pattern)) for pattern in spec.forbidden_scope)
+                if key not in approved or not allowed or forbidden or is_test_path(path):
+                    _fail("workspace_scope", "Observed recovery is limited to approved production files")
+                steps = [step for step in plan.steps if step.owner in {"implementer", "implementer.v1"}
+                         and key in {path_key(name) for name in step.expected_files}]
+                if (len(steps) != 1 or not steps[0].acceptance_criteria_ids
+                        or not set(steps[0].acceptance_criteria_ids) <= criteria):
+                    _fail("workspace_recovery", "Observed file has no unique approved plan and criterion mapping")
+                old, new = original[path], guard.read(path)
+                if (sha256(old).hexdigest() != baseline_files[path]
+                        or sha256(new).hexdigest() != current.file_hashes[path]):
+                    _fail("workspace_changed", "Observed file bytes changed during recovery inspection")
+                try:
+                    if b"\0" in old or b"\0" in new:
+                        raise UnicodeError()
+                    old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
+                except UnicodeError:
+                    _fail("workspace_recovery", "Observed recovery requires ordinary UTF-8 production text")
+                # Assertion-bearing files may mix test and production behavior;
+                # this minimal recovery path does not infer test-edit authority.
+                if _assertions(old_text) or _assertions(new_text) or path.lower().endswith(".cmake") or path_key(Path(path).name) == "cmakelists.txt":
+                    _fail("workspace_recovery", "Test/assertion/build-registration changes require explicit recovery review")
+                rows = difflib.unified_diff(old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True), fromfile="a/" + path, tofile="b/" + path)
+                diff = "".join(row if row.endswith("\n") else row + "\n\\ No newline at end of file\n" for row in rows)
+                if not diff:
+                    _fail("workspace_recovery", "Observed production change has no exact text diff")
+                files.append(ChangedFile(path=path, change_type="modified", unified_diff=diff,
+                    before_sha256=baseline_files[path], after_sha256=current.file_hashes[path],
+                    plan_step_ids=(steps[0].step_id,), acceptance_criteria_ids=steps[0].acceptance_criteria_ids,
+                    test_change="none"))
+            if self._snapshot(state) != current or self._index_hash(state) != index_hash:
+                _fail("workspace_changed", "Workspace changed before observed recovery returned")
+            return ChangeSet(execution_plan_artifact_id=plan_artifact.artifact_id, files=tuple(files),
+                requires_additional_approval=False,
+                summary="Host recovered observed production changes after an Artifact-storage interruption; no model reply was replayed")
+
     @staticmethod
     def _complete_delivery_operation(state):
         operation_id = state.pop("pending_delivery_operation_id", None)

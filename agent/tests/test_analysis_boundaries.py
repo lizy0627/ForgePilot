@@ -40,6 +40,125 @@ class BoundaryProvider(AnalysisProvider):
         return reply(json.dumps(content), usage=response.usage)
 
 
+class EvidenceLocationProvider(AnalysisProvider):
+    def __init__(self, root, mode):
+        super().__init__(root)
+        self.mode = mode
+
+    async def chat(self, messages, tools=None):
+        response = await super().chat(messages, tools)
+        if "You are impact-test-analyst.v1" not in messages[0]["content"]:
+            return response
+        attempt = self.counts["impact"]
+        if self.mode == "exhausted" and attempt <= 5:
+            return reply(None, calls=[call("repository_read_range", '{"path":"Counter.cpp"}')],
+                         usage={"prompt_tokens": 10, "completion_tokens": 3})
+        if self.mode == "repair" and attempt > 1:
+            return response
+        content = json.loads(response.message.content)
+        content["items"][0]["path"] = ".git/config" if self.mode == "denied" else "missing-file.cpp"
+        return reply(json.dumps(content), usage=response.usage)
+
+
+class PlanSemanticsProvider(AnalysisProvider):
+    def __init__(self, root, mode):
+        super().__init__(root)
+        self.mode = mode
+
+    async def chat(self, messages, tools=None):
+        response = await super().chat(messages, tools)
+        if self.seen[-1][0] != "plan":
+            return response
+        attempt = self.counts["plan"]
+        if self.mode == "exhausted" and attempt <= 2:
+            return reply(None, calls=[call("repository_read_range", '{"path":"Counter.cpp"}')],
+                         usage={"prompt_tokens": 10, "completion_tokens": 3})
+        if self.mode.startswith("repair_") and attempt > 1:
+            return response
+        content = json.loads(response.message.content)
+        if self.mode == "denied":
+            content["steps"][0]["expected_files"] = [".git/config"]
+        elif self.mode in {"repair_scope", "repeat_scope", "exhausted"}:
+            content["steps"][0]["expected_files"] = ["outside.h"]
+        else:
+            content["steps"][0]["depends_on"] = ["STEP-2"]
+        return reply(json.dumps(content), usage=response.usage)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,expected_calls", [
+    ("repair_cycle", 2), ("repeat_cycle", 2), ("repair_scope", 2),
+    ("repeat_scope", 2), ("denied", 1), ("exhausted", 3),
+])
+async def test_plan_feedback_is_bounded_and_denied_paths_are_not_retried(
+        cpp_repo, tmp_path, mode, expected_calls):
+    provider = PlanSemanticsProvider(cpp_repo, mode)
+    service, _, events, gateway = await service_for(cpp_repo, tmp_path, provider=provider)
+    before = service.repository.audit_manifest()
+    try:
+        task_id = str(uuid4())
+        result = await service.run(task_id, request())
+        plan = next(node for node in result.nodes if node.node_id == "generate_plan")
+        assert provider.counts["plan"] == expected_calls
+        assert service._budgets[(task_id, "generate_plan")].model_calls == expected_calls
+        assert service.repository.audit_manifest() == before
+        if mode.startswith("repair_"):
+            assert result.status == NodeStatus.AWAITING_HUMAN
+            assert plan.result.metrics.model_calls == 2
+            assert plan.result.metrics.tool_calls == 0
+            repair_seen = [item for item in provider.seen if item[0] == "plan"][1]
+            assert repair_seen[2] == []
+            feedback = [message["content"] for message in repair_seen[1]
+                        if message["role"] == "user" and "ExecutionPlan failed" in message["content"]]
+            assert len(feedback) == 1
+            assert "outside.h" not in feedback[0]
+        else:
+            assert result.status == NodeStatus.FAILED
+            assert plan.result.output_artifact_ids == ()
+            if mode == "denied":
+                assert plan.result.error_summary == "repository_denied"
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,expected_calls", [
+    ("repair", 2), ("repeat_missing", 2), ("denied", 1), ("exhausted", 6),
+])
+async def test_evidence_location_feedback_is_bounded_and_preserves_repository_policy(
+        cpp_repo, tmp_path, mode, expected_calls):
+    provider = EvidenceLocationProvider(cpp_repo, mode)
+    service, _, events, gateway = await service_for(cpp_repo, tmp_path, provider=provider)
+    before = service.repository.audit_manifest()
+    try:
+        task_id = str(uuid4())
+        result = await service.run(task_id, request())
+        impact = next(node for node in result.nodes if node.node_id == "impact_test_analysis")
+        assert provider.counts["impact"] == expected_calls
+        assert service._budgets[(task_id, "impact_test_analysis")].model_calls == expected_calls
+        assert service.repository.audit_manifest() == before
+        if mode == "repair":
+            assert result.status == NodeStatus.AWAITING_HUMAN
+            assert impact.result.metrics.model_calls == 2
+            assert impact.result.metrics.tool_calls == 0
+            assert events.artifacts.get(impact.result.output_artifact_ids[0]).content.items[0].path == "Counter.cpp"
+            repair_seen = [item for item in provider.seen if item[0] == "impact"][1]
+            assert repair_seen[2] == []
+            feedback = [message["content"] for message in repair_seen[1]
+                        if message["role"] == "user" and "EvidenceBundle contains" in message["content"]]
+            assert len(feedback) == 1
+            assert "missing-file.cpp" not in feedback[0]
+        else:
+            assert result.status == NodeStatus.FAILED
+            assert impact.result.output_artifact_ids == ()
+            assert impact.result.error_summary == ("repository_denied" if mode == "denied" else "repository_path")
+            assert "plan" not in provider.counts
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("known_adapter", [True, False])
 async def test_no_cloud_policy_cannot_leak_query_via_rag(cpp_repo, tmp_path, known_adapter):

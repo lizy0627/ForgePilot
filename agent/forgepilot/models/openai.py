@@ -176,6 +176,7 @@ class OpenAICompatibleClient:
         tool_states: list[dict[str, str | None]] = []
         finish_reason: Literal["stop", "tool_calls"] | None = None
         usage: dict | None = None
+        usage_tail_seen = False
         saw_done = False
 
         try:
@@ -194,9 +195,13 @@ class OpenAICompatibleClient:
                         choices = data.get("choices")
                         event_usage = data.get("usage")
                         if choices == [] and event_usage is not None:
-                            if finish_reason is None or usage is not None:
+                            if finish_reason is None or usage_tail_seen:
                                 raise ValueError("Unexpected usage event")
-                            usage = self._validate_usage(event_usage)
+                            tail_usage = self._validate_usage(event_usage)
+                            if usage is not None and tail_usage != usage:
+                                raise ValueError("Conflicting usage events")
+                            usage = tail_usage
+                            usage_tail_seen = True
                             continue
                         if not isinstance(choices, list) or len(choices) != 1:
                             raise ValueError("Expected exactly one choice")

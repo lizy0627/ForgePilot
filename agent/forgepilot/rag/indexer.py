@@ -380,7 +380,10 @@ class RepositoryIndexer:
         async with self._run_lock:
             try:
                 self._cancelled(cancel_event)
-                files, truncated = await self.repository._files(".")
+                # A matching directory component excludes every descendant.
+                # Prune it before enumeration spends the scan budget on it.
+                files, truncated = await self.repository._files(
+                    ".", skip_directory_globs=self.config.exclude)
                 if truncated:
                     raise ForgePilotError("rag_scan_limit", "Repository file scan exceeded safe limits")
                 selected = [path for path in files if self._matches(path)]

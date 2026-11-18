@@ -330,13 +330,16 @@ class Repository:
         except (OSError, ValueError, RuntimeError):
             raise ForgePilotError("repository_boundary", "Cannot normalize proposed file location") from None
 
-    async def _files(self, path: str) -> tuple[list[str], bool]:
+    async def _files(self, path: str, *,
+                     skip_directory_globs: tuple[str, ...] = ()) -> tuple[list[str], bool]:
+        """List bounded files, optionally pruning directory names before descent."""
         directory = self._path(path)
         if not directory.is_dir():
             raise ForgePilotError("repository_path", "Expected a directory")
         pending = [directory]
         files = []
         scanned = 0
+        directory_globs = tuple(pattern.casefold() for pattern in skip_directory_globs)
         while pending:
             current = self._path(pending.pop().relative_to(self.root).as_posix())
             try:
@@ -353,6 +356,9 @@ class Repository:
                         if is_link(info):
                             continue
                         if stat.S_ISDIR(info.st_mode):
+                            if any(fnmatch.fnmatchcase(entry.name.casefold(), pattern)
+                                   for pattern in directory_globs):
+                                continue
                             pending.append(Path(entry.path))
                         elif stat.S_ISREG(info.st_mode):
                             files.append(Path(entry.path).relative_to(self.root).as_posix())
@@ -477,9 +483,12 @@ class Repository:
         return json.dumps({"path": path, "content": selected, "sha256": version, "truncated": bool(reasons),
                            "limits": reasons}, ensure_ascii=False)
 
-    async def search_code(self, query: str, path: str = ".", max_results: int = 50, *, file_suffixes=None) -> str:
+    async def search_code(self, query: str, path: str = ".", max_results: int = 50, *,
+                          file_suffixes=None, skip_directory_globs: tuple[str, ...] = ()) -> str:
         target = self._path(path)
-        files, listing_limited = await self._files(path) if target.is_dir() else ([path], False)
+        files, listing_limited = (
+            await self._files(path, skip_directory_globs=skip_directory_globs)
+            if target.is_dir() else ([path], False))
         if file_suffixes is not None:
             files = [file for file in files if Path(file).suffix.casefold() in file_suffixes]
         reasons = {"file_scan_limit"} if listing_limited or len(files) > MAX_SEARCH_FILES else set()

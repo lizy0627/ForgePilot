@@ -41,6 +41,20 @@ def test_capture_hashes_names_registration_and_counts(inventory):
         monitor.snapshot.plan_version = 99
 
 
+def test_custom_expect_assertion_cannot_be_weakened_with_test_approval(tmp_path):
+    (tmp_path / "tests").mkdir()
+    test = tmp_path / "tests/check.cpp"
+    test.write_text("void check() { expect(answer() == 42); }\n", encoding="utf-8")
+    (tmp_path / "CMakeLists.txt").write_text(
+        "enable_testing()\nadd_test(NAME check COMMAND check)\n", encoding="utf-8")
+    monitor = IntegrityMonitor(Repository(tmp_path.resolve(), "rg"),
+                               IntegrityTaskSpec("bug_fix", ("tests/check.cpp",)))
+    monitor.capture(1, approved_test_files=("tests/check.cpp",))
+    test.write_text("void check() { expect(true); }\n", encoding="utf-8")
+    with pytest.raises(ForgePilotError, match="assertion"):
+        monitor.verify()
+
+
 @pytest.mark.parametrize("task_type", ["bug_fix", "feature", "maintenance"])
 def test_existing_tests_require_separate_approval_even_with_spec(inventory, task_type):
     _, repo, _ = inventory

@@ -52,13 +52,24 @@ def validate_review(task_spec: TaskSpec, review: ReviewReport) -> ReviewReport:
     return review
 
 
-def require_complete_validation(validation: ValidationReport) -> None:
+def require_complete_validation(validation: ValidationReport, *, require_oracle=True) -> None:
+    if not require_oracle:
+        from .delivery import validation_passed
+        if not validation_passed(validation, require_oracle=False):
+            raise ForgePilotError("review_validation", "Independent review requires complete deterministic validation")
+        return
     kinds = {command.kind for command in validation.commands if command.exit_code == 0}
+    oracle_ok = (validation.hidden_oracle == "passed" if require_oracle else
+                 validation.hidden_oracle in {"passed", "not_run"})
+    required_kinds = {"configure", "build", "test", "integrity"}
+    if validation.hidden_oracle == "passed":
+        required_kinds.add("protected_test")
     if (validation.status != "passed" or validation.failure_classification != "none"
             or validation.tests_failed or validation.tests_passed < 1
-            or validation.hidden_oracle != "passed" or validation.test_integrity != "passed"
+            or not oracle_ok or validation.test_integrity != "passed"
             or any(command.exit_code for command in validation.commands)
-            or not {"configure", "build", "test", "protected_test", "integrity"} <= kinds):
+            or not required_kinds <= kinds
+            or (validation.hidden_oracle == "not_run" and "protected_test" in kinds)):
         raise ForgePilotError("review_validation", "Independent review requires complete deterministic validation")
 
 
@@ -69,16 +80,18 @@ class ReviewerService:
     accounting stays in the shared gateway and optional caller-owned node budget.
     """
 
-    def __init__(self, gateway, *, limits=None):
+    def __init__(self, gateway, *, limits=None, single_agent=False):
         self.gateway = gateway
-        registry = AgentRegistry()
-        definition = registry.get("reviewer.v1")
+        self.single_agent = single_agent
+        registry = AgentRegistry(include_generalist=single_agent)
+        definition = registry.get("generalist.v1" if single_agent else "reviewer.v1")
         if limits is not None:
             definition = definition.model_copy(update={
                 "limits": registry.validate_limits(definition.agent_id, limits)})
         self.definition = definition
         self.route = gateway.router.validate_agent(definition)
-        self._check_families()
+        if not single_agent:
+            self._check_families()
 
     def _check_families(self):
         configuration = self.gateway.router.configuration
@@ -104,7 +117,8 @@ class ReviewerService:
             raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud review route")
 
     async def review(self, task_spec_artifact, change_set_artifact, validation_artifact, *,
-                     evidence=(), is_cancelled=lambda: False, budget=None) -> ReviewReport:
+                     evidence=(), is_cancelled=lambda: False, budget=None,
+                     require_oracle=True) -> ReviewReport:
         if is_cancelled():
             raise asyncio.CancelledError()
         spec, changes, validation = tuple(validate_artifact(item) for item in (
@@ -116,7 +130,8 @@ class ReviewerService:
             raise ForgePilotError("review_input", "Review requires same-task, revision-bound artifacts")
         if changes.content.requires_additional_approval:
             raise ForgePilotError("review_input", "Unapproved scope cannot enter final review")
-        require_complete_validation(validation.content)
+        require_complete_validation(validation.content, require_oracle=(require_oracle or
+            any(item.verification == "protected_test" for item in spec.content.acceptance_criteria)))
         self._check_data_policy(spec.content)
         evidence = tuple(validate_artifact(item) for item in evidence)
         if len(evidence) > 8 or any(not isinstance(item.content, EvidenceBundle)
@@ -131,7 +146,8 @@ class ReviewerService:
             "validation": validation.content.model_dump(mode="json", exclude={"log_artifact_ids"}),
             "evidence": [item.content.model_dump(mode="json") for item in evidence],
         }
-        messages = [{"role": "system", "content": get_prompt("reviewer.v1", "reviewer")},
+        prompt_stage = "generalist_reviewer" if self.single_agent else "reviewer"
+        messages = [{"role": "system", "content": get_prompt(self.definition.agent_id, prompt_stage)},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
         budget = budget or ModelBudget.from_limits(self.definition.limits)
         client = self.gateway.for_agent(self.definition, budget=budget)

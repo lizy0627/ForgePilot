@@ -70,6 +70,66 @@ async def test_bug_fix_first_pass_delivery_is_based_on_real_validation(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_crlf_bug_fix_reaches_validation_review_and_delivery(tmp_path, git_exe):
+    case = await make_loop_case(tmp_path, git_exe, crlf_source=True,
+        implement=[patch(before=ORIGINAL.replace("\n", "\r\n")), done()])
+    try:
+        result = await case.service.approve(case.approval)
+        assert_delivered(case, result)
+        changes = case.artifacts("ChangeSet")[-1].content
+        assert "\r\n" in changes.files[0].unified_diff
+        assert b"\r\n" in (case.worktree / "src/value.cpp").read_bytes()
+        case.save_evidence("bug-fix-crlf", result)
+    finally:
+        await case.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_recovers_observed_writer_without_model_replay(tmp_path, git_exe, monkeypatch):
+    from types import SimpleNamespace
+    from forgepilot.artifacts.sqlite_store import ArtifactStorageError
+    from forgepilot.mission_host import MissionHost
+
+    case = await make_loop_case(tmp_path, git_exe, crlf_source=True,
+        implement=[patch(before=ORIGINAL.replace("\n", "\r\n")), done()])
+    original_put = case.events.artifacts.put
+    def interrupted_put(artifact):
+        if artifact.artifact_type == "ChangeSet":
+            raise ArtifactStorageError("Injected publication interruption")
+        original_put(artifact)
+    try:
+        monkeypatch.setattr(case.events.artifacts, "put", interrupted_put)
+        from forgepilot.task_host import TaskHost
+        host = MissionHost(TaskHost(lambda trace: None, store=case.events))
+        host._services[case.task_id] = case.service
+        await host._launch(case.task_id, case.service.approve(case.approval))
+        failed = case.service.runner.store.snapshot(case.task_id)
+        assert failed.status is NodeStatus.FAILED
+        assert not case.artifacts("ChangeSet") and not case.providers["review"].seen
+        assert len(case.providers["implement"].seen) == 2
+        monkeypatch.setattr(case.events.artifacts, "put", original_put)
+        assert await asyncio.to_thread(case.service.recover_storage_failure,
+            case.task_id, expected_revision=failed.revision)
+        inspected = case.service.runner.store.snapshot(case.task_id)
+        assert inspected.status is NodeStatus.INTERRUPTED
+        assert next(n for n in inspected.nodes if n.node_id == "implementer").status is NodeStatus.INTERRUPTED
+        recovery = await asyncio.to_thread(case.service.runner.prepare_recovery, case.task_id, case.service.graph())
+        assert not recovery.blocked_reason
+        assert any(a["node_id"] == "implementer" and a["action"] == "adopt_changes" for a in recovery.actions)
+        await asyncio.to_thread(case.service.runner.confirm_recovery, case.task_id, case.service.graph(),
+            token=recovery.token, expected_revision=recovery.revision)
+        final = await case.service.run(case.task_id)
+        assert_delivered(case, final)
+        assert len(case.providers["implement"].seen) == 2
+        assert len(case.providers["review"].seen) == 1
+        assert case.events._db.execute("SELECT COUNT(*) FROM graph_events WHERE task_id=? AND event_type='task.failed'",
+                                      (case.task_id,)).fetchone()[0] == 1
+        case.save_evidence("storage-publication-recovery", final)
+    finally:
+        await case.close()
+
+
+@pytest.mark.asyncio
 async def test_cross_file_feature_first_pass_delivery_with_new_test(tmp_path, git_exe):
     case = await make_loop_case(tmp_path, git_exe, task_type="feature", implement=[
         patch(after=FEATURE), create("src/range.hpp", FEATURE_HEADER),

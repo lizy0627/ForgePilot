@@ -230,6 +230,36 @@ async def test_stream_content_utf8_arbitrary_boundaries_crlf_multiline_and_usage
 
 
 @pytest.mark.asyncio
+async def test_stream_accepts_matching_usage_on_finish_and_tail():
+    usage = {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+    body = (stream_event({"content": "ok"})
+            + stream_event({}, finish="stop", usage=usage)
+            + f'data: {json.dumps({"choices": [], "usage": usage})}\n\n'.encode()
+            + b'data: [DONE]\n\n')
+    async with OpenAICompatibleClient(
+        "https://model.test/v1", KEY, "test", stream_include_usage=True,
+        transport=httpx.MockTransport(lambda _: stream_response(body)),
+    ) as client:
+        assert await collect_stream(client) == [ContentDelta("ok"), StreamFinished("stop", usage)]
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_conflicting_finish_and_tail_usage():
+    finish_usage = {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+    tail_usage = {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}
+    body = (stream_event({"content": "ok"})
+            + stream_event({}, finish="stop", usage=finish_usage)
+            + f'data: {json.dumps({"choices": [], "usage": tail_usage})}\n\n'.encode()
+            + b'data: [DONE]\n\n')
+    async with OpenAICompatibleClient(
+        "https://model.test/v1", KEY, "test", stream_include_usage=True,
+        transport=httpx.MockTransport(lambda _: stream_response(body)),
+    ) as client:
+        with pytest.raises(ForgePilotError, match="llm_protocol"):
+            await collect_stream(client)
+
+
+@pytest.mark.asyncio
 async def test_stream_default_omits_stream_options_and_ignores_heartbeat_empty_events():
     requests = []
     body = (b": ping\n\n\n\ndata:\n\n" + stream_event({"content": "ok"})

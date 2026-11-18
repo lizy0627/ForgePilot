@@ -64,7 +64,7 @@ def model_gateway_from_args(args, *, task_only=False, transport=None):
     established environment and purpose-specific model fallback stay intact.
     """
     from .models.gateway import ModelGateway
-    from .models.profiles import ModelConfiguration
+    from .models.profiles import ModelConfiguration, ModelProfile, ModelRoute
 
     path = getattr(args, "model_config", None)
     if path:
@@ -81,6 +81,41 @@ def model_gateway_from_args(args, *, task_only=False, transport=None):
     else:
         models = models_from_args(args)
         selected = {"task": models.task, "chat": models.chat, "summary": models.summary}
+    review_model = checked_model_id(getattr(args, "review_model", None), "review")
+    task_family = checked_model_id(getattr(args, "task_model_family", None), "task family")
+    review_family = checked_model_id(getattr(args, "review_model_family", None), "review family")
+    strict = (review_model, task_family, review_family)
+    if any(strict) and not all(strict):
+        raise ForgePilotError("llm_config", "Reviewer model and both model families must be configured together")
+    if all(strict):
+        if review_model == selected["task"] or task_family.casefold() == review_family.casefold():
+            raise ForgePilotError("llm_config", "Reviewer must use a different model and model family")
+        try:
+            profiles = [ModelProfile(profile_id="desktop-task", base_url=args.base_url,
+                api_key_ref="env:FORGEPILOT_API_KEY", model=selected["task"],
+                family=task_family, timeout_seconds=args.timeout)]
+            profiles.append(ModelProfile(profile_id="desktop-review", base_url=args.base_url,
+                api_key_ref="env:FORGEPILOT_API_KEY", model=review_model,
+                family=review_family, timeout_seconds=args.timeout))
+            routes = [ModelRoute(route_id="task", primary="desktop-task"),
+                ModelRoute(route_id="orchestration", primary="desktop-task"),
+                ModelRoute(route_id="analysis", primary="desktop-task"),
+                ModelRoute(route_id="implementation", primary="desktop-task"),
+                ModelRoute(route_id="repair", primary="desktop-task"),
+                ModelRoute(route_id="review", primary="desktop-review")]
+            for use_case in ("chat", "summary") if not task_only else ():
+                profile_id = "desktop-" + use_case
+                profiles.append(ModelProfile(profile_id=profile_id, base_url=args.base_url,
+                    api_key_ref="env:FORGEPILOT_API_KEY", model=selected[use_case],
+                    family=task_family,
+                    timeout_seconds=args.timeout))
+                routes.append(ModelRoute(route_id=use_case, primary=profile_id))
+            config = ModelConfiguration(profiles=tuple(profiles), routes=tuple(routes),
+                                        enforce_review_family_separation=True)
+        except (ValueError, TypeError):
+            raise ForgePilotError("llm_config", "Invalid strict Reviewer model configuration") from None
+        return ModelGateway(config, transport_factory=(lambda _: transport)
+                            if transport is not None else None)
     return ModelGateway.from_legacy(
         args.base_url, key, selected, timeout=args.timeout, transport=transport,
     )
@@ -120,6 +155,9 @@ def add_connection_arguments(parser):
     parser.add_argument("--chat-model", default=os.environ.get("FORGEPILOT_CHAT_MODEL"))
     parser.add_argument("--task-model", default=os.environ.get("FORGEPILOT_TASK_MODEL"))
     parser.add_argument("--summary-model", default=os.environ.get("FORGEPILOT_SUMMARY_MODEL"))
+    parser.add_argument("--review-model", default=os.environ.get("FORGEPILOT_REVIEW_MODEL"))
+    parser.add_argument("--task-model-family", default=os.environ.get("FORGEPILOT_TASK_MODEL_FAMILY"))
+    parser.add_argument("--review-model-family", default=os.environ.get("FORGEPILOT_REVIEW_MODEL_FAMILY"))
     parser.add_argument("--rg", default=os.environ.get("FORGEPILOT_RG"), help="Absolute rg executable path")
     parser.add_argument("--git", default=os.environ.get("FORGEPILOT_GIT"), help="Absolute git executable path")
     parser.add_argument("--timeout", type=float, default=60.0, help="LLM wall timeout, seconds (0, 600]")

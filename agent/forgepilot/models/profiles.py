@@ -63,7 +63,7 @@ class ModelRoute(BaseModel):
     primary: Identifier
     fallback: Identifier | None = None
     role: Literal["orchestrator", "root_cause_analyst", "impact_test_analyst",
-                  "implementer", "reviewer", "repair"] | None = None
+                  "implementer", "reviewer", "repair", "generalist"] | None = None
 
     @model_validator(mode="after")
     def distinct_profiles(self):

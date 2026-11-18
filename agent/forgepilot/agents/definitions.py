@@ -13,9 +13,9 @@ AGENT_SCHEMA_VERSION = "1.0"
 VERSIONED_IDENTIFIER_PATTERN = r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\.v[1-9][0-9]*$"
 AgentRole: TypeAlias = Literal[
     "orchestrator", "root_cause_analyst", "impact_test_analyst",
-    "implementer", "reviewer", "repair",
+    "implementer", "reviewer", "repair", "generalist",
 ]
-ModelRoute: TypeAlias = Literal["orchestration", "analysis", "implementation", "review", "repair"]
+ModelRoute: TypeAlias = Literal["orchestration", "analysis", "implementation", "review", "repair", "task"]
 Capability: TypeAlias = Literal[
     "repository.read", "repository.search", "repository.symbols", "repository.references",
     "repository.rag", "repository.patch", "validation.read", "mcp.read",
@@ -28,6 +28,7 @@ ROLE_ROUTES: dict[str, frozenset[str]] = {
     "implementer": frozenset({"implementation"}),
     "reviewer": frozenset({"review"}),
     "repair": frozenset({"repair", "implementation"}),
+    "generalist": frozenset({"task"}),
 }
 ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     role: frozenset(POLICY_CAPABILITIES[normalize_role(role)]) for role in ROLE_ROUTES
@@ -39,6 +40,7 @@ ROLE_OUTPUT_ARTIFACTS: dict[str, frozenset[str]] = {
     "implementer": frozenset({"ChangeSet"}),
     "reviewer": frozenset({"ReviewReport"}),
     "repair": frozenset({"ChangeSet"}),
+    "generalist": frozenset({"TaskSpec", "EvidenceBundle", "ExecutionPlan", "ChangeSet", "ReviewReport"}),
 }
 
 

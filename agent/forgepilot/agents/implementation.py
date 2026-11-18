@@ -59,13 +59,15 @@ class ImplementationService:
     """
 
     def __init__(self, events, workspace_manager, gateway, *, limits=None,
-                 rg_executable="rg", retrieval_factory=None, analysis_kwargs=None, delivery_records=None):
+                 rg_executable="rg", retrieval_factory=None, analysis_kwargs=None, delivery_records=None,
+                 single_agent=False):
         if not isinstance(workspace_manager, WorkspaceManager):
             raise ForgePilotError("workspace_unavailable", "Implementation requires WorkspaceManager")
         self.events, self.workspace, self.gateway = events, workspace_manager, gateway
         self.delivery_records = delivery_records if delivery_records is not None else DeliveryRepository(events)
-        self.agents = AgentRegistry()
-        self.definition = self.agents.get("implementer.v1")
+        self.single_agent = single_agent
+        self.agents = AgentRegistry(include_generalist=single_agent)
+        self.definition = self.agents.get("generalist.v1" if single_agent else "implementer.v1")
         self.limits = self.definition.limits if limits is None else self.agents.validate_limits(
             self.definition.agent_id, limits)
         gateway.router.validate_agent(self.definition)
@@ -77,6 +79,8 @@ class ImplementationService:
         self.runner = GraphRunner(events, HandlerRegistry({
             "execution_approval": self._gate, "implementer.v1": self._handler,
         }), workspace_backend=workspace_manager, coordinator=coordinator_for_storage(events))
+        if single_agent:
+            self.runner.handlers.register("generalist.v1", self._handler)
         # Optional composition is declared before graph creation, never appended
         # to an already-approved graph with a different definition hash.
         from .analysis import STAGES
@@ -94,7 +98,7 @@ class ImplementationService:
         return GraphDefinition("controlled-implementation.v1", 1, (
             NodeDefinition("execution_approval", NodeType.HUMAN_GATE, "execution_approval",
                            settings={"checkpoint_type": "plan_approved"}),
-            NodeDefinition("implementer", NodeType.AGENT, "implementer.v1",
+            NodeDefinition("implementer", NodeType.AGENT, self.definition.agent_id,
                            dependencies=("execution_approval",),
                            agent_id=self.definition.agent_id,
                            agent_definition_hash=self.definition.definition_hash,
@@ -107,7 +111,7 @@ class ImplementationService:
                 from .analysis import AnalysisService
                 self._analysis_services[task_id] = AnalysisService(
                     self.events, self._repository(task_id), self.gateway,
-                    **self.analysis_kwargs)
+                    single_agent=self.single_agent, **self.analysis_kwargs)
             analysis = self._analysis_services[task_id]
         analysis._loop = self._loop
         return analysis
@@ -242,12 +246,13 @@ class ImplementationService:
                 or self.runner.store.recovery_required(review.task_id)):
             raise ForgePilotError("invalid_state", "Execution approval gate is not awaiting review")
 
-    def _save_approval(self, review, approved_by, kind):
+    def _save_approval(self, review, approved_by, kind, *, audit_event=None):
         return self.events.missions.save_approval(approval_id=str(uuid4()), task_id=review.task_id,
             task_spec_artifact_id=review.task_spec_artifact_id, plan_artifact_id=review.plan_artifact_id,
-            scope_hash=review.scope_hash, approved_by=approved_by, approval_type=kind)
+            scope_hash=review.scope_hash, approved_by=approved_by, approval_type=kind,
+            audit_event=audit_event)
 
-    def approve_existing_tests(self, review, *, approved_by="user"):
+    def approve_existing_tests(self, review, *, approved_by="user", audit_event=None):
         """Independent host approval of the exact test paths listed in TaskSpec."""
         with self.events.missions.consistent_view():
             self._check_review(review)
@@ -259,7 +264,7 @@ class ImplementationService:
             for path in paths:
                 if repository.normalize_plan_path(path) != path or not repository._path(path).is_file():
                     raise ForgePilotError("test_approval_required", "Test approval requires existing canonical files")
-            return self._save_approval(review, approved_by, "existing_tests")
+            return self._save_approval(review, approved_by, "existing_tests", audit_event=audit_event)
 
     async def approve(self, review, *, approved_by="user"):
         def approve_and_run():
@@ -389,7 +394,7 @@ class ImplementationService:
         check_approval()
         # Validate only repository evidence; external claims remain untrusted
         # context and cannot authorize any tool or path.
-        for artifact in evidence if definition.role == "implementer" else ():
+        for artifact in evidence if context.node.node_id == "implementer" else ():
             local = tuple(item for item in artifact.content.items if item.source in {"local_repository", "rag"})
             if local:
                 validate_evidence(EvidenceBundle(items=local, summary=artifact.content.summary), repository)
@@ -421,12 +426,15 @@ class ImplementationService:
         registry = controlled.registry
         payload = {"task_spec": spec.content.model_dump(mode="json"),
                    "execution_plan": plan.content.model_dump(mode="json"),
-                   "evidence": [item.content.model_dump(mode="json") for item in evidence] if definition.role == "implementer" else [],
+                   "evidence": [item.content.model_dump(mode="json") for item in evidence]
+                               if context.node.node_id == "implementer" else [],
                    "allowed_paths": sorted({path for step in plan.content.steps
                                             if step.owner in {"implementer", "implementer.v1"} for path in step.expected_files}),
                    "approved_existing_tests": list(approved_tests)}
         payload.update(self._extra_agent_payload(context))
-        messages = [{"role": "system", "content": get_prompt(definition.agent_id, definition.role)},
+        prompt_stage = ("generalist_repair" if context.node.node_id.startswith("repair_")
+                        else "generalist_implementer") if definition.role == "generalist" else definition.role
+        messages = [{"role": "system", "content": get_prompt(definition.agent_id, prompt_stage)},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
         client = self.gateway.for_agent(definition, budget=budget)
         with registry.as_capabilities(definition.capabilities):

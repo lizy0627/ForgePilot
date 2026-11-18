@@ -101,6 +101,19 @@ def result(value, score, rank):
 
 
 @pytest.mark.asyncio
+async def test_literal_search_budget_ignores_excluded_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr("forgepilot.repository.MAX_SEARCH_FILES", 1)
+    for directory in ("Generated-Reports", "src"):
+        folder = tmp_path / directory
+        folder.mkdir()
+        (folder / "symbol.py").write_text("def target_symbol():\n    return 1\n", encoding="utf-8")
+    settings = RagConfig(enabled=True, exclude=("generated-*",))
+    subject = RetrievalService("repository-a", repository(tmp_path), settings, None, None)
+    found = await subject.retrieve("target_symbol", mode="lexical")
+    assert [item.path for item in found] == ["src/symbol.py"]
+
+
+@pytest.mark.asyncio
 async def test_retrieval_redacts_source_and_remote_query(tmp_path):
     secret = "fixture-query-credential"
     (tmp_path / "source.py").write_text(f"API_KEY = '{secret}'\n", encoding="utf-8")

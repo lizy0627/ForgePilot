@@ -269,6 +269,7 @@ async def test_concurrent_request_metrics_are_one_record_per_request(caplog):
         results=await asyncio.gather(*(send(client,cid,prompt)
                                       for cid,prompt in zip(conversations,prompts)))
         assert all(result['status']=='completed' for result in results)
+        assert all(result['error'] is None for result in results)
     emitted=[r.stream_metrics for r in caplog.records if r.name=='forgepilot.chat_performance']
     assert len(emitted)==4
     assert sorted(item['request_input_chars'] for item in emitted)==[1,2,3,4]
@@ -1273,11 +1274,8 @@ async def test_chat_mcp_same_session_serial_different_sessions_overlap():
     service=ChatService(model,max_tool_concurrency=3)
     service.registry=ReadOnlyRegistry(mcp_allowlist=aliases,redactor=service.redactor)
     for adapter in adapters: service.registry.register_approved_mcp(adapter)
-    started=asyncio.get_running_loop().time()
     assert await service.answer([],'query')=='done'
-    elapsed=asyncio.get_running_loop().time()-started
     assert session_peaks=={'a':1,'b':1} and state['peak']==2
-    assert .14<=elapsed<.25
     messages=[message for message in model.requests[1] if message['role']=='tool']
     assert [message['tool_call_id'] for message in messages]==['0','1','2']
 

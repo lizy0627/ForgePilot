@@ -175,7 +175,8 @@ class LoopCase:
 
 
 async def make_loop_case(tmp_path, git_exe, *, task_type="bug_fix", implement=None,
-                         repair=(), reviews=None, review_provider=None, slow_test=False):
+                         repair=(), reviews=None, review_provider=None, slow_test=False,
+                         crlf_source=False):
     # Imports remain lazy so helper collection does not depend on another worker's in-progress files.
     from forgepilot.agents.delivery import DeliveryWorkflow
     from forgepilot.validation import ProtectedOracle, ValidationService
@@ -184,7 +185,7 @@ async def make_loop_case(tmp_path, git_exe, *, task_type="bug_fix", implement=No
     root.mkdir()
     (root / "src").mkdir()
     (root / "tests").mkdir()
-    (root / "src/value.cpp").write_text(ORIGINAL, encoding="utf-8", newline="")
+    (root / "src/value.cpp").write_text(ORIGINAL, encoding="utf-8", newline="\r\n" if crlf_source else "")
     (root / "CMakeLists.txt").write_text(CMAKE, encoding="utf-8", newline="")
     expected = "value(-1) == 0" if task_type == "bug_fix" else "value(0) == 0"
     slow = '#include <thread>\n#include <chrono>\n#include <fstream>\n#include <process.h>\n' if slow_test else ""

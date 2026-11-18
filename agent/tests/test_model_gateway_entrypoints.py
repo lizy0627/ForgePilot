@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from forgepilot.errors import ForgePilotError
+from forgepilot.agents.registry import AgentRegistry
 from forgepilot.server import parser
 from forgepilot.settings import model_gateway_from_args
 
@@ -97,3 +98,50 @@ def test_server_factories_receive_gateway_handles_with_explicit_configuration(tm
     assert all(type(client).__module__ == "forgepilot.models.gateway" for client in clients)
     assert {client.model for client in clients} == {"configured-model"}
     assert (tmp_path / "model-accounting.jsonl").is_file()
+
+
+def test_optional_strict_reviewer_routes_keep_legacy_launch_compatible(monkeypatch):
+    monkeypatch.setenv("FORGEPILOT_API_KEY", "offline-profile-key")
+    for name in ("FORGEPILOT_REVIEW_MODEL", "FORGEPILOT_TASK_MODEL_FAMILY",
+                 "FORGEPILOT_REVIEW_MODEL_FAMILY", "FORGEPILOT_MODEL_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    args = parser().parse_args(["--base-url", "https://fake.test/v1", "--model", "task-model"])
+    legacy = model_gateway_from_args(args)
+    with pytest.raises(ForgePilotError, match="llm_config"):
+        AgentRegistry(router=legacy.router)
+    asyncio.run(legacy.aclose())
+
+    strict_args = parser().parse_args(["--base-url", "https://fake.test/v1",
+        "--task-model", "task-model", "--review-model", "review-model",
+        "--task-model-family", "task-family", "--review-model-family", "review-family",
+        "--chat-model", "chat-model", "--summary-model", "summary-model"])
+    strict = model_gateway_from_args(strict_args)
+    try:
+        AgentRegistry(router=strict.router)
+        assert strict.router.resolve("task").primary.model == "task-model"
+        assert strict.router.resolve("implementation", "implementer").primary.model == "task-model"
+        assert strict.router.resolve("review", "reviewer").primary.model == "review-model"
+        assert strict.router.resolve("review", "reviewer").primary.family == "review-family"
+        assert strict.router.resolve("chat").primary.model == "chat-model"
+        assert strict.router.resolve("summary").primary.model == "summary-model"
+        assert strict.configuration.enforce_review_family_separation is True
+    finally:
+        asyncio.run(strict.aclose())
+
+
+@pytest.mark.parametrize("extra", [
+    ["--review-model", "review-model"],
+    ["--review-model", "task-model", "--task-model-family", "task-family",
+     "--review-model-family", "review-family"],
+    ["--review-model", "review-model", "--task-model-family", "same-family",
+     "--review-model-family", "same-family"],
+])
+def test_incomplete_or_unfair_reviewer_config_fails_without_provider_call(monkeypatch, extra):
+    monkeypatch.setenv("FORGEPILOT_API_KEY", "offline-profile-key")
+    for name in ("FORGEPILOT_REVIEW_MODEL", "FORGEPILOT_TASK_MODEL_FAMILY",
+                 "FORGEPILOT_REVIEW_MODEL_FAMILY", "FORGEPILOT_MODEL_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    args = parser().parse_args(["--base-url", "https://fake.test/v1",
+                                "--task-model", "task-model", *extra])
+    with pytest.raises(ForgePilotError, match="llm_config"):
+        model_gateway_from_args(args)

@@ -303,7 +303,8 @@ class RetrievalService:
                     if remaining <= 0:
                         break
                     payload = json.loads(await self.repository.search_code(
-                        term, path=scope, max_results=remaining, file_suffixes=suffixes))
+                        term, path=scope, max_results=remaining, file_suffixes=suffixes,
+                        skip_directory_globs=self.config.exclude))
                     rows = payload.get("matches", []) if isinstance(payload, dict) else []
                     for row in rows:
                         if not isinstance(row, dict):
@@ -425,7 +426,8 @@ class RetrievalService:
             location = None
             for scope in path_filters or (".",):
                 seed = json.loads(await self.repository.search_code(
-                    symbol, path=scope, max_results=_SOURCE_LIMIT, file_suffixes=CPP_SUFFIXES))
+                    symbol, path=scope, max_results=_SOURCE_LIMIT, file_suffixes=CPP_SUFFIXES,
+                    skip_directory_globs=self.config.exclude))
                 for row in seed.get("matches", []):
                     text = row.get("text")
                     if not isinstance(text, str):
