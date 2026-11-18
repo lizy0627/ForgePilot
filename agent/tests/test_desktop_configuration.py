@@ -187,20 +187,54 @@ async def test_check_draft_uses_mock_transport_and_reports_exact_purpose_without
     state = await save(config)
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     requests = []
+    draft_key = "offline-draft-key"
     def transport(request):
         model = json.loads(request.content)["model"]
         requests.append(model)
-        assert request.headers["Authorization"] == "Bearer " + KEY
+        assert request.url.host == "draft.invalid"
+        assert request.headers["Authorization"] == "Bearer " + draft_key
         if model == "draft-task":
             return httpx.Response(403, text="private server body " + KEY)
         return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}]})
-    result = await core.handle_request(config, {"action": "check", "fields": fields(task_model="draft-task"),
-        "api_key": "", "config_revision": state["config_revision"]}, transport=httpx.MockTransport(transport))
+    result = await core.handle_request(config, {"action": "check",
+        "fields": fields(task_model="draft-task", base_url="http://draft.invalid/v1"),
+        "api_key": draft_key, "config_revision": state["config_revision"]}, transport=httpx.MockTransport(transport))
     assert not result["ok"] and [item["purpose"] for item in result["errors"]] == ["task"]
     assert requests == ["chat-model", "draft-task", "summary-model", "review-model"]
     assert "HTTP 403" in result["errors"][0]["message"] and KEY not in json.dumps(result)
+    assert draft_key not in json.dumps(result)
     assert "private server body" not in json.dumps(result)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+@pytest.mark.asyncio
+async def test_saved_check_uses_each_roles_resolved_fallback(tmp_path):
+    config = tmp_path / "config.json"
+    models = tmp_path / "manual.json"
+    profile = {"family": "local", "model": "same-name", "api_key_ref": "env:FORGEPILOT_API_KEY"}
+    models.write_text(json.dumps({
+        "profiles": [{**profile, "profile_id": name, "base_url": f"http://{name}.invalid/v1"}
+                     for name in ("main", "backup", "analyst")],
+        "routes": [{"route_id": purpose, "primary": "main", "fallback": "backup"}
+                   for purpose in ("chat", "task", "summary")] + [
+                       {"route_id": "analysis", "role": "root_cause_analyst", "primary": "main", "fallback": "analyst"}],
+    }), encoding="utf-8")
+    config.write_text(json.dumps({"base_url": "http://unused.invalid", "port": 8765, "model": "unused",
+                                 "server_args": ["--model-config", str(models)]}), encoding="utf-8")
+    config.with_name("api-key.dpapi").write_text(protect_launcher_key(KEY), encoding="ascii")
+    calls = []
+    def respond(request):
+        calls.append(request.url.host)
+        if request.url.host == "backup.invalid":
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "OK"},
+                                                          "finish_reason": "stop"}]})
+        return httpx.Response(503 if request.url.host == "main.invalid" else 403)
+    state = await core.handle_request(config, {"action": "load"})
+    result = await core.handle_request(config, {"action": "check", "fields": state["fields"],
+        "config_revision": state["config_revision"]}, transport=httpx.MockTransport(respond))
+    assert [item["purpose"] for item in result["errors"]] == ["analysis"]
+    assert {item["purpose"] for item in result["checks"]} == {"chat", "task", "summary"}
+    assert calls == ["main.invalid", "backup.invalid", "main.invalid", "analyst.invalid"]
 
 
 @pytest.mark.asyncio

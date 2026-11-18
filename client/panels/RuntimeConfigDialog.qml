@@ -197,7 +197,9 @@ Dialog {
             delegate: Label {
                 required property var modelData
                 Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Theme.danger
-                text: ({chat: "聊天", task: "任务", review: "审查", summary: "摘要", embedding: "Embedding", configuration: "配置"}[modelData.purpose] || "配置") + "：" + (modelData.message || modelData.code || "操作失败")
+                text: ({chat: "聊天", task: "任务", review: "审查", summary: "摘要", orchestration: "编排",
+                        analysis: "分析", implementation: "实现", repair: "修复", embedding: "Embedding",
+                        configuration: "配置"}[modelData.purpose] || "配置") + "：" + (modelData.message || modelData.code || "操作失败")
             }
         }
         Repeater {

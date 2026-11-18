@@ -504,6 +504,106 @@ def test_gui_save_and_explicit_check_use_distinct_purpose_models(tmp_path):
         server.shutdown(); server.server_close(); thread.join(timeout=5)
 
 
+@pytest.mark.parametrize("entry", ["configuration-window", "running-window", "Check-Model.cmd"])
+def test_saved_route_check_reports_only_independent_reviewer(tmp_path, entry, monkeypatch):
+    from forgepilot.windows_secrets import protect_launcher_key
+
+    received = []
+    class Endpoint(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            received.append((self.server.server_port, self.headers["Authorization"], payload["model"]))
+            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "OK"},
+                                            "finish_reason": "stop"}]}).encode()
+            self.send_response(403 if self.server is reviewer else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    local = tmp_path / "local app data"
+    identity = hashlib.sha256(str(ROOT).lower().encode("utf-8")).hexdigest()[:16].upper()
+    config = local / "ForgePilot/launcher" / identity / "config.json"
+    config.parent.mkdir(parents=True)
+    config.with_name("api-key.dpapi").write_text(protect_launcher_key(KEY), encoding="ascii")
+    summary_key = "offline-summary-key"
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    env.update(LOCALAPPDATA=str(local), FORGEPILOT_API_KEY="unrelated-inherited-key",
+               FORGEPILOT_TEST_SUMMARY_KEY=summary_key, FORGEPILOT_PYTHON=sys.executable)
+    with (ThreadingHTTPServer(("127.0.0.1", 0), Endpoint) as primary,
+          ThreadingHTTPServer(("127.0.0.1", 0), Endpoint) as reviewer):
+        model_file = tmp_path / "hand edited routes.json"
+        primary_url = f"http://127.0.0.1:{primary.server_port}/v1"
+        profile = {"profile_id": "main", "model": "shared", "family": "writer", "base_url": primary_url,
+                   "api_key_ref": "env:FORGEPILOT_API_KEY"}
+        model_file.write_text(json.dumps({
+            "profiles": [profile, {**profile, "profile_id": "summary", "api_key_ref": "env:FORGEPILOT_TEST_SUMMARY_KEY"},
+                         {**profile, "profile_id": "independent", "family": "auditor",
+                          "base_url": f"http://127.0.0.1:{reviewer.server_port}/v1"}],
+            "routes": [{"route_id": "chat", "primary": "main"}, {"route_id": "task", "primary": "main"},
+                       {"route_id": "summary", "primary": "summary"},
+                       {"route_id": "review", "role": "reviewer", "primary": "independent"}],
+        }), encoding="utf-8")
+        config.write_text(json.dumps({"base_url": primary_url, "model": "legacy", "port": 8765,
+            "server_args": ["--model-config=" + str(model_file)]}), encoding="utf-8")
+        threads = [Thread(target=server.serve_forever, daemon=True) for server in (primary, reviewer)]
+        for thread in threads:
+            thread.start()
+        try:
+            if entry != "Check-Model.cmd":
+                qt_environment = {}
+                def capture_qt(command, *, env, **kwargs):
+                    qt_environment.update(env)
+                    return type("Client", (), {"pid": 1, "stdin": io.BytesIO()})()
+
+                with monkeypatch.context() as patch:
+                    patch.setenv("LOCALAPPDATA", str(local))
+                    patch.setenv("FORGEPILOT_TEST_SUMMARY_KEY", summary_key)
+                    patch.setenv("FORGEPILOT_RUNTIME_CONFIG", str(config))
+                    patch.setattr(launcher.subprocess, "Popen", capture_qt)
+                    if entry == "configuration-window":
+                        binary = tmp_path / "client/build/Release/ForgePilotClient.exe"
+                        binary.parent.mkdir(parents=True)
+                        binary.touch()
+                        patch.setattr(launcher.desktop_configuration, "application_root", lambda: tmp_path)
+                        assert launcher.launch_configuration_client(config) == 0
+                    else:
+                        job = type("Job", (), {"name": "test-owned-job"})()
+                        launcher.owned_client(job, tmp_path / "client.log", 8765, "local-token")
+                assert "FORGEPILOT_TEST_SUMMARY_KEY" not in qt_environment
+                assert summary_key not in json.dumps(qt_environment)
+
+                def helper(request):
+                    result = subprocess.run([sys.executable, "-I", str(SCRIPT), "config-helper", "--config", str(config)],
+                        env=qt_environment, input=json.dumps(request).encode(), capture_output=True, check=True, timeout=30)
+                    return json.loads(result.stdout)
+
+                state = helper({"action": "load"})
+                assert state["configured"]
+                result = helper({"action": "check", "fields": state["fields"], "config_revision": state["config_revision"]})
+                assert not result["ok"]
+                assert [error["purpose"] for error in result["errors"]] == ["review"]
+                assert "HTTP 403" in result["errors"][0]["message"]
+                assert {check["purpose"] for check in result["checks"]} >= {"chat", "task", "summary"}
+            else:
+                result = subprocess.run(["cmd.exe", "/d", "/c", str(ROOT / entry)], env=env, capture_output=True,
+                                        stdin=subprocess.DEVNULL, timeout=45, creationflags=subprocess.CREATE_NO_WINDOW)
+                assert result.returncode == 1
+                output = (result.stdout + result.stderr).decode("utf-8")
+                assert "审查" in output and "HTTP 403" in output
+                assert "任务模型检查失败" not in output and "聊天模型检查失败" not in output
+            assert sorted(received) == sorted([(primary.server_port, "Bearer " + KEY, "shared"),
+                (primary.server_port, "Bearer " + summary_key, "shared"), (reviewer.server_port, "Bearer " + KEY, "shared")])
+        finally:
+            for server in (primary, reviewer):
+                server.shutdown()
+            for thread in threads:
+                thread.join(timeout=5)
+
+
 @pytest.mark.parametrize('bad_backend', [False, True])
 def test_cmd_entrypoints_and_dpapi_roundtrip(configured, tmp_path, bad_backend):
     config, data, env = configured

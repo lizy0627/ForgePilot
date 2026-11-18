@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from .errors import ForgePilotError
 from .models.gateway import ModelGateway
-from .models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from .models.profiles import ModelConfiguration, ModelProfile, ModelRoute, SecretResolver
 from .security import Redactor
 from .settings import checked_model_id, resolve_models
 from .windows_secrets import protect_launcher_key, unprotect_launcher_key
@@ -82,29 +82,84 @@ def _review_fields(data, task_model):
     return extras
 
 
-async def _check_selected_models(data, key, *, transport=None, gateway_factory=ModelGateway):
-    """The CLI and GUI share one bounded, purpose-labelled connection implementation."""
-    groups = {}
-    for purpose in ("chat", "task", "summary", "review"):
-        model = data.get(purpose + "_model")
-        if model:
-            groups.setdefault(model, []).append(purpose)
-    redactor = Redactor((key,))
-    results = []
-    for model, purposes in groups.items():
-        result = {"purposes": purposes, "ok": True}
+def _saved_model_config(data):
+    return _options(data.get("server_args", [])).get("--model-config", os.environ.get("FORGEPILOT_MODEL_CONFIG"))
+
+
+def _extra_key_names(configuration):
+    return {p.api_key_ref.removeprefix("env:") for p in configuration.profiles
+            if p.api_key_ref.startswith("env:") and p.api_key_ref != "env:FORGEPILOT_API_KEY"}
+
+
+_DESKTOP_KEY_PREFIX = "FORGEPILOT_DESKTOP_DPAPI_"
+
+
+def model_check_environment(config):
+    """Pass only the configured model references through the desktop client's restricted environment."""
+    environment = {}
+    if model_file := os.environ.get("FORGEPILOT_MODEL_CONFIG"):
+        environment["FORGEPILOT_MODEL_CONFIG"] = model_file
+    if config:
         try:
-            async with gateway_factory.from_legacy(data["base_url"], key, {"connection-check": model},
-                    timeout=30, transport=transport) as gateway:
-                reply = await gateway.for_route("connection-check").chat([{"role": "user", "content": "Reply with only OK."}])
-                if reply.message.tool_calls or not (reply.message.content or "").strip():
-                    raise ForgePilotError("llm_protocol", "模型未返回有效文本。")
-        except ForgePilotError as exc:
-            result.update(ok=False, code=exc.code, message=redactor.text(str(exc)))
-        except Exception:
-            result.update(ok=False, code="connection_failed", message="连接或响应无效。")
-        results.append(result)
-    return results
+            model_file = _saved_model_config(read_config(Path(config)))
+            if model_file:
+                configuration = ModelConfiguration.load(application_root() / model_file)
+                for name in _extra_key_names(configuration):
+                    if value := os.environ.get(name):
+                        environment[_DESKTOP_KEY_PREFIX + name] = protect_launcher_key(value)
+        except (OSError, ValueError, ForgePilotError):
+            # The settings window also opens to repair an invalid configuration or credential.
+            pass
+    return environment
+
+
+def _check_credentials(configuration, key):
+    environment = {**os.environ, "FORGEPILOT_API_KEY": key}
+    for name in _extra_key_names(configuration):
+        if encrypted := os.environ.get(_DESKTOP_KEY_PREFIX + name):
+            environment[name] = unprotect_launcher_key(encrypted)
+    return SecretResolver(environment=environment)
+
+
+async def _check_selected_models(data, key, *, model_file=None, transport=None, gateway_factory=ModelGateway):
+    """Check each desktop purpose with the same primary and fallback as runtime."""
+    routes = [("chat", None), ("task", None), ("summary", None)]
+    if model_file or data.get("review_model"):
+        configuration = (ModelConfiguration.load(application_root() / model_file) if model_file
+                         else model_configuration(data, data.get("server_args", [])))
+        gateway = gateway_factory(configuration,
+            secret_resolver=_check_credentials(configuration, key),
+            transport_factory=lambda _: transport)
+        from .agents.registry import BUILTIN_AGENT_DEFINITIONS
+        configured = {(r.route_id, r.role) for r in configuration.routes}
+        routes.extend((agent.model_route, agent.role) for agent in BUILTIN_AGENT_DEFINITIONS
+                      if (agent.model_route, agent.role) in configured or (agent.model_route, None) in configured)
+        if ("task", "generalist") in configured:
+            routes.append(("task", "generalist"))
+    else:
+        gateway = gateway_factory.from_legacy(data["base_url"], key,
+            {purpose: data[purpose + "_model"] for purpose, _ in routes}, timeout=30, transport=transport)
+    async with gateway:
+        groups = {}
+        for purpose, role in routes:
+            client = gateway.for_route(purpose, role=role)
+            target = tuple((profile.base_url, profile.model, profile.api_key_ref)
+                           for profile in (client.route.primary, client.route.fallback) if profile)
+            if target not in groups:
+                groups[target] = (client, [])
+            labels = groups[target][1]
+            # Mission roles using the task connection are already covered by its check.
+            if purpose not in labels and (role in (None, "reviewer") or "task" not in labels):
+                labels.append(purpose)
+        results = []
+        for client, grouped_purposes in groups.values():
+            result = {"purposes": grouped_purposes, "ok": True}
+            try:
+                await client.chat([{"role": "user", "content": "Reply with only OK."}])
+            except ForgePilotError as exc:
+                result.update(ok=False, code=exc.code, message=gateway.redactor.text(str(exc)))
+            results.append(result)
+        return results
 
 
 async def check_model(config, *, transport=None, gateway_factory=ModelGateway):
@@ -115,9 +170,11 @@ async def check_model(config, *, transport=None, gateway_factory=ModelGateway):
         data = read_config(config)
         if not key:
             raise ForgePilotError("llm_config", "未配置 API Key，请运行 Configure-ForgePilot.cmd。")
-        results = await _check_selected_models(data, key, transport=transport, gateway_factory=gateway_factory)
+        results = await _check_selected_models(data, key, model_file=_saved_model_config(data),
+                                              transport=transport, gateway_factory=gateway_factory)
         failed = [result for result in results if not result["ok"]]
-        labels = {"chat": "聊天", "task": "任务", "summary": "摘要", "review": "审查"}
+        labels = {"chat": "聊天", "task": "任务", "summary": "摘要", "review": "审查",
+                  "orchestration": "编排", "analysis": "分析", "implementation": "实现", "repair": "修复"}
         for result in failed:
             label = "/".join(labels[purpose] for purpose in result["purposes"])
             print(f"{label}模型检查失败：" + result["message"], file=sys.stderr)
@@ -139,7 +196,7 @@ async def check_model(config, *, transport=None, gateway_factory=ModelGateway):
     except Exception:
         print("模型连接检查未完成，请检查本机 config.json 和运行环境。", file=sys.stderr)
         return 1
-    purposes = "聊天、任务、摘要和审查" if data["review_model"] else "聊天、任务和摘要"
+    purposes = "、".join(dict.fromkeys(labels[purpose] for result in results for purpose in result["purposes"]))
     print(f"模型连接检查通过：{purposes}用途的所有不同模型均返回了文本回答。")
     return 0
 
@@ -398,6 +455,11 @@ def _server_arguments(old, fields, keep_model_config):
     return result
 
 
+def _uses_saved_models(fields, previous):
+    return bool(previous["external_model_config"]) or all(
+        fields[name] == previous[name] for name in ("base_url", *MODEL_FIELDS))
+
+
 def _candidate(old, fields, previous, config):
     # Only the established non-secret launcher shape is persisted.
     model_fields = ("base_url", *MODEL_FIELDS)
@@ -406,8 +468,7 @@ def _candidate(old, fields, previous, config):
     else:
         data = {key: fields[key] for key in model_fields}
     data["port"] = fields["port"]
-    keep_model_config = previous["external_model_config"] or all(fields[k] == previous[k] for k in model_fields)
-    data["server_args"] = _server_arguments(old, fields, keep_model_config)
+    data["server_args"] = _server_arguments(old, fields, _uses_saved_models(fields, previous))
     if not old:
         data["server_args"].extend(("--database", str(config.parent / "history.sqlite3"), "--timeout", "120"))
     for key in ("credential_file", "embedding_credential_file"):
@@ -614,7 +675,10 @@ async def check_configuration(config, request, *, transport=None):
     if not isinstance(key, str) or not key:
         raise ConfigurationError("credential_required", "请填写或保存 API Key。")
     errors, checks = [], []
-    results = await _check_selected_models(fields, key, transport=transport)
+    saved = _fields_from_config(data, config)
+    use_saved = data and _uses_saved_models(fields, saved)
+    results = await _check_selected_models({**fields, "server_args": data.get("server_args", [])}, key,
+        model_file=_saved_model_config(data) if use_saved else None, transport=transport)
     for result in results:
         if result["ok"]:
             checks.extend({"purpose": purpose, "ok": True} for purpose in result["purposes"])

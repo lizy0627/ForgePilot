@@ -182,6 +182,7 @@ def owned_client(job, log, port, local_token):
     worker = ROOT / 'agent/forgepilot/_build_worker.py'
     with log.open('wb') as output:
         client_env = build_environment()
+        client_env.update(desktop_configuration.model_check_environment(os.environ.get('FORGEPILOT_RUNTIME_CONFIG')))
         client_env['FORGEPILOT_LOCAL_API_TOKEN'] = local_token
         proc = subprocess.Popen([str(PYTHON), '-I', str(worker), job.name], stdin=subprocess.PIPE,
                                 stdout=output, stderr=output, env=client_env,
@@ -573,6 +574,7 @@ def launch_configuration_client(config):
         print('缺少 Qt 客户端，请构建客户端或重新解压发布包。', file=sys.stderr)
         return 1
     environment = build_environment()
+    environment.update(desktop_configuration.model_check_environment(config))
     environment['FORGEPILOT_RUNTIME_CONFIG'] = str(config)
     client = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)

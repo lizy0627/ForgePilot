@@ -738,7 +738,26 @@ print(json.dumps(result))
         auto args = saved.value("server_args").toArray();
         const auto modelFlag = args.toVariantList().indexOf(QStringLiteral("--model-config"));
         QVERIFY(modelFlag >= 0);
-        QVERIFY(QFile::copy(args.at(modelFlag + 1).toString(), manualPath));
+        Source general, reviewer;
+        general.handle = [](const Request &request) {
+            const QJsonObject reply{{"message", QJsonObject{{"role", "assistant"}, {"content", "OK"}}},
+                                    {"finish_reason", "stop"}};
+            Source::json(request, {{"choices", QJsonArray{reply}}});
+        };
+        reviewer.handle = [](const Request &request) { Source::json(request, {}, 403); };
+        QFile generated(args.at(modelFlag + 1).toString()); QVERIFY(generated.open(QIODevice::ReadOnly));
+        auto models = QJsonDocument::fromJson(generated.readAll()).object();
+        auto profiles = models.value("profiles").toArray();
+        for (auto it = profiles.begin(); it != profiles.end(); ++it) {
+            auto profile = (*it).toObject();
+            const auto endpoint = profile.value("profile_id") == "desktop-review" ? reviewer.url() : general.url();
+            profile["base_url"] = endpoint.toString() + "/v1";
+            profile["model"] = "same-name";
+            *it = profile;
+        }
+        models["profiles"] = profiles;
+        QFile manual(manualPath); QVERIFY(manual.open(QIODevice::WriteOnly));
+        manual.write(QJsonDocument(models).toJson()); manual.close();
         args[modelFlag + 1] = manualPath;
         auto external = saved;
         external["server_args"] = args;
@@ -756,6 +775,16 @@ print(json.dumps(result))
         const auto updatedArgs = QJsonDocument::fromJson(config.readAll()).object().value("server_args").toArray();
         QVERIFY(updatedArgs.contains("--mission-allow-cloud-model"));
         QVERIFY(updatedArgs.contains(manualPath));
+        QVERIFY(general.requests.isEmpty()); QVERIFY(reviewer.requests.isEmpty());
+        QVERIFY(ui.click("runtimeConfigCheck")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
+        QCOMPARE(general.requests.size(), 1); QCOMPARE(reviewer.requests.size(), 1);
+        QCOMPARE(general.requests.first().body.value("model").toString(), "same-name");
+        QCOMPARE(reviewer.requests.first().body.value("model").toString(), "same-name");
+        QCOMPARE(runtime.errors().size(), 1);
+        const auto error = runtime.errors().first().toMap();
+        QCOMPARE(error.value("purpose").toString(), "review");
+        auto *errorLabel = ui.find({}, "text", QStringLiteral("审查：") + error.value("message").toString());
+        QVERIFY(errorLabel && errorLabel->isVisible());
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void mcpEditorOffersScopesSupportedByTransport()
