@@ -2,8 +2,13 @@
 from collections import Counter
 from copy import deepcopy
 import csv
+import hashlib
 import json
+import os
 from pathlib import Path
+import select
+import socket
+import subprocess
 import sys
 
 import pytest
@@ -110,7 +115,6 @@ def test_analysis_requires_exact_file_symbol_and_directed_relation_sets():
 
 @pytest.mark.parametrize("scenario", ["valid", "wrong_edge", "invalid_json"])
 def test_saved_analysis_has_a_runnable_validation_command(tmp_path, scenario):
-    import subprocess
     task = next(t for t in load_tasks() if t.analysis)
     answer = deepcopy(task.success.expected)
     if scenario == "wrong_edge": answer["relations"][0]["callee"] = "Counter::reset"
@@ -121,6 +125,47 @@ def test_saved_analysis_has_a_runnable_validation_command(tmp_path, scenario):
     result = subprocess.run(command, capture_output=True, text=True, timeout=15)
     assert result.returncode == (0 if scenario == "valid" else 1)
     assert json.loads(result.stdout) == {"task": "analysis-01", "passed": scenario == "valid"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows benchmark launcher reads current-user DPAPI credentials")
+@pytest.mark.parametrize("credential_case", ["legacy", "versioned", "missing-reference", "outside-reference"])
+def test_benchmark_check_only_reads_configured_credential_without_model_requests(tmp_path, credential_case):
+    from forgepilot.build_process import build_environment
+    from forgepilot.windows_secrets import protect_launcher_key
+
+    root = Path(__file__).resolve().parents[2]
+    identity = hashlib.sha256(str(root).lower().encode()).hexdigest()[:16].upper()
+    settings = tmp_path / "ForgePilot/launcher" / identity
+    settings.mkdir(parents=True)
+    legacy = settings / "api-key.dpapi"
+    encrypted = protect_launcher_key("benchmark-fixture-key")
+    legacy.write_text("obsolete-key" if credential_case == "versioned" else encrypted, encoding="ascii")
+    with socket.socket() as endpoint:
+        endpoint.bind(("127.0.0.1", 0))
+        endpoint.listen()
+        config = {"model": "writer", "base_url": f"http://127.0.0.1:{endpoint.getsockname()[1]}/v1",
+                  "port": 8765, "server_args": [], "task_model_family": "writer", "review_model": "reviewer",
+                  "review_model_family": "reviewer"}
+        filename = "api-key-" + "a" * 32 + ".dpapi"
+        if credential_case != "legacy":
+            config["credential_file"] = filename
+        if credential_case == "versioned":
+            (settings / filename).write_text(encrypted, encoding="ascii")
+        if credential_case == "outside-reference":
+            (settings.parent / filename).write_text(encrypted, encoding="ascii")
+            config["credential_file"] = "../" + filename
+        (settings / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                 "-File", str(root / "scripts/Invoke-Benchmark.ps1"), "-CheckOnly"],
+                                env={**build_environment(), "LOCALAPPDATA": str(tmp_path)}, capture_output=True, timeout=20)
+        assert not select.select([endpoint], [], [], 0)[0]
+    if credential_case in ("legacy", "versioned"):
+        assert result.returncode == 0, result.stderr
+        assert b"encrypted_api_key=decryptable" in result.stdout
+        assert b"benchmark_model_tokens=0" in result.stdout
+    else:
+        assert result.returncode != 0
+    assert b"benchmark-fixture-key" not in result.stdout + result.stderr
 
 
 def test_protected_tests_and_extra_source_changes_cannot_score():

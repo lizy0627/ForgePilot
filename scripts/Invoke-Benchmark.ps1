@@ -15,14 +15,23 @@ try {
 }
 $settingsDirectory = Join-Path $env:LOCALAPPDATA "ForgePilot\launcher\$identity"
 $configFile = Join-Path $settingsDirectory 'config.json'
-$keyFile = Join-Path $settingsDirectory 'api-key.dpapi'
-
-if (-not (Test-Path -LiteralPath $configFile -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $keyFile -PathType Leaf)) {
-    throw 'Saved model configuration or encrypted API key is missing. Run Configure-ForgePilot.cmd.'
+if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
+    throw 'Saved model configuration is missing. Run Configure-ForgePilot.cmd.'
 }
 
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
+$keyName = 'api-key.dpapi'
+if ($null -ne $config.PSObject.Properties['credential_file']) {
+    $keyName = $config.credential_file
+    if ($keyName -isnot [string] -or $keyName -cnotmatch '\A(?:api|embedding)-key-[a-f0-9]{32}\.dpapi\z') {
+        throw 'Invalid saved credential reference. Run Configure-ForgePilot.cmd.'
+    }
+}
+$keyFile = Get-Item -LiteralPath (Join-Path $settingsDirectory $keyName) -ErrorAction SilentlyContinue
+if ($keyFile -isnot [IO.FileInfo] -or $keyFile.LinkType -or $keyFile.Length -gt 1MB -or
+    ($keyFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'Saved encrypted API key is missing or invalid. Run Configure-ForgePilot.cmd.'
+}
 $baseUrl = $config.base_url
 $taskModel = if ($config.task_model) { $config.task_model } else { $config.model }
 if ($baseUrl -isnot [string] -or [string]::IsNullOrWhiteSpace($baseUrl) -or
@@ -31,7 +40,7 @@ if ($baseUrl -isnot [string] -or [string]::IsNullOrWhiteSpace($baseUrl) -or
 }
 
 try {
-    $secret = (Get-Content -LiteralPath $keyFile -Raw).Trim() | ConvertTo-SecureString
+    $secret = (Get-Content -LiteralPath $keyFile.FullName -Raw).Trim() | ConvertTo-SecureString
     if ($secret.Length -eq 0) { throw 'empty-key' }
 } catch {
     throw 'Encrypted API key is unavailable to this Windows user. Run Configure-ForgePilot.cmd.'
