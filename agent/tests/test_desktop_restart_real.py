@@ -59,6 +59,15 @@ def invoke(action, config, environment, *, request=None, timeout=60):
                           creationflags=subprocess.CREATE_NO_WINDOW)
 
 
+def restart_to_revision(config, environment, revision):
+    result = invoke("config-helper", config, environment, request={"action": "restart", "config_revision": revision})
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    accepted = json.loads(result.stdout)
+    assert accepted["ok"], accepted
+    return wait_for(lambda: runtime(config), lambda state: state.get("status") == "running"
+        and state.get("running_revision") == revision, seconds=40)
+
+
 def audit_owned_argv(state):
     pids = [state[name] for name in ("supervisor_pid", "backend_pid", "client_worker_pid", "client_pid")]
     # Audit only recorded live fixture processes. The credentials enter the audit
@@ -124,10 +133,14 @@ def offline_models():
         thread.join(5)
 
 
-def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_history(tmp_path):
+@pytest.mark.parametrize("database_source", ["explicit", "environment", "service_default"])
+def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_history(tmp_path, database_source):
     config = tmp_path / "settings with spaces" / "config.json"
     token = secrets.token_urlsafe(32)
     environment = {**os.environ, "FORGEPILOT_LOCAL_API_TOKEN": token}
+    environment["LOCALAPPDATA"] = str(tmp_path / "local")
+    if database_source == "service_default":
+        environment.pop("FORGEPILOT_DATABASE", None)
     environment.pop("FORGEPILOT_API_KEY", None)
     environment.pop("FORGEPILOT_EMBEDDING_API_KEY", None)
     states = []
@@ -139,8 +152,13 @@ def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_
         saved = asyncio.run(configuration.handle_request(config, {"action": "save", "fields": fields,
             "api_key": OLD_KEY, "config_revision": loaded["config_revision"]}))
         assert saved["ok"], saved
-        initial_config = configuration.read_config(config)
-        initial_revision = saved["config_revision"]
+        # Simulate legacy installations with their own history database selection.
+        initial_config = json.loads(config.read_text(encoding="utf-8"))
+        model_args = initial_config["server_args"][initial_config["server_args"].index("--model-config"):]
+        database_args = ["--database", str(tmp_path / "existing.sqlite3")] if database_source == "explicit" else []
+        initial_config["server_args"] = database_args + model_args
+        config.write_text(json.dumps(initial_config), encoding="utf-8")
+        initial_revision = configuration.configuration_revision(config)
         try:
             started = invoke("desktop", config, environment)
             assert started.returncode == 0, started.stdout.decode(errors="replace") + started.stderr.decode(errors="replace")
@@ -164,7 +182,8 @@ def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_
                 assert entered.wait(10)
                 active = client.get("/api/v2/runtime/status").json()
                 assert active["active_count"] == 1 and not active["restarting"]
-                changed = {**fields, "port": free_port(), "chat_model": "chat-new", "summary_model": "summary-new"}
+                changed = {**fields, "port": free_port(), "chat_model": "chat-new", "summary_model": "summary-new",
+                           "cloud_model_allowed": True}
                 assert changed["port"] != fields["port"]
                 updated = asyncio.run(configuration.handle_request(config, {"action": "save", "fields": changed,
                     "api_key": NEW_KEY, "config_revision": initial_revision}))
@@ -184,13 +203,7 @@ def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_
                 assert completed["status"] == "completed", completed
                 assert model_calls[0]["model"] == "chat-old" and model_calls[0]["authorization"] == "Bearer " + OLD_KEY
                 wait_for(lambda: client.get("/api/v2/runtime/status").json(), lambda value: value["active_count"] == 0)
-            restarted = invoke("config-helper", config, environment, request={
-                "action": "restart", "config_revision": updated["config_revision"]})
-            assert restarted.returncode == 0, restarted.stderr.decode(errors="replace")
-            accepted = json.loads(restarted.stdout)
-            assert accepted["ok"], accepted
-            after = wait_for(lambda: runtime(config), lambda state: state.get("status") == "running"
-                and state.get("running_revision") == updated["config_revision"], seconds=40)
+            after = restart_to_revision(config, environment, updated["config_revision"])
             states.append(after)
             assert after["port"] == changed["port"] and after["backend_pid"] != before["backend_pid"]
             wait_for(lambda: alive(before["backend_pid"]), lambda value: not value)
@@ -216,12 +229,27 @@ def test_real_restart_refuses_active_chat_then_adopts_saved_models_key_port_and_
                 assert final["status"] == "completed", final
                 assert len(model_calls) == 2 and model_calls[1]["model"] == "chat-new"
                 assert model_calls[1]["authorization"] == "Bearer " + NEW_KEY
+                messages = client.get(f"/api/v1/conversations/{conversation}").json()["messages"]
+            disabled = asyncio.run(configuration.handle_request(config, {"action": "save",
+                "fields": {**changed, "cloud_model_allowed": False}, "config_revision": updated["config_revision"]}))
+            assert disabled["ok"], disabled
+            last = restart_to_revision(config, environment, disabled["config_revision"])
+            assert last["backend_pid"] != after["backend_pid"]
+            states.append(last)
+            with httpx.Client(base_url=f"http://127.0.0.1:{changed['port']}", headers={"X-ForgePilot-Token": token},
+                              trust_env=False, timeout=5) as client:
+                history = client.get(f"/api/v1/conversations/{conversation}")
+                assert history.status_code == 200, history.text
+                assert history.json()["messages"] == messages
+            assert new_saved_config["server_args"][:-2] == [*database_args, "--mission-allow-cloud-model"]
+            assert configuration.read_config(config)["server_args"][:-2] == database_args
             for state in states:
                 text = json.dumps(state)
                 for log in Path(state["log_directory"]).glob("*.log"):
                     text += log.read_text(encoding="utf-8", errors="replace")
                 assert all(secret not in text for secret in (OLD_KEY, NEW_KEY, token))
-            evidence = {"active_restart_rejected": True, "old_request_completed_once": True,
+            evidence = {"database_source": database_source, "conversation_id": conversation,
+                "active_restart_rejected": True, "old_request_completed_once": True,
                 "old_revision": initial_revision, "new_revision": updated["config_revision"],
                 "old_port": fields["port"], "new_port": changed["port"], "history_preserved": True,
                 "model_requests": [{"model": call["model"], "stream": call["stream"]} for call in model_calls],

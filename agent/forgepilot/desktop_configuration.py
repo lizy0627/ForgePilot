@@ -383,8 +383,8 @@ def _candidate(old, fields, config):
     # Only the established non-secret launcher shape is persisted.
     data = {key: fields[key] for key in ("base_url", "port", *MODEL_FIELDS)}
     data["server_args"] = _server_arguments(old, fields)
-    if not data["server_args"]:
-        data["server_args"] = ["--database", str(config.parent / "history.sqlite3"), "--timeout", "120"]
+    if not old:
+        data["server_args"].extend(("--database", str(config.parent / "history.sqlite3"), "--timeout", "120"))
     for key in ("credential_file", "embedding_credential_file"):
         if key in old:
             try:

@@ -47,11 +47,15 @@ async def test_first_load_is_read_only_and_invalid_configuration_can_be_replaced
 
 
 @pytest.mark.asyncio
-async def test_gui_saved_models_generate_every_mission_role_and_separate_reviewer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("allow_cloud", [False, True])
+async def test_gui_saved_models_generate_every_mission_role_and_separate_reviewer(tmp_path, monkeypatch, allow_cloud):
     config = tmp_path / "config.json"
-    made = await save(config)
+    made = await save(config, values=fields(cloud_model_allowed=allow_cloud))
     assert made["ok"] and made["configured"] and made["restart_required"] and made["saved_at"]
     stored = core.read_config(config)
+    args = stored["server_args"]
+    assert args[args.index("--database") + 1] == str(tmp_path / "history.sqlite3")
+    assert ("--mission-allow-cloud-model" in args) == allow_cloud
     assert KEY not in config.read_text(encoding="utf-8") and "api_key" not in stored
     assert stored["credential_file"].startswith("api-key-") and stored["credential_file"].endswith(".dpapi")
     assert KEY not in (config.parent / stored["credential_file"]).read_text(encoding="ascii")
