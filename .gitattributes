@@ -1,2 +1,11 @@
 *.cmd text eol=crlf
 resources/schemas/*.json text eol=lf
+# lock.json records SHA-256 hashes of these files' working-tree bytes.
+eval/real_tasks/tasks.json text eol=lf
+eval/real_tasks/init/init_repository.py text eol=lf
+eval/real_tasks/protected_oracles/bug_float_trailing.py text eol=lf
+eval/real_tasks/protected_oracles/bug_pkgconfig_absolute.py text eol=lf
+eval/real_tasks/protected_oracles/bug_unmatched_short.py text eol=lf
+eval/real_tasks/protected_oracles/common.py text eol=lf
+eval/real_tasks/protected_oracles/feature_ordered_arguments.py text eol=lf
+eval/real_tasks/protected_oracles/feature_string_view.py text eol=lf
