@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from forgepilot import desktop_configuration as core
+from forgepilot.server import parser as server_parser
 from forgepilot.settings import model_gateway_from_args
 from forgepilot.windows_secrets import protect_launcher_key, unprotect_launcher_key
 
@@ -78,23 +79,50 @@ async def test_gui_saved_models_generate_every_mission_role_and_separate_reviewe
 
 
 @pytest.mark.asyncio
-async def test_save_preserves_trusted_other_args_and_freezes_running_configuration(tmp_path):
+@pytest.mark.parametrize("joined", [False, True], ids=["separate-argument", "equals-argument"])
+async def test_save_preserves_trusted_other_args_and_freezes_running_configuration(tmp_path, git_exe, monkeypatch, joined):
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"base_url": "https://api.openai.com/v1", "model": "legacy", "port": 8765,
-        "server_args": ["--database", str(tmp_path / "history.sqlite3"), "--timeout", "200",
-                        "--configure-preset", "existing", "--model-config", "old-models.json"]}), encoding="utf-8")
+    models = tmp_path / "custom models.json"
+    custom = core.model_configuration(fields(), []).model_dump(mode="json")
+    primary = {"profile_id": "custom-review", "family": "custom", "model": "independent-review",
+               "base_url": "http://127.0.0.1:32101/v1", "api_key_ref": "env:REVIEW_KEY"}
+    fallback = {**primary, "profile_id": "backup-review", "model": "backup",
+                "base_url": "http://127.0.0.1:32102/v1", "api_key_ref": "env:BACKUP_KEY"}
+    custom["profiles"].extend([primary, fallback])
+    custom["routes"].append({"route_id": "review", "role": "reviewer",
+                             "primary": "custom-review", "fallback": "backup-review"})
+    original = json.dumps(custom, indent=4).encode("utf-8")
+    models.write_bytes(original)
+    model_args = ["--model-config=" + str(models)] if joined else ["--model-config", str(models)]
+    trusted = ["--database", str(tmp_path / "history.sqlite3"), "--timeout", "200", "--configure-preset", "existing"]
+    config.write_text(json.dumps({"base_url": "http://127.0.0.1:32103/v1", "model": "legacy", "port": 8765,
+        "server_args": [*model_args, *trusted]}), encoding="utf-8")
+    config.with_name("api-key.dpapi").write_text(protect_launcher_key(KEY), encoding="ascii")
     status = lambda: {"managed": True, "active_count": 2, "restart_allowed": False}
-    loaded = await core.handle_request(config, {"action": "load"}, status=status)
-    result = await core.handle_request(config, {"action": "save", "fields": fields(cloud_model_allowed=True),
-        "api_key": KEY, "config_revision": loaded["config_revision"]}, status=status)
-    assert result["ok"] and result["active_count"] == 2 and not result["restart_allowed"]
-    assert result["restart_required"] and "原配置" in result["notice"]
-    stored = core.read_config(config)
-    assert stored["server_args"][:-2] == ["--database", str(tmp_path / "history.sqlite3"), "--timeout", "200",
-                                         "--configure-preset", "existing", "--mission-allow-cloud-model"]
-    assert stored["server_args"][-2] == "--model-config"
-    assert core.ModelConfiguration.load(stored["server_args"][-1]).profiles[0].timeout_seconds == 200
-    assert not (tmp_path / "old-models.json").exists()
+    new_key = "offline-rotated-desktop-key"
+    monkeypatch.setenv("REVIEW_KEY", "offline-review-key")
+    monkeypatch.setenv("BACKUP_KEY", "offline-backup-key")
+    for changes, key in [({"port": 9876}, ""), ({"cloud_model_allowed": True}, ""),
+                         ({"git": str(git_exe)}, ""), ({}, new_key)]:
+        loaded = await core.handle_request(config, {"action": "load"}, status=status)
+        assert loaded["configured"] and loaded["fields"]["external_model_config"] == str(models)
+        result = await core.handle_request(config, {"action": "save", "fields": {**loaded["fields"], **changes},
+            "api_key": key, "config_revision": loaded["config_revision"]}, status=status)
+        assert result["ok"] and result["active_count"] == 2 and not result["restart_allowed"]
+        assert result["restart_required"] and "原配置" in result["notice"]
+        assert models.read_bytes() == original
+        stored = core.read_config(config)
+        args = server_parser().parse_args(stored["server_args"])
+        assert str(args.model_config) == str(models)
+        monkeypatch.setenv("FORGEPILOT_API_KEY", core.load_saved_key(config))
+        async with model_gateway_from_args(args) as gateway:
+            review = gateway.router.resolve("review", "reviewer")
+            for selected, expected in ((review.primary, primary), (review.fallback, fallback)):
+                assert (selected.model, selected.base_url, selected.api_key_ref) == (
+                    expected["model"], expected["base_url"], expected["api_key_ref"])
+    assert all(arg in stored["server_args"] for arg in trusted)
+    assert stored["port"] == 9876 and args.mission_allow_cloud_model and Path(args.git) == Path(git_exe)
+    assert core.load_saved_key(config) == new_key
 
 
 @pytest.mark.asyncio
@@ -112,13 +140,26 @@ async def test_failed_atomic_replace_keeps_old_config_and_credentials_byte_ident
 
 
 @pytest.mark.asyncio
-async def test_stale_form_cannot_overwrite_new_config_and_blank_key_preserves_original(tmp_path):
+async def test_stale_form_cannot_overwrite_new_config_and_blank_key_preserves_original(tmp_path, monkeypatch):
     config = tmp_path / "config.json"
     first = await save(config)
-    original_key_name = core.read_config(config)["credential_file"]
-    second = await core.handle_request(config, {"action": "save", "fields": fields(chat_model="changed-chat"),
-        "api_key": "", "config_revision": first["config_revision"]})
+    original = core.read_config(config)
+    original_key_name = original["credential_file"]
+    models = Path(server_parser().parse_args(original["server_args"]).model_config)
+    contents = models.read_bytes()
+    assert first["fields"]["external_model_config"] == ""
+    changed = await core.handle_request(config, {"action": "save", "fields": {**first["fields"], "port": 9876},
+        "config_revision": first["config_revision"]})
+    assert changed["ok"] and changed["fields"]["external_model_config"] == ""
+    assert Path(server_parser().parse_args(core.read_config(config)["server_args"]).model_config) == models
+    assert models.read_bytes() == contents
+    second = await core.handle_request(config, {"action": "save", "fields": {**changed["fields"], "chat_model": "changed-chat"},
+        "api_key": "", "config_revision": changed["config_revision"]})
     assert second["ok"] and core.read_config(config)["credential_file"] == original_key_name
+    monkeypatch.setenv("FORGEPILOT_API_KEY", core.load_saved_key(config))
+    async with model_gateway_from_args(server_parser().parse_args(core.read_config(config)["server_args"])) as gateway:
+        assert gateway.router.resolve("chat").primary.model == "changed-chat"
+    assert models.read_bytes() == contents
     before = config.read_bytes()
     stale = await core.handle_request(config, {"action": "save", "fields": fields(),
         "api_key": "another-new-key", "config_revision": first["config_revision"]})

@@ -8,6 +8,7 @@ Dialog {
     objectName: "runtimeConfigDialog"
     property var controller: null
     property var draft: ({})
+    readonly property string externalModelConfig: draft.external_model_config || ""
     property bool advanced: false
     title: controller && controller.configured ? "运行配置" : "首次运行配置"
     modal: true
@@ -55,13 +56,21 @@ Dialog {
                 width: scroll.availableWidth; spacing: 10
                 enabled: !!root.controller && !root.controller.busy
                 Label { text: "模型服务"; font.bold: true; color: Theme.text }
-                Label { text: "服务地址"; color: Theme.secondary }
+                Label {
+                    objectName: "runtimeExternalModelConfig"
+                    visible: root.externalModelConfig !== ""; Layout.fillWidth: true
+                    wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText; color: Theme.secondary
+                    text: "模型路由由此文件管理：" + root.externalModelConfig
+                }
+                Label { visible: root.externalModelConfig === ""; text: "服务地址"; color: Theme.secondary }
                 TextField {
                     objectName: "runtimeBaseUrl"; Layout.fillWidth: true
+                    visible: root.externalModelConfig === ""
                     text: root.draft.base_url || ""; placeholderText: "https://服务地址/v1"; selectByMouse: true
                     onTextEdited: root.setField("base_url", text)
                 }
                 GridLayout {
+                    visible: root.externalModelConfig === ""
                     columns: 2; Layout.fillWidth: true; columnSpacing: 12; rowSpacing: 8
                     Label { text: "聊天模型"; color: Theme.secondary }
                     TextField {
@@ -96,6 +105,7 @@ Dialog {
                 }
                 Label {
                     Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Theme.secondary; font.pixelSize: 12
+                    visible: root.externalModelConfig === ""
                     text: "任务模型同时用于编排、分析、实现和修复。独立审查须使用不同的模型及模型家族。"
                 }
                 Label { text: "API Key"; color: Theme.secondary }

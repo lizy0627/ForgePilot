@@ -164,6 +164,7 @@ class RuntimeFields(BaseModel):
     summary_model: str = ""
     task_model_family: str = ""
     review_model_family: str = ""
+    external_model_config: str = ""
     embedding_enabled: bool = False
     embedding_base_url: str = ""
     embedding_model: str = ""
@@ -266,7 +267,7 @@ def configuration_revision(config: Path) -> str:
 
 def _options(args):
     result = {}
-    values, booleans = set(OPTION_FLAGS.values()), set(BOOLEAN_FLAGS.values())
+    values, booleans = {*OPTION_FLAGS.values(), "--model-config"}, set(BOOLEAN_FLAGS.values())
     index = 0
     while index < len(args):
         argument = args[index]
@@ -282,7 +283,7 @@ def _options(args):
     return result
 
 
-def _fields_from_config(data):
+def _fields_from_config(data, config):
     fields = RuntimeFields().model_dump()
     fields.update({name: data[name] for name in ("base_url", "port", *MODEL_FIELDS)
                    if name in data and type(data[name]) is type(fields[name])})
@@ -297,6 +298,18 @@ def _fields_from_config(data):
         options = _options(args)
         fields.update({key: options.get(flag, "") for key, flag in OPTION_FLAGS.items()})
         fields.update({key: bool(options.get(flag, False)) for key, flag in BOOLEAN_FLAGS.items()})
+        reference = options.get("--model-config")
+        if reference:
+            path = application_root() / reference
+            generated = False
+            if path.parent == config.parent and re.fullmatch(r"models-[a-f0-9]{32}\.json", path.name):
+                try:
+                    generated = (ModelConfiguration.load(path, preserve_output_limits=True)
+                                 == model_configuration(fields, args))
+                except (ForgePilotError, ConfigurationError):
+                    pass  # An unreadable or hand-edited file remains under its owner's control.
+            if not generated:
+                fields["external_model_config"] = reference
     return fields
 
 
@@ -358,14 +371,16 @@ def _optional_issues(fields):
     return issues
 
 
-def _server_arguments(old, fields):
+def _server_arguments(old, fields, keep_model_config):
     args = old.get("server_args", [])
     if not isinstance(args, list) or not all(isinstance(arg, str) and "\0" not in arg for arg in args):
         args = []
     result = []
-    owned_values = {*OPTION_FLAGS.values(), "--model-config", "--host", "--port", "--base-url", "--model",
+    owned_values = {*OPTION_FLAGS.values(), "--host", "--port", "--base-url", "--model",
                     "--chat-model", "--task-model", "--summary-model", "--review-model",
                     "--task-model-family", "--review-model-family"}
+    if not keep_model_config:
+        owned_values.add("--model-config")
     owned_bools = set(BOOLEAN_FLAGS.values())
     index = 0
     while index < len(args):
@@ -383,10 +398,16 @@ def _server_arguments(old, fields):
     return result
 
 
-def _candidate(old, fields, config):
+def _candidate(old, fields, previous, config):
     # Only the established non-secret launcher shape is persisted.
-    data = {key: fields[key] for key in ("base_url", "port", *MODEL_FIELDS)}
-    data["server_args"] = _server_arguments(old, fields)
+    model_fields = ("base_url", *MODEL_FIELDS)
+    if previous["external_model_config"]:
+        data = {key: old[key] for key in ("model", *model_fields) if key in old}
+    else:
+        data = {key: fields[key] for key in model_fields}
+    data["port"] = fields["port"]
+    keep_model_config = previous["external_model_config"] or all(fields[k] == previous[k] for k in model_fields)
+    data["server_args"] = _server_arguments(old, fields, keep_model_config)
     if not old:
         data["server_args"].extend(("--database", str(config.parent / "history.sqlite3"), "--timeout", "120"))
     for key in ("credential_file", "embedding_credential_file"):
@@ -418,7 +439,7 @@ async def load_configuration(config: Path, *, status=None):
     except ConfigurationError as exc:
         data = {}
         errors.append(_error(exc))
-    fields = _fields_from_config(data)
+    fields = _fields_from_config(data, config)
     try:
         validated_launcher_config(data)
         _checked_fields(fields, check_optional=False)
@@ -553,7 +574,8 @@ def save_configuration(config, request):
             old = {}  # Replacing malformed configuration requires the loaded byte revision.
         if request.get("config_revision") != _revision(config, old):
             raise ConfigurationError("config_conflict", "配置已被其他窗口修改，请重新读取后保存。")
-        data = _candidate(old, fields, config)
+        previous = _fields_from_config(old, config)
+        data = _candidate(old, fields, previous, config)
         key = request.get("api_key", "")
         embedding_key = request.get("embedding_api_key", "")
         if not isinstance(key, str) or not isinstance(embedding_key, str):
@@ -568,7 +590,7 @@ def save_configuration(config, request):
                     filename = _new_credential(config, value, embedding=embedding)
                     created.append(config.parent / filename)
                     data[name] = filename
-            if fields["review_model"]:
+            if fields["review_model"] and not _options(data["server_args"]).get("--model-config"):
                 models_path = _new_models(config, fields, data["server_args"])
                 created.append(models_path)
                 data["server_args"].extend(("--model-config", str(models_path)))

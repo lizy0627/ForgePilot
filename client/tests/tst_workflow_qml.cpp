@@ -729,6 +729,33 @@ print(json.dumps(result))
         QVERIFY(ui.click("runtimeConfigReload")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
         QVERIFY(runtime.configured()); QVERIFY(runtime.hasApiKey());
         QCOMPARE(runtime.fields().value("task_model").toString(), "offline-task");
+        auto *modelPath = ui.find("runtimeExternalModelConfig"); QVERIFY(modelPath);
+        QVERIFY(!modelPath->isVisible());
+        QVERIFY(ui.find("runtimeReviewModel")->isVisible());
+
+        // Point the same launcher at a manually managed file, then reload the dialog.
+        const auto manualPath = directory.filePath("manual routes.json");
+        auto args = saved.value("server_args").toArray();
+        const auto modelFlag = args.toVariantList().indexOf(QStringLiteral("--model-config"));
+        QVERIFY(modelFlag >= 0);
+        QVERIFY(QFile::copy(args.at(modelFlag + 1).toString(), manualPath));
+        args[modelFlag + 1] = manualPath;
+        auto external = saved;
+        external["server_args"] = args;
+        QVERIFY(config.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        config.write(QJsonDocument(external).toJson()); config.close();
+        QVERIFY(ui.click("runtimeConfigReload")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
+        QVERIFY(modelPath->isVisible());
+        QVERIFY(QDir::fromNativeSeparators(modelPath->property("text").toString()).contains(manualPath));
+        QVERIFY(!ui.find("runtimeBaseUrl")->isVisible());
+        QVERIFY(!ui.find("runtimeReviewModel")->isVisible());
+        QVERIFY(ui.click("runtimeCloudAllowed")); QVERIFY(ui.click("runtimeConfigSave"));
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
+        QVERIFY2(runtime.errors().isEmpty(), qPrintable(runtime.message()));
+        QVERIFY(config.open(QIODevice::ReadOnly));
+        const auto updatedArgs = QJsonDocument::fromJson(config.readAll()).object().value("server_args").toArray();
+        QVERIFY(updatedArgs.contains("--mission-allow-cloud-model"));
+        QVERIFY(updatedArgs.contains(manualPath));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void mcpEditorOffersScopesSupportedByTransport()
