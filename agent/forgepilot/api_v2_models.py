@@ -123,7 +123,7 @@ class MissionControl(MissionRequest):
 
 
 class MissionApproval(MissionControl):
-    approval_type: Literal["execution"] = "execution"
+    approval_type: Literal["execution", "scope_expansion"] = "execution"
     task_spec_hash: MissionHash
     plan_hash: MissionHash
     scope_hash: MissionHash
@@ -252,6 +252,38 @@ class MissionDiff(BaseModel):
     task_id: str
     patch: str
     change_sets: list[dict[str, Any]]
+
+
+class MissionScopeFile(BaseModel):
+    path: str
+    reason: str
+    plan_step_id: str
+    acceptance_criteria_ids: list[str]
+
+
+class MissionScopeExpansion(BaseModel):
+    """Latest writer request, including partial work and the terms of a replay.
+
+    Submit its revision and proposed hashes to /approvals with scope_expansion.
+    """
+
+    task_id: str
+    revision: MissionRevision
+    node_id: MissionNodeID
+    attempt: int
+    status: Literal["pending", "approved", "rejected"]
+    files: list[MissionScopeFile]
+    previous_max_changed_files: int
+    max_changed_files: int
+    task_spec_artifact_id: str
+    task_spec_hash: MissionHash
+    plan_artifact_id: str
+    plan_hash: MissionHash
+    scope_hash: MissionHash
+    checkpoint_id: str
+    partial_change_set_artifact_id: str | None
+    partial_patch: str
+    replay_behavior: str
 
 
 class MissionValidation(MissionArtifacts):

@@ -237,6 +237,10 @@ def get_prompt(agent_id: str, stage: str | None = None) -> str:
             if owner != agent_id:
                 raise ValueError("Agent does not own this analysis stage")
             prompt += "\n" + instruction
+            if stage in {"implementer", "repair", "generalist_implementer", "generalist_repair"}:
+                prompt += ("\nIf an existing plan step needs an additional file, stop before the write. "
+                           "Return awaiting_human with scope_expansion.files listing each exact path, reason, "
+                           "plan_step_id and acceptance_criteria_ids. Only human approval grants access.")
         return prompt
     except KeyError:
         raise ValueError("Unknown analysis Agent or stage") from None

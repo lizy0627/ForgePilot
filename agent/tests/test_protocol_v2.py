@@ -9,7 +9,7 @@ from forgepilot.api import create_app
 from forgepilot.api_models import ConversationEvent, EventPayload
 from forgepilot.api_v2_models import (
     CreateMission, MissionApproval, MissionControl, MissionDelivery, MissionErrorResponse,
-    MissionResume, MissionResponse, MissionRetry,
+    MissionResume, MissionResponse, MissionRetry, MissionScopeExpansion,
 )
 from forgepilot.export_protocol import export, generated_protocol
 from forgepilot.mission_events import MissionEvent
@@ -78,6 +78,8 @@ def test_v2_request_examples_match_strict_transport_schemas():
         ("mission_create_request", CreateMission),
         ("mission_approve_request", MissionApproval),
         ("mission_reject_request", MissionApproval),
+        ("mission_scope_approval_request", MissionApproval),
+        ("mission_scope_expansion_preview", MissionScopeExpansion),
         ("mission_cancel_request", MissionControl),
         ("mission_retry_request", MissionRetry),
         ("mission_resume_request", MissionResume),

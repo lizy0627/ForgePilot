@@ -34,7 +34,8 @@ def recovery_role(node: NodeDefinition) -> str:
     if node.node_type is NodeType.DELIVERY:
         return "delivery"
     name = (node.agent_id or node.handler).lower()
-    if "implementer" in name or "repair" in name:
+    if ("implementer" in name or "repair" in name
+            or (name == "generalist.v1" and (node.node_id == "implementer" or node.handler == "repair.v1"))):
         return "writer"
     for role in ("analyst", "orchestrator", "validator", "reviewer"):
         if role in name:
@@ -57,7 +58,7 @@ def checkpoint_type(node, artifacts, *, approved=False):
         return explicit
     types = {item.artifact_type for item in artifacts}
     if "ChangeSet" in types:
-        return "repair" if "repair" in (node.agent_id or node.handler).lower() else "implementation"
+        return "repair" if "repair" in node.handler.lower() or "repair" in (node.agent_id or "").lower() else "implementation"
     if "ValidationReport" in types:
         reports = [item for item in artifacts if item.artifact_type == "ValidationReport"]
         return "validated" if all(item.content.status == "passed" for item in reports) else None
@@ -179,7 +180,7 @@ class RecoveryManager:
         changes = tuple(item for item in outputs if isinstance(item.content, ChangeSet))
         record, current = self._inspect_workspace(task_id, required=boundary in {"implementation", "repair"})
         if boundary in {"implementation", "repair"}:
-            if not changes:
+            if not changes or any(item.content.requires_additional_approval for item in changes):
                 raise ForgePilotError("checkpoint_policy", "Writer completion requires a ChangeSet")
             safe_point = baseline or self.checkpoints.latest(task_id)
             if safe_point is None or current.head_commit != safe_point.head_commit:
@@ -352,8 +353,9 @@ class RecoveryManager:
                 if role == "writer":
                     changes = [self.artifacts.get(item) for item in intent_result.output_artifact_ids
                                if isinstance(self.artifacts.get(item).content, ChangeSet)]
-                    if not changes or any(item.content.execution_plan_artifact_id not in {pair[0] for pair in frozen}
-                                          for item in changes):
+                    if not changes or any(item.content.requires_additional_approval or
+                            item.content.execution_plan_artifact_id not in {pair[0] for pair in frozen}
+                            for item in changes):
                         raise ForgePilotError("recovery_integrity", "Checkpoint ChangeSet is outside frozen plan")
                     self._verify_changes(changes, latest, current)
             if state.status is NodeStatus.SUCCEEDED:
@@ -388,6 +390,7 @@ class RecoveryManager:
             elif role == "writer":
                 attempt = self.store.attempt_record(task_id, state.node_id, state.attempt)
                 candidates = [item for item in artifacts if isinstance(item.content, ChangeSet)
+                              and not item.content.requires_additional_approval
                               and item.producer_node == state.node_id
                               and datetime.fromisoformat(item.created_at.replace("Z", "+00:00")) >=
                                   datetime.fromisoformat(attempt["started_at"].replace("Z", "+00:00"))]

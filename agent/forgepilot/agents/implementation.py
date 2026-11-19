@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 import json
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import Literal
 
 from ..artifacts.canonical import content_sha256
@@ -30,6 +30,8 @@ from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics,
 from ..orchestration.node_handlers import HandlerRegistry
 from ..orchestration.runner import GraphRunner
 from ..orchestration.execution import coordinator_for_storage
+from ..orchestration.scope_expansion import ScopeExpansionFile, ScopeExpansionStore
+from ..orchestration.workspace import WorkspaceSnapshot
 from ..repository import Repository
 from ..workspace_manager import WorkspaceManager
 from .analysis_tools import validate_evidence
@@ -38,9 +40,20 @@ from .prompts import get_prompt
 from .registry import AgentRegistry
 
 
+class ScopeExpansion(ArtifactModel):
+    files: list[ScopeExpansionFile] = Field(min_length=1, max_length=64)
+
+
 class ImplementationOutcome(ArtifactModel):
     status: Literal["completed", "awaiting_human"]
     summary: str = Field(min_length=1, max_length=2048)
+    scope_expansion: ScopeExpansion | None = None
+
+    @model_validator(mode="after")
+    def expansion_requires_pause(self):
+        if self.scope_expansion is not None and self.status != "awaiting_human":
+            raise ValueError("A scope expansion request must pause the writer")
+        return self
 
 
 _NEEDS_HUMAN = frozenset({
@@ -76,9 +89,11 @@ class ImplementationService:
         # Artifact may supply these arguments.
         self.analysis_kwargs = dict(analysis_kwargs or {})
         self.reviews = AnalysisReviewStore(events)
+        self.scope_expansions = ScopeExpansionStore(events)
         self.runner = GraphRunner(events, HandlerRegistry({
             "execution_approval": self._gate, "implementer.v1": self._handler,
-        }), workspace_backend=workspace_manager, coordinator=coordinator_for_storage(events))
+        }), workspace_backend=workspace_manager, coordinator=coordinator_for_storage(events),
+            resolve_approved_inputs=self._approved_inputs)
         if single_agent:
             self.runner.handlers.register("generalist.v1", self._handler)
         # Optional composition is declared before graph creation, never appended
@@ -205,6 +220,43 @@ class ImplementationService:
             raise ForgePilotError("artifact_scope", "ExecutionPlan does not reference the frozen TaskSpec")
         validate_plan_coverage(spec.content, plan.content)
         return spec, plan, evidence
+
+    def _approved_inputs(self, task_id, artifact_ids):
+        package = self.scope_expansions.approved_package(task_id)
+        if package is None:
+            return artifact_ids
+        spec_id, plan_id = package
+        replacements = {"TaskSpec": spec_id, "ExecutionPlan": plan_id}
+        return tuple(dict.fromkeys(replacements.get(self.events.artifacts.get(item).artifact_type, item)
+                                   for item in artifact_ids))
+
+    def restore_scope_checkpoint(self, preview):
+        task_id = preview["task_id"]
+        graph = validate_graph(self._stored_graph(task_id))
+        self.runner.assert_definition(self.runner.store.snapshot(task_id), graph)
+        checkpoint = self.runner.checkpoints.latest(task_id)
+        if checkpoint is None or checkpoint.checkpoint_id != preview["checkpoint_id"]:
+            raise ForgePilotError("checkpoint_integrity", "Scope request no longer matches the writer checkpoint")
+        files = dict(checkpoint.file_hashes)
+        partial_id = preview["partial_change_set_artifact_id"]
+        if partial_id:
+            partial = self.events.artifacts.get(partial_id)
+            if partial.task_id != task_id or not partial.content.requires_additional_approval:
+                raise ForgePilotError("checkpoint_integrity", "Scope request has invalid partial changes")
+            for change in partial.content.files:
+                if files.get(change.path) != change.before_sha256:
+                    raise ForgePilotError("workspace_changed", "Partial change preimage differs from checkpoint")
+                if change.after_sha256 is None:
+                    files.pop(change.path)
+                else:
+                    files[change.path] = change.after_sha256
+        expected = WorkspaceSnapshot(checkpoint.workspace_id, task_id, checkpoint.head_commit, files)
+        record = self.runner.store.workspace_record(task_id)
+        self.workspace.verify_checkpoint(record, checkpoint.checkpoint_id, checkpoint.head_commit, checkpoint.file_hashes)
+        restored = self.workspace.restore(record, checkpoint.checkpoint_id, expected=expected)
+        plan = self.events.artifacts.get(preview["plan_artifact_id"])
+        self.workspace.approve_plan(task_id, approved=True, expected=restored,
+            approved_paths={path for step in plan.content.steps for path in step.expected_files})
 
     def _repository(self, task_id):
         record = self.workspace.record(task_id)
@@ -377,6 +429,16 @@ class ImplementationService:
             _plain_json(context.node.settings["limits"]) if "limits" in context.node.settings else self.limits)
         spec, plan, evidence = self._package(context.task_id, context.input_artifact_ids)
         repository = self._repository(context.task_id)
+        key = (context.task_id, context.node.node_id)
+        paused_usage = (self.scope_expansions.approved_budget(*key, context.attempt - 1)
+                        if context.attempt > 1 else None)
+        if paused_usage is not None:
+            self._budgets[key] = ModelBudget.resume(limits, paused_usage)
+        elif key not in self._budgets:
+            if context.attempt > 1:
+                raise ForgePilotError("llm_budget", "Restart cannot replenish an unknown implementation budget")
+            self._budgets[key] = ModelBudget.from_limits(limits)
+        budget = self._budgets[key]
         approved_tests = spec.content.test_policy.modifiable_existing_test_patterns if self._granted(
             context.task_id, spec, plan, "existing_tests") else ()
 
@@ -403,12 +465,6 @@ class ImplementationService:
             if any(profile and urlsplit(profile.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}
                    for profile in (route.primary, route.fallback)):
                 raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud route")
-        key = (context.task_id, context.node.node_id)
-        if key not in self._budgets:
-            if context.attempt > 1:
-                raise ForgePilotError("llm_budget", "Restart cannot replenish an unknown implementation budget")
-            self._budgets[key] = ModelBudget.from_limits(limits)
-        budget = self._budgets[key]
         # The factory is host-owned and receives the task Worktree, never a main
         # checkout. Cloud-disabled tasks do not invoke an unknown RAG adapter.
         retrieval = None
@@ -469,16 +525,26 @@ class ImplementationService:
         outcome = ImplementationOutcome.model_validate_json(response.message.content)
         controlled.audit()
         check_approval()
-        if outcome.status == "awaiting_human":
-            return NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary=self.gateway.redactor.text(outcome.summary),
-                              metrics=self._metrics(context))
-        changes = controlled.change_set(summary=self.gateway.redactor.text(outcome.summary))
-        artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
-            producer_node=context.node.node_id, parent_artifact_ids=context.input_artifact_ids, content=changes)
+        summary = self.gateway.redactor.text(outcome.summary)
+        paused = outcome.status == "awaiting_human"
+        if paused and outcome.scope_expansion is None:
+            return NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary=summary, metrics=self._metrics(context))
+        changes = controlled.change_set(summary=summary, partial=paused)
+        outputs = ()
         with self.events.missions.consistent_view():
             check_approval()
-            self.events.artifacts.put(artifact)
-        return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=(artifact.artifact_id,),
+            if changes is not None:
+                artifact = create_artifact(task_id=context.task_id, producer=definition.agent_id,
+                    producer_node=context.node.node_id, parent_artifact_ids=context.input_artifact_ids, content=changes)
+                self.events.artifacts.put(artifact)
+                outputs = (artifact.artifact_id,)
+            if paused:
+                self.scope_expansions.propose(context, spec, plan, outcome.scope_expansion.files, repository=repository,
+                    partial_change_set_artifact_id=outputs[0] if outputs else None,
+                    checkpoint_id=context.checkpoint_id, budget_usage=budget.paused_usage())
+                return NodeResult(NodeStatus.AWAITING_HUMAN, output_artifact_ids=outputs,
+                                  decision_summary=summary, metrics=self._metrics(context))
+        return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=outputs,
                           decision_summary="ChangeSet verified against approved plan", metrics=self._metrics(context))
 
     def _extra_agent_payload(self, context):

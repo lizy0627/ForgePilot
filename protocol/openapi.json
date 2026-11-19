@@ -2408,8 +2408,11 @@
         "additionalProperties": false,
         "properties": {
           "approval_type": {
-            "const": "execution",
             "default": "execution",
+            "enum": [
+              "execution",
+              "scope_expansion"
+            ],
             "title": "Approval Type",
             "type": "string"
           },
@@ -3052,6 +3055,152 @@
           "review_hash"
         ],
         "title": "MissionReview",
+        "type": "object"
+      },
+      "MissionScopeExpansion": {
+        "description": "Latest writer request, including partial work and the terms of a replay.\n\nSubmit its revision and proposed hashes to /approvals with scope_expansion.",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "checkpoint_id": {
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/MissionScopeFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "max_changed_files": {
+            "title": "Max Changed Files",
+            "type": "integer"
+          },
+          "node_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "partial_change_set_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partial Change Set Artifact Id"
+          },
+          "partial_patch": {
+            "title": "Partial Patch",
+            "type": "string"
+          },
+          "plan_artifact_id": {
+            "title": "Plan Artifact Id",
+            "type": "string"
+          },
+          "plan_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Plan Hash",
+            "type": "string"
+          },
+          "previous_max_changed_files": {
+            "title": "Previous Max Changed Files",
+            "type": "integer"
+          },
+          "replay_behavior": {
+            "title": "Replay Behavior",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "scope_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Scope Hash",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          },
+          "task_spec_artifact_id": {
+            "title": "Task Spec Artifact Id",
+            "type": "string"
+          },
+          "task_spec_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Task Spec Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "revision",
+          "node_id",
+          "attempt",
+          "status",
+          "files",
+          "previous_max_changed_files",
+          "max_changed_files",
+          "task_spec_artifact_id",
+          "task_spec_hash",
+          "plan_artifact_id",
+          "plan_hash",
+          "scope_hash",
+          "checkpoint_id",
+          "partial_change_set_artifact_id",
+          "partial_patch",
+          "replay_behavior"
+        ],
+        "title": "MissionScopeExpansion",
+        "type": "object"
+      },
+      "MissionScopeFile": {
+        "properties": {
+          "acceptance_criteria_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Acceptance Criteria Ids",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "plan_step_id": {
+            "title": "Plan Step Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "reason",
+          "plan_step_id",
+          "acceptance_criteria_ids"
+        ],
+        "title": "MissionScopeFile",
         "type": "object"
       },
       "MissionSourcePreview": {
@@ -11412,6 +11561,136 @@
           }
         },
         "summary": "Retry Mission"
+      }
+    },
+    "/api/v2/missions/{task_id}/scope-expansion": {
+      "get": {
+        "operationId": "mission_scope_expansion_api_v2_missions__task_id__scope_expansion_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionScopeExpansion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Mission Scope Expansion"
       }
     },
     "/api/v2/missions/{task_id}/validation": {

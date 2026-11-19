@@ -7,7 +7,7 @@ from .api_v2_models import (
     CreateMission, MissionApproval, MissionArtifacts, MissionControl, MissionDelivery,
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
     MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
-    MissionValidation, PreviewMission, MissionSourcePreview,
+    MissionValidation, PreviewMission, MissionSourcePreview, MissionScopeExpansion,
 )
 from .errors import ForgePilotError
 from .mcp import decode
@@ -17,7 +17,8 @@ from .orchestration.models import NodeStatus
 MAX_MISSION_BODY = 65_536
 V2_ERROR_STATUS = {
     "unknown_mission": 404, "unknown_graph": 404, "artifact_not_found": 404,
-    "unknown_artifact": 404, "mission_conflict": 409, "graph_conflict": 409,
+    "unknown_artifact": 404, "scope_expansion_not_found": 404,
+    "mission_conflict": 409, "graph_conflict": 409,
     "revision_conflict": 409, "approval_conflict": 409, "approval_stale": 409,
     "mission_revision_conflict": 409, "mission_approval_conflict": 409,
     "mission_cancel_required": 409,
@@ -26,7 +27,8 @@ V2_ERROR_STATUS = {
     "test_approval_required": 403, "delivery_approval": 403,
     "recovery_conflict": 409, "recovery_required": 409, "recovery_stale": 409,
     "graph_definition": 409, "workspace_conflict": 409, "workspace_busy": 409,
-    "workspace_corrupted": 409, "delivery_changed": 409, "delivery_recovery": 409,
+    "workspace_corrupted": 409, "workspace_changed": 409, "checkpoint_integrity": 409,
+    "delivery_changed": 409, "delivery_recovery": 409,
     "mission_stream_capacity": 429, "graph_storage": 503,
     "artifact_storage": 503, "mission_unavailable": 503,
     "baseline_changed": 409, "baseline_approval": 403, "baseline_capacity": 429,
@@ -132,6 +134,10 @@ def register_mission_routes(app, host, streams):
     @app.get(prefix + "/{task_id}/diff", response_model=MissionDiff, responses=errors)
     def mission_diff(task_id: MissionID):
         return host.diff(task_id)
+
+    @app.get(prefix + "/{task_id}/scope-expansion", response_model=MissionScopeExpansion, responses=errors)
+    def mission_scope_expansion(task_id: MissionID):
+        return host.scope_expansion(task_id)
 
     @app.get(prefix + "/{task_id}/validation", response_model=MissionValidation, responses=errors)
     def mission_validation(task_id: MissionID):

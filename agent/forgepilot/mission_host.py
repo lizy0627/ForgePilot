@@ -22,8 +22,9 @@ from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
 from .orchestration.graph import validate_graph
-from .orchestration.models import GraphDefinition, NodeResult, NodeStatus, TERMINAL_NODE_STATUSES
+from .orchestration.models import NodeStatus, TERMINAL_NODE_STATUSES
 from .orchestration.recovery import recovery_role
+from .orchestration.scope_expansion import ScopeExpansionStore
 from .orchestration.store import GraphStore
 
 if TYPE_CHECKING:
@@ -75,6 +76,7 @@ class MissionHost:
         self._development_config = development_config or (lambda: dependencies)
         self.locked_approval_authority = locked_approval_authority
         self.graphs = GraphStore(self.store)
+        self.scope_expansions = ScopeExpansionStore(self.store)
         self._services = {}
         self._previews: dict[str, _SourcePreview] = {}
         self._source_lock = asyncio.Lock()
@@ -307,6 +309,16 @@ class MissionHost:
     def validation(self, task_id):
         values = [item for item in self.artifacts(task_id)["items"] if item["artifact_type"] == "ValidationReport"]
         return {"task_id": task_id, "items": values, "latest": values[-1] if values else None}
+
+    def scope_expansion(self, task_id):
+        self._metadata(task_id)
+        proposal = self.scope_expansions.preview(task_id)
+        partial = proposal["partial_change_set_artifact_id"]
+        patch = ""
+        if partial is not None:
+            artifact = self.store.missions.owned_artifact(task_id, partial)
+            patch = "".join(file.unified_diff for file in artifact.content.files)
+        return safe_event_data(self.store.redactor, {**proposal, "partial_patch": patch})
 
     async def _execute_control(self, operation, *args, **kwargs):
         """Join accepted controls during shutdown, including work offloaded to threads."""
@@ -703,6 +715,8 @@ class MissionHost:
     async def _approve(self, task_id, fields):
         async with self._control(task_id):
             self._check_revision(task_id, fields["expected_revision"])
+            if fields.get("approval_type") == "scope_expansion":
+                return await self._decide_scope_expansion(task_id, fields)
             self._idle(task_id)
             workflow = self._workflow(task_id)
             definition = workflow._stored_graph(task_id)
@@ -740,6 +754,23 @@ class MissionHost:
             await admission
             return self.get(task_id)
 
+    async def _decide_scope_expansion(self, task_id, fields):
+        # A paused result becomes visible just before the runner releases its writer lease.
+        proposal = self.scope_expansions.preview(task_id)
+        if proposal["status"] != "pending":
+            raise ForgePilotError("mission_approval_conflict", "This scope expansion has already been decided")
+        running = self._running.get(task_id)
+        if running is not None and not running.done():
+            await asyncio.shield(running)
+        approved = fields["decision"] == "approved"
+        workflow = self._workflow(task_id) if approved else None
+        await asyncio.to_thread(self.scope_expansions.decide, task_id,
+            **{name: fields[name] for name in ("expected_revision", "task_spec_hash", "plan_hash", "scope_hash")},
+            approved=approved, before_approve=workflow.restore_scope_checkpoint if approved else None)
+        if approved:
+            self._launch(task_id, workflow.run(task_id))
+        return self.get(task_id)
+
     async def cancel(self, task_id, *, expected_revision):
         return await self.runtime.submit(self._execute_control(self._cancel, task_id, expected_revision))
 
@@ -768,7 +799,7 @@ class MissionHost:
                 node_id = candidates[0].node_id
             if not any(n.node_id == node_id for n in candidates):
                 raise ForgePilotError("invalid_state", "Select a retryable mission node")
-            workflow.runner._assert_definition(snapshot, validate_graph(definition))
+            workflow.runner.assert_definition(snapshot, validate_graph(definition))
             selected = next(node for node in definition.nodes if node.node_id == node_id)
             if recovery_role(selected) in {"writer", "delivery"}:
                 raise ForgePilotError("recovery_required", "Writer and delivery nodes require recovery confirmation")
@@ -789,6 +820,15 @@ class MissionHost:
         async with self._control(task_id):
             snapshot = self._check_revision(task_id, revision)
             self._idle(task_id)
+            if snapshot.status is NodeStatus.AWAITING_HUMAN:
+                try:
+                    expansion = self.scope_expansions.preview(task_id)
+                except ForgePilotError as exc:
+                    if exc.code != "scope_expansion_not_found":
+                        raise
+                else:
+                    if expansion["status"] in {"pending", "rejected"}:
+                        raise ForgePilotError("invalid_state", "This writer is paused for scope review")
             workflow = self._workflow(task_id)
             graph = workflow._stored_graph(task_id)
             if token is None:
@@ -857,25 +897,35 @@ class MissionHost:
 
     async def _close(self):
         self._stopping = True
-        running = [operation for operation in (*self._admissions, *self._running.values()) if not operation.done()]
-        for operation in running:
+        admissions = tuple(self._admissions)
+        for operation in admissions:
             operation.cancel()
-        if running:
-            await asyncio.gather(*running, return_exceptions=True)
+        await asyncio.gather(*admissions, self._drain_running(), return_exceptions=True)
         # A recovery or delivery control may still be completing to_thread work.
         # Join it before closing workflows, then drain any execution it launched.
         await asyncio.gather(*tuple(self._operations), return_exceptions=True)
-        late = [operation for operation in self._running.values() if not operation.done()]
-        for operation in late:
-            if not operation.cancelling():
-                operation.cancel()
-        await asyncio.gather(*late, return_exceptions=True)
+        await self._drain_running()
         for token in tuple(self._previews):
             await self._discard_preview(token)
         for workflow in self._services.values():
             candidate = getattr(workflow, "mission_candidate_runner", None)
             if candidate is not None:
                 await asyncio.to_thread(candidate.close)
+
+    async def _drain_running(self):
+        running = tuple(self._running.items())
+        for task_id, operation in running:
+            if operation.done() or operation.cancelling():
+                continue
+            # A published pause can precede lease release. Cancelling that
+            # worker would also cancel the durable task it just paused.
+            snapshot = self.graphs.snapshot(task_id)
+            if any(node.status is NodeStatus.AWAITING_HUMAN and
+                   (node.node_id == "implementer" or node.node_id.startswith("repair_"))
+                   for node in snapshot.nodes):
+                continue
+            operation.cancel()
+        await asyncio.gather(*(operation for _, operation in running), return_exceptions=True)
 
 
 __all__ = ["MissionHost"]

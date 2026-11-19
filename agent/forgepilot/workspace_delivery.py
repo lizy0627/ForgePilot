@@ -129,7 +129,7 @@ class DeliveryMixin:
                     _fail("workspace_recovery", "Observed production change has no exact text diff")
                 files.append(ChangedFile(path=path, change_type="modified", unified_diff=diff,
                     before_sha256=baseline_files[path], after_sha256=current.file_hashes[path],
-                    plan_step_ids=(steps[0].step_id,), acceptance_criteria_ids=steps[0].acceptance_criteria_ids,
+                    plan_step_ids=(steps[0].step_id,), acceptance_criteria_ids=steps[0].criteria_for_path(path),
                     test_change="none"))
             if self._snapshot(state) != current or self._index_hash(state) != index_hash:
                 _fail("workspace_changed", "Workspace changed before observed recovery returned")
@@ -145,15 +145,34 @@ class DeliveryMixin:
         else:
             state.pop("delivery_operation_id", None)
 
-    def final_change_set(self, task_id, changes):
+    def final_change_set(self, task_id, changes, *, plan_artifact_id=None):
         """Derive the cumulative base-to-checkpoint diff from Git and verified bytes.
 
         Incremental ChangeSets supply only plan/AC provenance, never final bytes.
         This keeps repairs that touch the same file from hiding earlier changes.
         """
         changes = tuple(ChangeSet.model_validate(item) for item in changes)
-        if not changes or len({item.execution_plan_artifact_id for item in changes}) != 1:
-            _fail("delivery_changes", "Expected changes from one frozen execution plan")
+        if not changes:
+            _fail("delivery_changes", "Expected at least one successful writer ChangeSet")
+        final_plan_id = plan_artifact_id or changes[-1].execution_plan_artifact_id
+        earlier_plans = {item.execution_plan_artifact_id for item in changes} - {final_plan_id}
+        # Successful writer checkpoints bind each incremental diff to its grant.
+        # Only their original plan or a same-task descendant can carry them forward.
+        cursor = final_plan_id
+        visited = set()
+        while earlier_plans:
+            if self.artifacts is None or cursor in visited:
+                _fail("delivery_changes", "Final changes require one plan revision history")
+            visited.add(cursor)
+            plan = self.artifacts.get(cursor)
+            if not isinstance(plan, ExecutionPlanArtifact) or plan.task_id != task_id:
+                _fail("delivery_changes", "Final plan revision belongs to a different task")
+            parents = [self.artifacts.get(parent_id) for parent_id in plan.parent_artifact_ids]
+            prior = [item for item in parents if isinstance(item, ExecutionPlanArtifact) and item.task_id == task_id]
+            if len(prior) != 1:
+                _fail("delivery_changes", "Writer plan is outside the final plan revision history")
+            cursor = prior[0].artifact_id
+            earlier_plans.discard(cursor)
         with self._operation(task_id) as state:
             current = self._snapshot(state)
             self._assert_expected(state, current)
@@ -179,7 +198,7 @@ class DeliveryMixin:
             self._assert_expected(state, current)
             if not files:
                 _fail("delivery_changes", "A delivery requires a nonempty final diff")
-            return ChangeSet(execution_plan_artifact_id=changes[0].execution_plan_artifact_id,
+            return ChangeSet(execution_plan_artifact_id=final_plan_id,
                 files=tuple(files), summary="Cumulative approved implementation and repair diff")
 
     def export_validated_patch(self, task_id):

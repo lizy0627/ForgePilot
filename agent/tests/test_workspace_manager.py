@@ -451,6 +451,36 @@ def test_restore_refuses_user_file_added_after_interrupted_writer(manager, commi
     assert (Path(state["worktree_path"]) / "source.txt").read_bytes() == b"partial writer output\n"
 
 
+def test_repeated_restore_finishes_only_reviewed_additions_after_git_reset(manager, committed_repo, monkeypatch):
+    from forgepilot.workspace_safety import Guard
+    state = create(manager, committed_repo)
+    approve(manager)
+    saved = checkpoint(manager, checkpoint_id="safe-checkpoint")
+    with pytest.raises(RuntimeError):
+        with manager.writer("task-1", expected=saved) as root:
+            (root / "source.txt").write_bytes(b"partial tracked edit")
+            (root / "partial.txt").write_bytes(b"partial added file")
+            raise RuntimeError("writer paused")
+    observed = manager.inspect_task("task-1")
+    record = manager.record("task-1")
+    def interrupt_cleanup(*_):
+        raise RuntimeError("interrupted after reset")
+    with monkeypatch.context() as crash:
+        crash.setattr(Guard, "unlink", interrupt_cleanup)
+        with pytest.raises(RuntimeError, match="interrupted after reset"):
+            manager.restore(record, "safe-checkpoint", expected=observed)
+    root = Path(state["worktree_path"])
+    assert (root / "source.txt").read_bytes() == b"original source\n"
+    (root / "unreviewed.txt").write_bytes(b"user work")
+    with pytest.raises(ForgePilotError, match="workspace_changed"):
+        manager.restore(record, "safe-checkpoint", expected=observed)
+    assert (root / "partial.txt").exists()
+    assert (root / "unreviewed.txt").read_bytes() == b"user work"
+    (root / "unreviewed.txt").unlink()
+    assert manager.restore(record, "safe-checkpoint", expected=observed) == saved
+    assert not (root / "partial.txt").exists()
+
+
 def test_cleanup_removes_only_registered_clean_worktree_and_keeps_branch(manager, committed_repo, git_exe):
     state = create(manager, committed_repo)
     approve(manager)

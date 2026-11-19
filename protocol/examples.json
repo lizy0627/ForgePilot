@@ -743,6 +743,42 @@
       "task_id": "11111111-1111-4111-8111-111111111111"
     }
   },
+  "mission_scope_approval_request": {
+    "approval_type": "scope_expansion",
+    "decision": "approved",
+    "expected_revision": 42,
+    "plan_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "scope_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_spec_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "mission_scope_expansion_preview": {
+    "attempt": 1,
+    "checkpoint_id": "checkpoint-1111111111111111111111111111111111111111111111111111111111111111",
+    "files": [
+      {
+        "acceptance_criteria_ids": [
+          "AC-1"
+        ],
+        "path": "src/worker.h",
+        "plan_step_id": "STEP-1",
+        "reason": "Declare the shutdown method"
+      }
+    ],
+    "max_changed_files": 2,
+    "node_id": "repair_1",
+    "partial_change_set_artifact_id": null,
+    "partial_patch": "",
+    "plan_artifact_id": "55555555-5555-4555-8555-555555555555",
+    "plan_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "previous_max_changed_files": 1,
+    "replay_behavior": "Approval restores the writer entry checkpoint and reruns repair_1.",
+    "revision": 42,
+    "scope_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "pending",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_spec_artifact_id": "44444444-4444-4444-8444-444444444444",
+    "task_spec_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
   "mission_sse_reconnect_request": {
     "headers": {
       "Accept": "text/event-stream",

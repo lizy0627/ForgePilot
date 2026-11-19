@@ -469,12 +469,13 @@ class ValidationService:
                     or item.after_sha256 != current.file_hashes.get(item.path)):
                 raise _Failure("policy_failure", "Final diff is outside approved scope or has inconsistent hashes")
 
-    async def validate(self, task_id, spec, changes, *, is_cancelled=lambda: False):
+    async def validate(self, task_id, spec, changes, *, baseline_spec=None, is_cancelled=lambda: False):
         spec, changes = TaskSpec.model_validate(spec), ChangeSet.model_validate(changes)
         async with self._lock:
-            return await self._validate(task_id, spec, changes, is_cancelled)
+            return await self._validate(task_id, spec, changes, is_cancelled,
+                                        baseline_spec=TaskSpec.model_validate(baseline_spec or spec))
 
-    async def _validate(self, task_id, spec, changes, is_cancelled):
+    async def _validate(self, task_id, spec, changes, is_cancelled, *, baseline_spec):
         commands, stages, logs = [], [], []
         state = {"workspace_integrity": "not_checked", "test_integrity": "not_checked",
                  "diff_scope": "not_checked", "hidden_oracle": "not_run"}
@@ -538,7 +539,10 @@ class ValidationService:
             state["workspace_integrity"] = "passed"
             record_check("Checkpoint HEAD, index and full Worktree manifest match")
             stages.append(PIPELINE_STAGES[1])
-            monitor = self._load_baseline(task_id, record, spec, root)
+            if baseline_spec != spec and (baseline_spec.model_dump(exclude={"allowed_scope"})
+                                          != spec.model_dump(exclude={"allowed_scope"})):
+                raise _Failure("policy_failure", "Only file scope may differ from the captured TaskSpec")
+            monitor = self._load_baseline(task_id, record, baseline_spec, root)
             if monitor is None:
                 raise _Failure("policy_failure", "Execution test integrity baseline is missing")
             monitor.verify()
