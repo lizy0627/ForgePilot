@@ -113,6 +113,7 @@ quint64 AgentApiClient::listMissions(const QString &before, const QString &repos
 }
 quint64 AgentApiClient::getMission(const QString &id) { return sendMission("mission.get", id); }
 quint64 AgentApiClient::getMissionGraph(const QString &id) { return sendMission("mission.graph", id); }
+quint64 AgentApiClient::getMissionScopeExpansion(const QString &id) { return sendMission("mission.scope-expansion", id); }
 quint64 AgentApiClient::getMissionArtifacts(const QString &id) { return sendMission("mission.artifacts", id); }
 quint64 AgentApiClient::getMissionArtifact(const QString &id, const QString &artifactId) { return sendMission("mission.artifact", id, {{"artifact_id", artifactId}}); }
 quint64 AgentApiClient::getMissionDiff(const QString &id) { return sendMission("mission.diff", id); }
@@ -144,7 +145,7 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
     const auto serial = ++m_next;
     QString path = id.isEmpty() ? QString{} : '/' + id;
     const auto action = op.mid(8);
-    const bool readOnly = QSet<QString>{"get", "list", "graph", "artifacts", "artifact", "diff", "validation"}.contains(action);
+    const bool readOnly = QSet<QString>{"get", "list", "graph", "scope-expansion", "artifacts", "artifact", "diff", "validation"}.contains(action);
     if (action == "discard_preview") path += "/previews/" + body.value("preview_token").toString();
     else if (action == "approve") path += "/approvals";
     else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();

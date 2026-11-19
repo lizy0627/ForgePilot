@@ -204,6 +204,27 @@ bool artifactContent(const QString &type, const QJsonObject &o) {
         && strings(o.value("risks")) && text(o.value("rollback"));
     return false;
 }
+bool scopeExpansion(const QJsonObject &o) {
+    if (!MissionProtocol::validRevision(o.value("revision")) || !text(o.value("node_id"))
+        || !integer(o.value("attempt"), 1) || !oneOf(o.value("status"), {"pending", "approved", "rejected"})
+        || !integer(o.value("previous_max_changed_files"), 1) || !integer(o.value("max_changed_files"), 1)
+        || !text(o.value("checkpoint_id")) || !text(o.value("replay_behavior"))
+        || !o.value("partial_patch").isString()) return false;
+    for (const auto &key : {"task_spec_hash", "plan_hash", "scope_hash"})
+        if (!MissionProtocol::validHash(o.value(key))) return false;
+    for (const auto &key : {"task_spec_artifact_id", "plan_artifact_id"})
+        if (!MissionProtocol::validId(o.value(key).toString())) return false;
+    const auto partial = o.value("partial_change_set_artifact_id");
+    if (!partial.isNull() && !MissionProtocol::validId(partial.toString())) return false;
+    const auto files = o.value("files").toArray();
+    if (files.isEmpty()) return false;
+    for (const auto &value : files) {
+        const auto file = value.toObject();
+        if (!text(file.value("path")) || !text(file.value("reason")) || !text(file.value("plan_step_id"))
+            || !strings(file.value("acceptance_criteria_ids"))) return false;
+    }
+    return true;
+}
 bool artifactList(const QJsonValue &v, const QString &id, const QString &type = {}) {
     if (!v.isArray()) return false;
     QSet<QString> ids;
@@ -402,6 +423,7 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     }
     if (op != "mission.create" && o.value("task_id").toString() != id) return false;
     if (op == "mission.graph") return validGraph(o);
+    if (op == "mission.scope-expansion") return scopeExpansion(o);
     if (op == "mission.artifacts") return validArtifacts(o);
     if (op == "mission.artifact") return validArtifact(o);
     if (op == "mission.diff") return validDiff(o);
@@ -433,11 +455,12 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("configure_preset") || text(o.value("configure_preset")))
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
-    if (op == "mission.get" || op == "mission.graph" || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
+    if (op == "mission.get" || op == "mission.graph" || op == "mission.scope-expansion"
+        || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
     if (op == "mission.artifact") return only(o, {"artifact_id"}) && validId(o.value("artifact_id").toString());
     if (!validRevision(o.value("expected_revision"))) return false;
     if (op == "mission.approve") return only(o, {"expected_revision", "approval_type", "task_spec_hash", "plan_hash", "scope_hash", "decision"})
-        && (!o.contains("approval_type") || o.value("approval_type").toString() == "execution")
+        && (!o.contains("approval_type") || oneOf(o.value("approval_type"), {"execution", "scope_expansion"}))
         && validHash(o.value("task_spec_hash")) && validHash(o.value("plan_hash")) && validHash(o.value("scope_hash"))
         && oneOf(o.value("decision"), {"approved", "rejected"});
     if (op == "mission.cancel") return only(o, {"expected_revision"});

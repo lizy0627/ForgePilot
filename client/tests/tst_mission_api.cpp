@@ -8,11 +8,12 @@
 #include "HttpFixture.h"
 
 namespace {
-QJsonObject mission() {
+QJsonObject example(const QString &name) {
     QFile file(QFINDTESTDATA("../../protocol/examples.json"));
     if (!file.open(QIODevice::ReadOnly)) qFatal("Missing canonical protocol examples");
-    return QJsonDocument::fromJson(file.readAll()).object().value("mission_query_response").toObject();
+    return QJsonDocument::fromJson(file.readAll()).object().value(name).toObject();
 }
+QJsonObject mission() { return example("mission_query_response"); }
 QJsonObject artifact() {
     const QJsonObject item{{"evidence_id", "EV-1"}, {"claim", "Worker is still active"}, {"path", QJsonValue::Null},
         {"start_line", QJsonValue::Null}, {"end_line", QJsonValue::Null}, {"file_hash", QJsonValue::Null},
@@ -45,6 +46,42 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void scopeExpansionPreviewAndDecision() {
+        const auto preview = example("mission_scope_expansion_preview");
+        const auto decision = example("mission_scope_approval_request");
+        const QString op = "mission.scope-expansion";
+        QVERIFY(MissionProtocol::validResponse(op, A, preview));
+        QVERIFY(!MissionProtocol::validResponse(op, B, preview));
+        for (const auto &key : {"attempt", "revision", "partial_patch", "partial_change_set_artifact_id",
+                                "task_spec_hash", "scope_hash", "plan_hash", "checkpoint_id", "files"}) {
+            auto incomplete = preview;
+            incomplete.remove(key);
+            QVERIFY2(!MissionProtocol::validResponse(op, A, incomplete), key);
+        }
+        auto malformed = preview;
+        auto file = preview.value("files").toArray().first().toObject();
+        file.remove("reason");
+        malformed["files"] = QJsonArray{file};
+        QVERIFY(!MissionProtocol::validResponse(op, A, malformed));
+
+        Source source;
+        source.handle = [&](const Request &r) {
+            if (r.method == "GET") Source::json(r, preview);
+            else Source::json(r, mission(), 202);
+        };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived);
+        api.getMissionScopeExpansion(A);
+        QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/scope-expansion");
+        QCOMPARE(source.requests.first().method, "GET");
+        api.approveMission(A, decision);
+        QTRY_COMPARE(responses.size(), 2);
+        QCOMPARE(source.requests.last().path, "/api/v2/missions/" + A.toUtf8() + "/approvals");
+        QCOMPARE(source.requests.last().method, "POST");
+        QCOMPARE(source.requests.last().body, decision);
+    }
     void missionToolSelectionIsValidatedAndSent() {
         const QJsonObject request{{"repository_path", "D:/fixture"}, {"request", "Use selected tools"},
             {"mcp_server_ids", QJsonArray{B}}, {"use_rag", true}};

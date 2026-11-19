@@ -25,6 +25,7 @@ public:
     quint64 listMissions(const QString &before = {}, const QString &repositoryPath = {}, const QString &status = {});
     quint64 getMission(const QString &taskId);
     quint64 getMissionGraph(const QString &taskId);
+    quint64 getMissionScopeExpansion(const QString &taskId);
     quint64 getMissionArtifacts(const QString &taskId);
     quint64 getMissionArtifact(const QString &taskId, const QString &artifactId);
     quint64 getMissionDiff(const QString &taskId);
