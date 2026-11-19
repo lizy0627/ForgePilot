@@ -33,7 +33,7 @@ def request_scope():
 
 
 @asynccontextmanager
-async def server(case, tmp_path, git_exe, *, restart=False):
+async def scope_app(case, tmp_path, git_exe, *, restart=False):
     # Reopen all durable state and use fresh service, validator and model budget
     # instances. Only the offline providers' queues represent the external model.
     manager = WorkspaceManager(tmp_path / "host data", git_executable=git_exe) if restart else case.manager
@@ -52,12 +52,18 @@ async def server(case, tmp_path, git_exe, *, restart=False):
     app = create_app(lambda trace: None, store=store, git_executable=git_exe,
         mission_factory=lambda events: DeliveryWorkflow(events, manager, gateway, validator=validator))
     try:
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-                yield client
+        yield app
     finally:
         await gateway.aclose()
         store.close()
+
+
+@asynccontextmanager
+async def server(case, tmp_path, git_exe, *, restart=False):
+    async with scope_app(case, tmp_path, git_exe, restart=restart) as app:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+                yield client
 
 
 async def mission_at(client, path, status):

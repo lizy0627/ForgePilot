@@ -26,10 +26,10 @@ from mission_tools_support import MissionToolsCase, SOURCE
 
 
 @contextmanager
-def serve(case):
+def serve_app(app):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
-    server = uvicorn.Server(uvicorn.Config(case.app, access_log=False, log_level="warning",
+    server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_level="warning",
                                          timeout_graceful_shutdown=2))
     thread = Thread(target=lambda: server.run(sockets=[sock]), name="mission-tools-http")
     thread.start()
@@ -46,6 +46,14 @@ def serve(case):
         sock.close()
         if thread.is_alive():
             raise RuntimeError("Production Mission fixture did not stop")
+
+
+@contextmanager
+def serve(case):
+    try:
+        with serve_app(case.app) as url:
+            yield url
+    finally:
         case.store.close()
 
 

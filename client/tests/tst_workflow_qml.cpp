@@ -288,8 +288,11 @@ struct Ui {
     QStringList warnings;
 
     explicit Ui(Fixture &fixture, int width = 1600, int height = 900, RuntimeConfigController *runtime = nullptr)
+        : Ui(fixture.source.url(), width, height, runtime) {}
+
+    explicit Ui(const QUrl &url, int width = 1600, int height = 900, RuntimeConfigController *runtime = nullptr)
     {
-        tasks.setBaseUrl(fixture.source.url()); missions.setBaseUrl(fixture.source.url());
+        tasks.setBaseUrl(url); missions.setBaseUrl(url);
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings.append(error.toString());
         });
@@ -1437,6 +1440,109 @@ print(json.dumps(result))
         ui.missions.approval()->approve();
         QTest::qWait(30);
         QCOMPARE(fixture.approvals.size(), 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void scopeExpansionFromMain()
+    {
+        const auto backend = qEnvironmentVariable("FORGEPILOT_SCOPE_URL");
+        if (backend.isEmpty()) QSKIP("Run client/tests/run_scope_expansion_integration.py for the local backend");
+        const auto mode = qEnvironmentVariable("FORGEPILOT_SCOPE_MODE");
+        const bool repair = mode == "approve";
+        const QString writer = repair ? "repair_1" : "implementer";
+        Ui ui{QUrl(backend)};
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.find("missionRequestInput")->setProperty("text", "Clamp negative inputs via a shared header");
+        ui.find("missionRepositoryInput")->setProperty("text", qEnvironmentVariable("FORGEPILOT_SCOPE_REPOSITORY"));
+        QVERIFY(ui.click("missionPreviewButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(ui.missions.creationReady(), 20000);
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(ui.missions.approval()->available(), 30000);
+        const auto task = ui.missions.taskId();
+        QVERIFY(!task.isEmpty());
+        QVERIFY(ui.click("workflowAttentionButton"));
+        QTRY_VERIFY(ui.find("missionApproveButton") && ui.find("missionApproveButton")->isEnabled());
+        QVERIFY(ui.click("missionApproveButton"));
+        auto pausedWriter = [&] {
+            for (int i = 0; i < ui.missions.graph()->count(); ++i) {
+                const auto row = ui.missions.graph()->get(i);
+                if (row.value("nodeId") == writer) return row.value("status") == "awaiting_human";
+            }
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(pausedWriter() && ui.missions.synchronized(), 90000);
+        auto *page = ui.find("workflowPage");
+        QVERIFY(page);
+        if (repair) {
+            QTRY_COMPARE(page->property("attentionNodeId").toString(), writer);
+            QVERIFY(ui.click("workflowAttentionButton"));
+        } else {
+            QVERIFY(ui.expandStage("implementation"));
+            QTRY_VERIFY(ui.find("workflowNode", "nodeId", writer));
+            QVERIFY(ui.chooseNode(writer));
+        }
+        QTRY_COMPARE(page->property("selectedNodeId").toString(), writer);
+        auto findVisible = [&](const QString &id) {
+            auto *item = ui.find(id);
+            return item && item->isVisible();
+        };
+        if (mode == "legacy") {
+            QTRY_VERIFY(ui.find("workflowReadableText", "text", "Please allow clamp.hpp for STEP-1"));
+            QVERIFY(!findVisible("workflowScopeApprove"));
+        } else {
+            QTRY_VERIFY(findVisible("workflowScopeApprove"));
+            auto displayed = [&](const QString &id) {
+                auto *block = ui.find(id);
+                return block && block->isVisible() ? block->property("value").toString() : QString{};
+            };
+            QVERIFY(displayed("workflowScopeOriginal").contains("src/**"));
+            const auto files = displayed("workflowScopeFiles");
+            for (const auto text : {"clamp.hpp", "STEP-1", "AC-1", "Share the clamp implementation"})
+                QVERIFY2(files.contains(text), qPrintable(files));
+            auto *approval = ui.missions.approval();
+            const auto checkpoint = approval->scopeExpansion().value("checkpoint_id").toString();
+            QVERIFY(!checkpoint.isEmpty());
+            QVERIFY(displayed("workflowScopeReplay").contains(checkpoint));
+            QVERIFY(displayed("workflowScopeDiff").contains("// awaiting approval for header"));
+            QVERIFY(ui.capture("writer-request"));
+            ui.reveal(ui.find("workflowScopeDiff"));
+            QVERIFY(ui.capture("writer-replay-and-diff"));
+            if (repair) {
+                const auto revision = ui.missions.revision();
+                QVERIFY(ui.click("workflowScopeApprove"));
+                QTRY_VERIFY_WITH_TIMEOUT(approval->scopeAvailable() && ui.missions.revision() > revision, 15000);
+                QCOMPARE(ui.missions.status(), QString("awaiting_human"));
+                QVERIFY(displayed("workflowScopeReplay").contains(checkpoint));
+            }
+            // Two physical clicks at the same position before the request resolves.
+            auto *action = ui.find(repair ? "workflowScopeApprove" : "workflowScopeReject");
+            QVERIFY(action && action->isVisible() && action->isEnabled());
+            ui.reveal(action);
+            const auto point = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
+            QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);
+            QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);
+            if (repair) {
+                QTRY_VERIFY_WITH_TIMEOUT(!page->property("selectionPinned").toBool(), 15000);
+                QTRY_COMPARE_WITH_TIMEOUT(ui.missions.status(), QString("succeeded"), 90000);
+                QTRY_COMPARE(page->property("selectedNodeId").toString(), QString("delivery_bundle"));
+                QTRY_VERIFY(findVisible("missionDeliveryPreviewButton"));
+                QTRY_VERIFY(ui.find("missionDeliveryPreviewButton")->isEnabled());
+                QVERIFY(ui.click("missionDeliveryPreviewButton"));
+                QTRY_VERIFY_WITH_TIMEOUT(ui.missions.delivery()->canConfirm(), 15000);
+                QVERIFY(ui.capture("delivery"));
+            } else {
+                QTRY_COMPARE_WITH_TIMEOUT(approval->scopeExpansion().value("status").toString(), QString("rejected"), 15000);
+                QVERIFY(!approval->scopeAvailable());
+                QVERIFY(displayed("workflowScopeDiff").contains("// awaiting approval for header"));
+                QVERIFY(ui.capture("rejected"));
+            }
+        }
+        if (!repair) {
+            QVERIFY(ui.click("workflowScopeCancel"));
+            QVERIFY(ui.click("workflowCancelConfirm"));
+            QTRY_COMPARE_WITH_TIMEOUT(ui.missions.status(), QString("cancelled"), 15000);
+        }
+        QCOMPARE(ui.missions.taskId(), task);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void interruptedApprovalCanPreviewAndConfirmRecoveryWithoutResumeAction()

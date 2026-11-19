@@ -99,6 +99,12 @@ Item {
     Component.onCompleted: refreshView()
     Connections { target: root.mission; function onMissionChanged() { Qt.callLater(root.refreshView) } }
     Connections {
+        target: root.mission.approval
+        function onScopeExpansionApproved(taskId) {
+            if (taskId === root.mission.taskId) root.followProgress()
+        }
+    }
+    Connections {
         target: root.mission.graph
         function onSnapshotChanged() { Qt.callLater(root.refreshView) }
         function onDataChanged() { Qt.callLater(root.refreshView) }
@@ -232,6 +238,7 @@ Item {
                     anchors.fill: parent
                     mission: root.mission; node: root.selectedNode; artifacts: root.nodeArtifacts; compact: root.compactLayout
                     onCloseRequested: root.closeDetails()
+                    onCancelRequested: cancelDialog.open()
                 }
             }
         }
@@ -262,7 +269,7 @@ Item {
         contentItem: Label { text: "取消后停止继续执行，隔离工作区保留已完成的改动。"; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
         footer: DialogButtonBox {
             Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-            Controls.ActionButton { text: "确认取消"; danger: true; enabled: root.mission.synchronized && !root.mission.busy; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.cancel() }
+            Controls.ActionButton { objectName: "workflowCancelConfirm"; text: "确认取消"; danger: true; enabled: root.mission.synchronized && !root.mission.busy; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.cancel() }
         }
     }
 }
