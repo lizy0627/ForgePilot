@@ -5,7 +5,7 @@
 
 // A bundle is published only after all projections pass the final Mission fence.
 struct MissionSnapshot {
-    QJsonObject mission, graph, artifacts, diff, validation;
+    QJsonObject mission, graph, artifacts, diff, validation, scopeExpansion;
 };
 Q_DECLARE_METATYPE(MissionSnapshot)
 
@@ -26,7 +26,7 @@ signals:
     void snapshotReady(const MissionSnapshot &snapshot);
     void loadFailed(int status, const QString &code);
 private:
-    enum class Part { Start, Graph, Artifacts, Fence };
+    enum class Part { Start, Graph, Artifacts, ScopeExpansion, Fence };
     struct Pending { Part part; quint64 generation; };
     void begin();
     void track(quint64 request, Part part);

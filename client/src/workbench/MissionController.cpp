@@ -63,7 +63,10 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
         });
     connect(&m_approval, &ApprovalController::snapshotReceived, this, &MissionController::mutationSnapshot);
     connect(&m_delivery, &DeliveryController::snapshotReceived, this, &MissionController::mutationSnapshot);
-    connect(&m_approval, &ApprovalController::refreshRequired, this, &MissionController::refresh);
+    connect(&m_approval, &ApprovalController::refreshRequired, this, [this] {
+        m_loader.invalidate();
+        refresh();
+    });
     connect(&m_delivery, &DeliveryController::refreshRequired, this, &MissionController::refresh);
     connect(&m_approval, &ApprovalController::changed, this, &MissionController::updateAvailability);
     connect(&m_delivery, &DeliveryController::changed, this, &MissionController::updateAvailability);
@@ -326,7 +329,7 @@ void MissionController::commitSnapshot(const MissionSnapshot &snapshot)
     if (!current()) return;
     observeMission(mission);
     if (!current()) return;
-    m_approval.setMission(mission);
+    m_approval.setSnapshot(snapshot);
     if (!current()) return;
     m_delivery.setMission(mission);
     if (!current()) return;

@@ -6,11 +6,15 @@
 #include "workbench/MissionSnapshotLoader.h"
 
 namespace {
-QJsonObject mission(const QString &task = A, qint64 revision = 8)
+QJsonObject example(const QString &key)
 {
     QFile file(QString(FORGEPILOT_SOURCE_DIR) + "/protocol/examples.json");
     if (!file.open(QIODevice::ReadOnly)) qFatal("Cannot open canonical protocol examples");
-    auto body = QJsonDocument::fromJson(file.readAll()).object().value("mission_query_response").toObject();
+    return QJsonDocument::fromJson(file.readAll()).object().value(key).toObject();
+}
+QJsonObject mission(const QString &task = A, qint64 revision = 8)
+{
+    auto body = example("mission_query_response");
     body.insert("task_id", task); body.insert("current_revision", revision);
     body.insert("last_event_id", task + ':' + QString::number(revision));
     auto review = body.value("review").toObject();
@@ -18,12 +22,13 @@ QJsonObject mission(const QString &task = A, qint64 revision = 8)
     body.insert("review", review);
     return body;
 }
-QJsonObject graph(const QJsonObject &m)
+QJsonObject graph(const QJsonObject &m, const QString &id = "execution_approval")
 {
-    QJsonObject node{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
+    const QString type = id == "execution_approval" ? "human_gate" : "agent";
+    QJsonObject node{{"node_id", id}, {"node_type", type},
         {"status", m.value("status")}, {"attempt", 1}, {"result", QJsonValue::Null}};
-    QJsonObject definition{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
-        {"handler", "execution_approval"}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
+    QJsonObject definition{{"node_id", id}, {"node_type", type},
+        {"handler", id}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
         {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
     return {{"task_id", m.value("task_id")}, {"graph_id", m.value("graph_id")}, {"graph_version", 1},
         {"definition_hash", QString(64, 'a')}, {"status", m.value("status")}, {"current_revision", m.value("current_revision")},
@@ -195,6 +200,46 @@ private slots:
         QTRY_COMPARE(ready.count(), 1);
         QCOMPARE(bundle(ready).mission.value("current_revision").toInteger(), 9);
         QCOMPARE(f.missionReads(), 4);
+    }
+    void pausedWriterReadsOnlyTheCurrentProposal_data()
+    {
+        QTest::addColumn<bool>("legacy");
+        QTest::newRow("legacy-pause-without-proposal") << true;
+        QTest::newRow("proposal-changed-during-read") << false;
+    }
+    void pausedWriterReadsOnlyTheCurrentProposal()
+    {
+        QFETCH(bool, legacy);
+        Fixture f;
+        auto proposal = example("mission_scope_expansion_preview");
+        f.current = mission(A, proposal.value("revision").toInteger());
+        f.current["review"] = QJsonValue::Null;
+        int previewReads = 0;
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/graph")) {
+                Source::json(r, graph(f.current, proposal.value("node_id").toString()));
+                return true;
+            }
+            if (!r.path.endsWith("/scope-expansion")) return false;
+            ++previewReads;
+            if (legacy) Source::json(r, error("scope_expansion_not_found"), 404);
+            else {
+                auto body = proposal;
+                if (previewReads == 1) body["revision"] = proposal.value("revision").toInteger() - 1;
+                Source::json(r, body);
+            }
+            return true;
+        };
+        AgentApiClient api; QVERIFY(api.setBaseUrl(f.source.url()));
+        MissionSnapshotLoader loader(&api);
+        QSignalSpy ready(&loader, &MissionSnapshotLoader::snapshotReady);
+        QSignalSpy failed(&loader, &MissionSnapshotLoader::loadFailed);
+        loader.selectTask(A); loader.refresh();
+        QTRY_COMPARE(ready.count(), 1);
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(bundle(ready).mission, f.current);
+        QCOMPARE(bundle(ready).scopeExpansion, legacy ? QJsonObject{} : proposal);
+        QCOMPARE(previewReads, legacy ? 1 : 2);
     }
     void switchingTaskCancelsOldReadsAndResetsTheRevisionFloor()
     {

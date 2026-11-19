@@ -23,7 +23,7 @@ MUTATIONS = re.compile(
 )
 PROJECTIONS = re.compile(
     r"\b(?:getMission|getMissionGraph|getMissionArtifacts|getMissionDiff|"
-    r"getMissionValidation)\s*\("
+    r"getMissionValidation|getMissionScopeExpansion)\s*\("
 )
 
 

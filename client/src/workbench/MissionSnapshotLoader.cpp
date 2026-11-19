@@ -3,6 +3,18 @@
 #include <algorithm>
 
 namespace {
+bool hasPausedWriter(const QJsonObject &graph)
+{
+    if (graph.value("status") != "awaiting_human") return false;
+    for (const auto &entry : graph.value("nodes").toArray()) {
+        const auto node = entry.toObject();
+        const auto id = node.value("node_id").toString();
+        if (node.value("status") == "awaiting_human" && (id == "implementer" || id.startsWith("repair_")))
+            return true;
+    }
+    return false;
+}
+
 void applyArtifacts(MissionSnapshot &snapshot, const QJsonObject &artifacts)
 {
     snapshot.artifacts = artifacts;
@@ -90,6 +102,7 @@ void MissionSnapshotLoader::received(quint64 request, const QString &task, const
         const auto revision = body.value("current_revision").toInteger();
         if (revision < m_floor || revision != m_start.value("current_revision").toInteger()
             || revision != m_bundle.graph.value("current_revision").toInteger()
+            || (!m_bundle.scopeExpansion.isEmpty() && revision != m_bundle.scopeExpansion.value("revision").toInteger())
             || body.value("last_event_id") != m_start.value("last_event_id")) {
             invalidate();
             refresh(std::min(100 * ++m_attempts, 2000));
@@ -103,7 +116,11 @@ void MissionSnapshotLoader::received(quint64 request, const QString &task, const
         emit snapshotReady(snapshot);
         return;
     }
-    if (part == Part::Graph) m_bundle.graph = body;
+    if (part == Part::Graph) {
+        m_bundle.graph = body;
+        if (hasPausedWriter(body)) track(m_api->getMissionScopeExpansion(m_task), Part::ScopeExpansion);
+    }
+    if (part == Part::ScopeExpansion) m_bundle.scopeExpansion = body;
     if (part == Part::Artifacts) applyArtifacts(m_bundle, body);
     if (m_requests.isEmpty()) track(m_api->getMission(m_task), Part::Fence);
 }
@@ -111,6 +128,11 @@ void MissionSnapshotLoader::failed(quint64 request, int status, const QString &c
 {
     const auto it = m_requests.constFind(request);
     if (it == m_requests.cend() || it->generation != m_generation) return;
+    if (it->part == Part::ScopeExpansion && status == 404 && code == "scope_expansion_not_found") {
+        // Older writers could pause with only a decision summary.
+        received(request, m_task, {});
+        return;
+    }
     invalidate();
     if (status == 0 || status == 429 || status >= 500) refresh(std::min(250 * ++m_attempts, 5000));
     emit loadFailed(status, code);

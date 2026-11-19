@@ -8,22 +8,27 @@
 #define EXPECT_EQ(actual, expected) do { QTest::qCompare(actual, expected, #actual, #expected, __FILE__, __LINE__); } while (false)
 
 namespace {
-QJsonObject mission(const QString &task = A, qint64 revision = 8, const QString &status = "awaiting_human")
+QJsonObject protocolExample(const char *name)
 {
     QFile file(QString(FORGEPILOT_SOURCE_DIR) + "/protocol/examples.json");
     if (!file.open(QIODevice::ReadOnly)) qFatal("Cannot open canonical protocol examples");
-    auto body = QJsonDocument::fromJson(file.readAll()).object().value("mission_query_response").toObject();
+    return QJsonDocument::fromJson(file.readAll()).object().value(name).toObject();
+}
+QJsonObject mission(const QString &task = A, qint64 revision = 8, const QString &status = "awaiting_human")
+{
+    auto body = protocolExample("mission_query_response");
     body.insert("task_id", task); body.insert("current_revision", revision); body.insert("status", status);
     body.insert("last_event_id", task + ':' + QString::number(revision));
     auto review = body.value("review").toObject(); review.insert("task_id", task); review.insert("revision", revision);
     body.insert("review", review); return body;
 }
-QJsonObject graph(const QJsonObject &m)
+QJsonObject graph(const QJsonObject &m, const QString &nodeId = "execution_approval")
 {
-    QJsonObject node{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
+    const QString type = nodeId == "execution_approval" ? "human_gate" : "agent";
+    QJsonObject node{{"node_id", nodeId}, {"node_type", type},
         {"status", m.value("status")}, {"attempt", 1}, {"result", QJsonValue::Null}};
-    QJsonObject definition{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
-        {"handler", "execution_approval"}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
+    QJsonObject definition{{"node_id", nodeId}, {"node_type", type},
+        {"handler", nodeId}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
         {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
     return {{"task_id", m.value("task_id")}, {"graph_id", m.value("graph_id")}, {"graph_version", 1},
         {"definition_hash", QString(64, 'a')}, {"status", m.value("status")}, {"current_revision", m.value("current_revision")},
@@ -210,6 +215,82 @@ private slots:
     {
         QTest::addColumn<QString>("code");
         for (const char *code : {"mission_revision_conflict", "mission_approval_conflict", "approval_stale"}) QTest::newRow(code) << QString(code);
+    }
+    void scopeDecisionsBindDisplayedProposal_data()
+    {
+        QTest::addColumn<bool>("approved");
+        QTest::newRow("approve") << true;
+        QTest::newRow("reject") << false;
+    }
+    void scopeDecisionsBindDisplayedProposal()
+    {
+        QFETCH(bool, approved);
+        Fixture f; auto scope = protocolExample("mission_scope_expansion_preview");
+        f.current = mission(A, 42);
+        QList<Request> decisions;
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/graph")) Source::json(r, graph(f.current, "repair_1"));
+            else if (r.path.endsWith("/scope-expansion")) Source::json(r, scope);
+            else if (r.path.endsWith("/approvals")) decisions.append(r);
+            else return false;
+            return true;
+        };
+        MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A);
+        auto *approval = c.approval();
+        QSignalSpy resumed(approval, &ApprovalController::scopeExpansionApproved);
+        QTRY_VERIFY(approval->scopeAvailable()); QVERIFY(!approval->available());
+        const auto old = approval->scopeExpansion();
+        approval->decideScopeExpansion(old, approved); approval->decideScopeExpansion(old, !approved);
+        QTRY_COMPARE(decisions.size(), 1); QVERIFY(c.busy());
+        QCOMPARE(decisions[0].body.value("approval_type").toString(), "scope_expansion");
+        QCOMPARE(decisions[0].body.value("expected_revision").toInt(), 42);
+        QCOMPARE(decisions[0].path, "/api/v2/missions/" + A.toUtf8() + "/approvals");
+        for (const auto *key : {"plan_hash", "task_spec_hash", "scope_hash"})
+            QCOMPARE(decisions[0].body.value(key), scope.value(key));
+
+        f.current = mission(A, 43); scope.insert("revision", 43);
+        Source::json(decisions.first(), conflict(), 409);
+        QTRY_COMPARE(c.revision(), 43); QTRY_VERIFY(approval->scopeAvailable());
+        QVERIFY(!approval->error().isEmpty()); QCOMPARE(resumed.count(), 0);
+        approval->decideScopeExpansion(old, approved); // stale dialog after refresh
+        QTRY_VERIFY(approval->scopeAvailable()); QCOMPARE(decisions.size(), 1);
+        approval->decideScopeExpansion(approval->scopeExpansion(), approved);
+        QTRY_COMPARE(decisions.size(), 2);
+        QCOMPARE(decisions[1].body.value("decision").toString(), approved ? "approved" : "rejected");
+        QCOMPARE(decisions[1].body.value("expected_revision").toInt(), 43);
+        f.current = mission(A, 44, approved ? "running" : "awaiting_human");
+        scope.insert("revision", 44); scope.insert("status", approved ? "approved" : "rejected");
+        Source::json(decisions.last(), f.current, 202);
+        QTRY_COMPARE(c.revision(), 44); QTRY_VERIFY(c.synchronized()); QCOMPARE(c.taskId(), A);
+        QCOMPARE(resumed.count(), approved ? 1 : 0); QVERIFY(!approval->scopeAvailable());
+        if (!approved) QCOMPARE(approval->scopeExpansion().value("status").toString(), "rejected");
+        QVERIFY(!approval->available()); QCOMPARE(f.posts("/approvals"), 2);
+    }
+    void olderProposalCannotAuthorizePausedWriter_data()
+    {
+        QTest::addColumn<QString>("nodeId"); QTest::addColumn<int>("attempt");
+        QTest::newRow("another-writer") << QString("implementer") << 1;
+        QTest::newRow("another-attempt") << QString("repair_1") << 2;
+    }
+    void olderProposalCannotAuthorizePausedWriter()
+    {
+        QFETCH(QString, nodeId); QFETCH(int, attempt);
+        Fixture f; f.current = mission(A, 42);
+        auto scope = protocolExample("mission_scope_expansion_preview");
+        scope.insert("status", "approved");
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/scope-expansion")) Source::json(r, scope);
+            else if (r.path.endsWith("/graph")) {
+                auto body = graph(f.current, nodeId);
+                auto node = body.value("nodes").toArray().first().toObject();
+                node.insert("attempt", attempt); body.insert("nodes", QJsonArray{node});
+                Source::json(r, body);
+            } else return false;
+            return true;
+        };
+        MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A); QTRY_VERIFY(c.synchronized());
+        QVERIFY(c.approval()->scopeExpansion().isEmpty());
+        QVERIFY(!c.approval()->scopeAvailable()); QVERIFY(!c.approval()->available());
     }
     void staleApprovalRefreshesWithoutResubmitting()
     {
