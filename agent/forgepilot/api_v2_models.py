@@ -139,7 +139,13 @@ class MissionResume(MissionControl):
 
 
 class MissionDelivery(MissionControl):
-    mode: Literal["preview", "squash", "keep_branch", "patch", "bundle", "abandon"] = "preview"
+    """For an interrupted squash, use recover to inspect the recorded target branch.
+
+    Confirm a completed or restored outcome with the returned token and revision.
+    A manual_inspection preview includes the reason for further inspection.
+    """
+
+    mode: Literal["preview", "squash", "keep_branch", "patch", "bundle", "abandon", "recover"] = "preview"
     token: MissionHash | None = None
     target_branch: str | None = Field(default=None, min_length=1, max_length=256)
 

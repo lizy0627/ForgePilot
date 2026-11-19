@@ -1534,6 +1534,88 @@ print(json.dumps(result))
         QTRY_COMPARE(ui.missions.delivery()->result().value("mode").toString(), QString("patch"));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void deliveryPanelVerifiesInterruptedSquash_data()
+    {
+        QTest::addColumn<QString>("outcome");
+        QTest::addColumn<QString>("label");
+        QTest::newRow("published") << QString("completed") << QString("合并已完成");
+        QTest::newRow("rolled-back") << QString("restored") << QString("目标已恢复原状");
+        QTest::newRow("different") << QString("manual_inspection") << QString("需要人工检查");
+    }
+    void deliveryPanelVerifiesInterruptedSquash()
+    {
+        QFETCH(QString, outcome);
+        QFETCH(QString, label);
+        const bool manual = outcome == "manual_inspection";
+        const QString branch = "release/fix", reason = "目标工作区有未提交的差异。";
+        const QString parent(40, 'a'), published(40, 'b'), token(64, 'c');
+        const auto target = outcome == "completed" ? published : parent;
+        Fixture fixture;
+        fixture.setPhase("succeeded", "");
+        fixture.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/delivery")) return false;
+            fixture.deliveries.append(r.body);
+            QJsonObject evidence{{"outcome", outcome}, {"target_branch", branch}};
+            if (r.body.contains("token")) {
+                fixture.setPhase("succeeded", "", fixture.revision() + 1);
+                evidence["mode"] = "squash";
+                evidence["status"] = outcome == "completed" ? "delivered" : "active";
+                evidence["target_commit"] = target;
+                if (outcome == "completed") evidence["commit"] = target;
+            } else {
+                evidence["task_id"] = MissionId;
+                evidence["token"] = token;
+                evidence["task_commit"] = QString(40, 'd');
+                evidence["parent_commit"] = parent;
+                evidence["delivery_commit"] = published;
+                evidence["current_target_commit"] = target;
+                evidence["target_clean"] = !manual;
+                evidence["file_hashes"] = QJsonObject{};
+                if (manual) evidence["reason"] = reason;
+            }
+            Source::json(r, {{"mission", fixture.mission}, {"delivery", evidence}});
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.expandStage("delivery"));
+        QVERIFY(ui.chooseNode("delivery_bundle"));
+        auto *mode = ui.find("missionDeliveryMode"); QVERIFY(mode);
+        mode->setProperty("currentIndex", 5);
+        QCOMPARE(mode->property("currentText").toString(), QString("核验中断的合并"));
+        QVERIFY(ui.click("missionDeliveryPreviewButton"));
+        QTRY_COMPARE(fixture.deliveries.size(), 1);
+        QCOMPARE(fixture.deliveries.first(), (QJsonObject{{"expected_revision", 8}, {"mode", "recover"}}));
+        auto *preview = ui.find("missionDeliveryPreviewDetails"); QVERIFY(preview);
+        QTRY_VERIFY(preview->isVisible());
+        QTRY_VERIFY(ui.missions.delivery()->canPreview());
+        const auto details = preview->property("text").toString();
+        QVERIFY(details.contains(label) && details.contains(branch) && details.contains(target));
+        if (manual) {
+            QVERIFY(details.contains(reason));
+            QVERIFY(!ui.missions.delivery()->canConfirm());
+            auto *confirm = ui.find("missionDeliveryConfirmButton"); QVERIFY(confirm);
+            QVERIFY(!confirm->isVisible());
+            QVERIFY(ui.click("missionDeliveryPreviewButton"));
+            QTRY_COMPARE(fixture.deliveries.size(), 2);
+            QVERIFY(!fixture.deliveries.last().contains("token"));
+        } else {
+            QVERIFY(ui.click("missionDeliveryConfirmButton"));
+            auto *accept = ui.find("missionDeliveryDialogConfirmButton"); QVERIFY(accept);
+            QVERIFY(accept->property("text").toString().contains(label));
+            QVERIFY(ui.click(accept));
+            QTRY_COMPARE(fixture.deliveries.size(), 2);
+            QCOMPARE(fixture.deliveries.last(), (QJsonObject{{"expected_revision", 8}, {"mode", "recover"}, {"token", token}}));
+            auto *result = ui.find("missionDeliveryResultDetails"); QVERIFY(result);
+            QTRY_VERIFY(result->isVisible());
+            QVERIFY(result->property("text").toString().contains(label));
+            QVERIFY(!ui.missions.delivery()->canConfirm());
+        }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void narrowWindowReturnsFromDetailsToTheSameSelectedNode()
     {
         Fixture fixture; Ui ui(fixture, 860, 640);

@@ -244,22 +244,23 @@ class MissionHost:
         return WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts,
                                 git_executable=self.git_executable)
 
-    def _reconcile_delivery(self, task_id):
+    def _reconcile_delivery(self, task_id, *, holding_control=False):
         """Complete an outbox intent from WorkspaceManager's durable outcome.
 
         Git and SQLite cannot share a transaction. The intent is committed before
         Git runs; after a crash the manager's verified journal remains authority.
         Reconciliation publishes an outcome and never repeats the Git operation.
         """
-        control = self._controls.get(task_id)
-        if control is not None and control.locked():
-            return
         with self.store.missions.delivery_reconciliation(task_id) as row:
             if row is None or row["event_type"] != "workspace.delivery_requested":
                 return
+            control = self._controls.get(task_id)
+            if not holding_control and control is not None and control.locked():
+                return
             intent = json.loads(row["payload_json"])
             try:
-                state = self._workspace(task_id)._load(task_id)
+                workspace = self._workspace(task_id)
+                state = workspace._load(task_id)
             except (ForgePilotError, OSError):
                 # Inspection remains available if execution tools/configuration
                 # are temporarily unavailable. The durable intent is retained.
@@ -269,10 +270,10 @@ class MissionHost:
             result = state.get("delivery_result")
             if state["status"] == "abandoned":
                 result = {"status": "abandoned", "worktree_path": state["worktree_path"], "branch": state["branch"]}
-            if result is None or (state["status"] != "abandoned" and result.get("mode") != intent["mode"]):
+            expected_mode = "squash" if intent["mode"] == "recover" else intent["mode"]
+            if result is None or (state["status"] != "abandoned" and result.get("mode") != expected_mode):
                 return
-            self.store.missions.record_delivery_outcome(task_id, "workspace.delivered",
-                intent["mode"], result=result, recovered=True)
+            self.store.missions.record_delivery_outcome(task_id, intent["mode"], result=result, recovered=True)
 
     def graph(self, task_id):
         snapshot, definition = self.store.missions.graph_view(task_id)
@@ -811,6 +812,8 @@ class MissionHost:
 
     async def _delivery(self, task_id, revision, mode, token, target_branch):
         async with self._control(task_id):
+            # A retry can arrive before a GET has published the previous receipt.
+            self._reconcile_delivery(task_id, holding_control=True)
             snapshot = self._check_revision(task_id, revision)
             if mode == "abandon" and snapshot.status not in TERMINAL_NODE_STATUSES:
                 raise ForgePilotError("mission_cancel_required", "Cancel the mission before abandoning its workspace")
@@ -818,7 +821,9 @@ class MissionHost:
             if mode != "abandon" and snapshot.status is not NodeStatus.SUCCEEDED:
                 raise ForgePilotError("invalid_state", "Delivery requires a successfully validated mission")
             workspace = self._workspace(task_id)
-            if mode == "preview" or token is None:
+            if mode == "recover" and token is None:
+                result = await asyncio.to_thread(workspace.delivery_recovery_preview, task_id, approved=True)
+            elif mode == "preview" or token is None:
                 result = await asyncio.to_thread(workspace.delivery_preview, task_id, target_branch)
             else:
                 bundle = None
@@ -828,14 +833,16 @@ class MissionHost:
                 operation_id = uuid4().hex
                 self.store.missions.request_delivery(task_id, revision, mode, operation_id)
                 try:
-                    result = await asyncio.to_thread(workspace.deliver, task_id, mode,
-                        approved=True, token=token, bundle=bundle,
-                        operation_id=operation_id)
+                    if mode == "recover":
+                        result = await asyncio.to_thread(workspace.resolve_delivery, task_id,
+                            approved=True, token=token, operation_id=operation_id)
+                    else:
+                        result = await asyncio.to_thread(workspace.deliver, task_id, mode,
+                            approved=True, token=token, bundle=bundle, operation_id=operation_id)
                 except ForgePilotError as exc:
-                    self.store.missions.record_delivery_outcome(task_id, "workspace.delivery_failed",
-                        mode, error_code=exc.code)
+                    self.store.missions.record_delivery_outcome(task_id, mode, error_code=exc.code)
                     raise
-                self.store.missions.record_delivery_outcome(task_id, "workspace.delivered", mode, result=result)
+                self.store.missions.record_delivery_outcome(task_id, mode, result=result)
             delivery = safe_event_data(self.store.redactor, result)
             if isinstance(result, dict) and "token" in result:
                 # This freshly generated one-time approval capability must reach

@@ -180,6 +180,14 @@ private slots:
         bad = preview; bad["validated"] = "true"; d["delivery"] = bad;
         QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
         d["delivery"] = QJsonObject{}; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
+        auto recovered = QJsonObject{{"mode", "squash"}, {"status", "active"}, {"outcome", "restored"},
+            {"target_branch", "main"}, {"target_commit", QString(40, 'a')}};
+        d["delivery"] = recovered; QVERIFY(MissionProtocol::validResponse("mission.delivery", A, d));
+        recovered["outcome"] = "completed";
+        d["delivery"] = recovered; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
+        auto manual = preview;
+        manual["outcome"] = "manual_inspection";
+        d["delivery"] = manual; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
         const QJsonObject plan{{"task_id", A}, {"revision", 8}, {"token", QString(64, 'd')}, {"blocked_reason", QJsonValue::Null}};
         QJsonObject r{{"mission", mission()}, {"recovery", plan}};
         QVERIFY(MissionProtocol::validResponse("mission.resume", A, r));

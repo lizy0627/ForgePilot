@@ -247,6 +247,17 @@ bool delivery(const QJsonValue &v, const QString &id) {
     if (o.contains("task_id") && o.value("task_id").toString() != id) return false;
     if (o.contains("token")) {
         if (!MissionProtocol::validHash(o.value("token")) || o.value("task_id").toString() != id) return false;
+        if (o.contains("outcome")) {
+            if (!oneOf(o.value("outcome"), {"completed", "restored", "manual_inspection"})
+                || !o.contains("target_clean") || !o.contains("file_hashes")) return false;
+            for (const auto &key : {"target_branch", "task_commit", "current_target_commit", "parent_commit", "delivery_commit"})
+                if (!text(o.value(key))) return false;
+            if (o.value("outcome") == "manual_inspection" && !text(o.value("reason"))) return false;
+        }
+    } else if (o.contains("outcome")) {
+        const bool completed = o.value("outcome") == "completed" && o.value("status") == "delivered";
+        const bool restored = o.value("outcome") == "restored" && o.value("status") == "active";
+        if (!(completed || restored) || !text(o.value("target_branch")) || !text(o.value("target_commit"))) return false;
     } else if (!oneOf(o.value("mode"), {"squash", "keep_branch", "patch", "bundle", "abandon"})
         && o.value("status").toString() != "abandoned") return false;
     if (o.contains("mode") && !oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon"})) return false;
@@ -436,7 +447,7 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
     }
     if (op == "mission.resume") return only(o, {"expected_revision", "recovery_token"}) && optional(o, "recovery_token", validHash);
     if (op == "mission.delivery") return only(o, {"expected_revision", "mode", "token", "target_branch"})
-        && (!o.contains("mode") || oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon"}))
+        && (!o.contains("mode") || oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon", "recover"}))
         && optional(o, "token", validHash) && (!o.contains("target_branch") || text(o.value("target_branch")));
     return false;
 }
@@ -451,6 +462,7 @@ bool MissionProtocol::staleError(const QString &code) {
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
     if (code == "mission_cancel_required") return "请先取消任务，再放弃隔离工作区。";
+    if (code == "delivery_recovery") return "请检查工作区状态；如有中断的压缩合并，可在交付方式中选择“核验中断的合并”。";
     if (staleError(code)) return "任务版本或审批内容已变化，请刷新并重新审阅后提交。旧审批不会自动重试。";
     if (code == "invalid_response") return "后端响应格式无效，请刷新任务；已发送的操作可能已经执行。";
     if (code == "invalid_request" || code == "invalid_task_id") return "任务请求无效，请检查任务标识、版本和必填内容。";

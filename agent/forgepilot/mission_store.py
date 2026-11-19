@@ -535,7 +535,7 @@ class MissionRepository:
         with self.events._lock:
             row = self.events._db.execute("""SELECT sequence,event_type,payload_json FROM graph_events
                 WHERE task_id=? AND event_type IN ('workspace.delivery_requested','workspace.delivered',
-                'workspace.delivery_failed') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
+                'workspace.delivery_failed','workspace.delivery_restored') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
             yield dict(row) if row is not None else None
 
     def admit_mission(self, task_id, workspace_record, fields):
@@ -583,13 +583,13 @@ class MissionRepository:
             append_mission_event(self.events, task_id, "workspace.delivery_requested", {
                 "mode": mode, "operation_id": operation_id}, actor="user")
 
-    def record_delivery_outcome(self, task_id, event_type, mode, *, result=None, error_code=None, recovered=False):
-        if event_type not in {"workspace.delivered", "workspace.delivery_failed"}:
-            raise ValueError("Unknown delivery outcome")
+    def record_delivery_outcome(self, task_id, mode, *, result=None, error_code=None, recovered=False):
         data = {"mode": mode}
-        if event_type == "workspace.delivery_failed":
+        if error_code is not None:
+            event_type = "workspace.delivery_failed"
             data["error_code"] = error_code
         else:
+            event_type = "workspace.delivery_restored" if result.get("outcome") == "restored" else "workspace.delivered"
             data["result"] = result
         if recovered:
             data["recovered"] = True

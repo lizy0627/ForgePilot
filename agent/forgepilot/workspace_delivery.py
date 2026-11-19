@@ -213,14 +213,20 @@ class DeliveryMixin:
             _fail("delivery_changed", "Task changed after interrupted delivery")
         target = self._delivery_target(state, intent["target_branch"])
         outcome = "manual_inspection"
-        if target["checked_out_branch"] == target["branch"] and not target["dirty"]:
-            if target["commit"] == target["main_head"] == intent["head"]:
-                outcome = "completed"
-            elif (target["commit"] == target["main_head"] == intent["parent"]
-                  and target["files"] == intent["main_files"]):
-                outcome = "restored"
+        reason = None
+        if target["checked_out_branch"] != target["branch"]:
+            reason = "源仓库当前检出的分支与交付目标分支不同。"
+        elif target["dirty"]:
+            reason = "源仓库的索引或工作区仍有差异，请检查后重新核验。"
+        elif target["commit"] == target["main_head"] == intent["head"]:
+            outcome = "completed"
+        elif (target["commit"] == target["main_head"] == intent["parent"]
+              and target["files"] == intent["main_files"]):
+            outcome = "restored"
+        else:
+            reason = "目标提交或文件内容与记载的交付结果和原始状态均不匹配。"
         return {"head": current.head_commit, "files": dict(current.file_hashes),
-                "target": target, "outcome": outcome}
+                "target": target, "outcome": outcome}, reason
 
     def delivery_recovery_preview(self, task_id, *, approved=False):
         """Observe an uncertain delivery; approval permits reclaiming a stale lease.
@@ -229,7 +235,7 @@ class DeliveryMixin:
         requires the user to inspect/restore the main workspace themselves.
         """
         with self._operation(task_id, recover=approved is True) as state:
-            observed = self._delivery_recovery_observation(state)
+            observed, reason = self._delivery_recovery_observation(state)
             token = secrets.token_hex(32)
             state["delivery_recovery_preview"] = {
                 **observed, "token_sha256": sha256(token.encode()).hexdigest()}
@@ -237,12 +243,12 @@ class DeliveryMixin:
             intent = state["intent"]
             return {"token": token, "task_id": task_id, "outcome": observed["outcome"],
                     "task_commit": observed["head"], "target_branch": intent["target_branch"],
-                    "parent_commit": intent["parent"], "delivery_commit": intent["head"],
+                    "reason": reason, "parent_commit": intent["parent"], "delivery_commit": intent["head"],
                     "current_target_commit": observed["target"]["commit"],
                     "target_clean": not observed["target"]["dirty"],
                     "file_hashes": observed["target"]["files"]}
 
-    def resolve_delivery(self, task_id, *, approved, token):
+    def resolve_delivery(self, task_id, *, approved, token, operation_id=None):
         """Confirm an already completed merge or a user-restored baseline only."""
         if approved is not True:
             _fail("delivery_approval", "Confirming a delivery outcome requires explicit user approval")
@@ -251,22 +257,22 @@ class DeliveryMixin:
             if (not isinstance(token, str) or len(token) != 64 or not preview
                     or not hmac.compare_digest(sha256(token.encode()).hexdigest(), preview["token_sha256"])):
                 _fail("delivery_approval", "Inspect the current delivery recovery evidence first")
-            observed = self._delivery_recovery_observation(state)
+            observed, _ = self._delivery_recovery_observation(state)
             if observed != {key: value for key, value in preview.items() if key != "token_sha256"}:
                 _fail("delivery_changed", "Delivery recovery evidence changed; inspect it again")
             if observed["outcome"] == "manual_inspection":
                 _fail("delivery_recovery", "The main workspace requires manual user inspection or restoration")
             intent = state["intent"]
-            if observed["outcome"] == "completed":
-                state["status"] = "delivered"
-                state["delivery_result"] = {"mode": "squash", "commit": intent["head"],
-                                            "target_branch": intent["target_branch"]}
-                self._complete_delivery_operation(state)
-            else:
-                state["status"] = "active"
-            result = {"status": state["status"], "outcome": observed["outcome"],
+            state["status"] = "delivered" if observed["outcome"] == "completed" else "active"
+            result = {"mode": "squash", "status": state["status"], "outcome": observed["outcome"],
                       "target_branch": intent["target_branch"],
                       "target_commit": observed["target"]["commit"]}
+            if observed["outcome"] == "completed":
+                result["commit"] = intent["head"]
+            state["delivery_result"] = result
+            if operation_id is not None:
+                state["pending_delivery_operation_id"] = operation_id
+            self._complete_delivery_operation(state)
             state.pop("intent")
             state.pop("delivery_recovery_preview", None)
             state.pop("delivery_preview", None)
