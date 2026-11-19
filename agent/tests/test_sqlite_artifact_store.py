@@ -19,6 +19,7 @@ from test_artifact_protocol import HASH_A, HASH_B, plan, task_spec
 
 
 SCHEMA8_TABLES = (
+    "writer_scope_expansions",
     "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
     "security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
     "model_calls", "approvals", "artifact_relations", "artifacts",

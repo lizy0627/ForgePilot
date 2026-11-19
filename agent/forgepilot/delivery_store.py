@@ -14,8 +14,9 @@ class DeliveryRepository:
         """Select approval candidates; callers validate each frozen package on use."""
         with self.events._lock:
             rows = self.events._db.execute(
-                "SELECT approval_id FROM approvals WHERE task_id=? AND approval_type=? AND status='approved'",
-                (task_id, kind)).fetchall()
+                """SELECT approval_id FROM approvals WHERE task_id=? AND status='approved'
+                   AND (approval_type=? OR (?='execution' AND approval_type='scope_expansion'))""",
+                (task_id, kind, kind)).fetchall()
             return tuple(row[0] for row in rows)
 
     def record_next_validation(self, *, validation_id, task_id, status,

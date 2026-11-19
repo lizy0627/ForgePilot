@@ -32,6 +32,42 @@
       "title": "ExecutionPlan",
       "type": "object"
     },
+    "PlanFileCriteria": {
+      "additionalProperties": false,
+      "description": "A reviewed file-specific subset of the step's acceptance criteria.",
+      "properties": {
+        "acceptance_criteria_ids": {
+          "items": {
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Z0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Acceptance Criteria Ids",
+          "type": "array"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason",
+        "acceptance_criteria_ids"
+      ],
+      "title": "PlanFileCriteria",
+      "type": "object"
+    },
     "PlanStep": {
       "additionalProperties": false,
       "properties": {
@@ -76,6 +112,15 @@
           },
           "maxItems": 128,
           "title": "Expected Files",
+          "type": "array"
+        },
+        "file_criteria": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanFileCriteria"
+          },
+          "maxItems": 128,
+          "title": "File Criteria",
           "type": "array"
         },
         "owner": {

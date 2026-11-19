@@ -43,7 +43,7 @@ def version_three(path):
     cid = store.create_conversation(title="历史不应丢失")["conversation_id"]
     store.close()
     with sqlite3.connect(path) as db:
-        for table in ("security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
+        for table in ("writer_scope_expansions", "security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",
                       "task_node_attempts", "task_graph_runs"):

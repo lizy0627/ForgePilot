@@ -22,7 +22,7 @@ from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
 from .mission_store import (
     MissionRepository, create_graph_checkpoint_schema, create_graph_orchestrator_schema, create_mission_schema,
-    recover_graph_runs,
+    create_scope_expansion_schema, recover_graph_runs,
 )
 from .artifacts.sqlite_store import SqliteArtifactStore
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
@@ -187,6 +187,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.GRAPH_CHECKPOINT_RECOVERY:
                 create_graph_checkpoint_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_CHECKPOINT_RECOVERY)}')
+            if version < SchemaVersion.WRITER_SCOPE_EXPANSION:
+                create_scope_expansion_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.WRITER_SCOPE_EXPANSION)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(

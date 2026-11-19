@@ -306,6 +306,23 @@ def create_graph_checkpoint_schema(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def create_scope_expansion_schema(db: sqlite3.Connection) -> None:
+    db.execute("""CREATE TABLE writer_scope_expansions(
+        task_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        base_spec_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        base_plan_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        spec_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        plan_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(checkpoint_id),
+        partial_change_set_id TEXT REFERENCES artifacts(artifact_id),
+        budget_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+        PRIMARY KEY(task_id,node_id,attempt),
+        FOREIGN KEY(task_id,node_id,attempt) REFERENCES task_node_attempts(task_id,node_id,attempt))""")
+
+
 def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
     """Make abandoned running nodes explicit; execution is never silently resumed."""
     stamp = stamp or _now()

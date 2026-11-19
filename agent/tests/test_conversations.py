@@ -1622,7 +1622,7 @@ def version_one_database(path):
     value=task(); value.update(state='completed',final_result='旧任务结果',finished_at=value['updated_at'])
     store.create(value['task_id'],value); store.publish(value['task_id'],value,[],closed=True); store.close()
     with sqlite3.connect(path) as db:
-        for table in ['security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
+        for table in ['writer_scope_expansions', 'security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
                       'graph_node_results','graph_node_states','graph_run_inputs','graph_events',
                       'model_calls','approvals','artifact_relations','artifacts',
                       'task_node_attempts','task_graph_runs']: db.execute('DROP TABLE '+table)
