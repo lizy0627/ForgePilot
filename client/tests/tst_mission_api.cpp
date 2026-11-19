@@ -102,13 +102,17 @@ private slots:
         bad = page; bad["items"] = QJsonArray{malformed}; QVERIFY(!MissionProtocol::validMissionPage(bad));
         Source source; source.handle = [&](const Request &r) { Source::json(r, page); };
         AgentApiClient api; api.setBaseUrl(source.url()); QSignalSpy responses(&api, &AgentApiClient::responseReceived);
-        api.listMissions("page-two", "D:/项目 with spaces/Example", "interrupted");
+        const QString repository = "D:/项目 with spaces/C++ 100%/%2B";
+        const QString cursor = "page+two%20";
+        api.listMissions(cursor, repository, "interrupted");
         QTRY_COMPARE(responses.size(), 1); QCOMPARE(source.requests.size(), 1);
         const auto &request = source.requests.first(); QCOMPARE(request.method, "GET"); QVERIFY(request.body.isEmpty());
+        // The HTTP server treats a raw '+' in query values as a space.
+        QVERIFY(!request.path.contains('+'));
         const auto url = QUrl::fromEncoded(request.path); QCOMPARE(url.path(), "/api/v2/missions");
         const QUrlQuery query(url); QCOMPARE(query.queryItemValue("limit"), "20");
-        QCOMPARE(query.queryItemValue("before"), "page-two"); QCOMPARE(query.queryItemValue("status"), "interrupted");
-        QCOMPARE(query.queryItemValue("repository_path"), "D:/项目 with spaces/Example");
+        QCOMPARE(query.queryItemValue("before", QUrl::FullyDecoded), cursor); QCOMPARE(query.queryItemValue("status"), "interrupted");
+        QCOMPARE(query.queryItemValue("repository_path", QUrl::FullyDecoded), repository);
     }
     void strictRawJson() {
         QJsonObject o;

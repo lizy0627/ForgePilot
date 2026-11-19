@@ -152,7 +152,7 @@ private slots:
         QCOMPARE(c.missions()->count(), 1); QCOMPARE(c.missions()->get(0).value("taskId").toString(), B);
         c.setRepositoryFilter("D:/Projects/Example"); QTRY_VERIFY(!c.historyLoading());
         const QUrlQuery query(QUrl::fromEncoded(f.source.requests.last().path));
-        QCOMPARE(query.queryItemValue("repository_path"), "D:/Projects/Example"); QCOMPARE(query.queryItemValue("status"), "failed");
+        QCOMPARE(query.queryItemValue("repository_path", QUrl::FullyDecoded), "D:/Projects/Example"); QCOMPARE(query.queryItemValue("status"), "failed");
     }
     void historyErrorsAreIndependentFromSelectedMission()
     {

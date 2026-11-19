@@ -7,6 +7,26 @@
 class MissionBackendTests : public QObject {
     Q_OBJECT
 private slots:
+    void filteredMissionHistoryPaginates() {
+        const auto repository = qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");
+        MissionController controller;
+        controller.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
+        controller.setRepositoryFilter(repository);
+        controller.setStatusFilter("failed");
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.historyLoading(), 10000);
+        QCOMPARE(controller.historyTotal(), 21);
+        QCOMPARE(controller.missions()->count(), 20);
+        QVERIFY(controller.historyHasMore());
+        controller.loadMoreMissions();
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.historyLoading(), 10000);
+        QCOMPARE(controller.missions()->count(), 21);
+        QVERIFY(!controller.historyHasMore());
+        for (int i = 0; i < controller.missions()->count(); ++i) {
+            const auto row = controller.missions()->get(i);
+            QCOMPARE(row.value("repositoryPath").toString(), repository);
+            QCOMPARE(row.value("status").toString(), "failed");
+        }
+    }
     void persistentMissionDiscovery() {
         QFile evidence(qEnvironmentVariable("FORGEPILOT_INTEGRATION_OUTPUT") + "/mission-qt-snapshot.json");
         QVERIFY(evidence.open(QIODevice::ReadOnly));

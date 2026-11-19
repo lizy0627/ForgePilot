@@ -151,10 +151,13 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
     else if (action != "create" && action != "get" && action != "list") path += '/' + action;
     auto url = MissionProtocol::endpoint(m_base, path);
     if (action == "list") {
-        QUrlQuery query; query.addQueryItem("limit", "20");
-        for (const auto &key : {"before", "repository_path", "status"})
-            if (!body.value(key).toString().isEmpty()) query.addQueryItem(key, body.value(key).toString());
-        url.setQuery(query);
+        QStringList query{"limit=20"};
+        for (const auto &key : {"before", "repository_path", "status"}) {
+            const auto value = body.value(key).toString();
+            if (!value.isEmpty())
+                query.append(QString::fromLatin1(key) + '=' + QString::fromLatin1(QUrl::toPercentEncoding(value)));
+        }
+        url.setQuery(query.join('&'), QUrl::StrictMode);
     }
     const QByteArray method = action == "discard_preview" ? "DELETE" : readOnly ? "GET" : "POST";
     auto *reply = JsonHttp::send(m_network, this, method, url,
