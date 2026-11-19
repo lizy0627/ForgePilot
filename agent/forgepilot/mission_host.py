@@ -232,6 +232,16 @@ class MissionHost:
         self._metadata(task_id)
         return self.store.missions.observability(task_id)
 
+    def _workspace(self, task_id):
+        workflow = self._services.get(task_id)
+        if workflow is not None:
+            return workflow.workspace
+        from .workspace_manager import WorkspaceManager
+        record = self.graphs.workspace_record(task_id)
+        if record is None:
+            raise ForgePilotError("workspace_state", "Mission has no registered workspace")
+        return WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts)
+
     def _reconcile_delivery(self, task_id):
         """Complete an outbox intent from WorkspaceManager's durable outcome.
 
@@ -247,14 +257,7 @@ class MissionHost:
                 return
             intent = json.loads(row["payload_json"])
             try:
-                workflow = self._services.get(task_id)
-                if workflow is not None:
-                    workspace = workflow.workspace
-                else:
-                    from .workspace_manager import WorkspaceManager
-                    record = self.graphs.workspace_record(task_id)
-                    workspace = WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts)
-                state = workspace._load(task_id)
+                state = self._workspace(task_id)._load(task_id)
             except (ForgePilotError, OSError):
                 # Inspection remains available if execution tools/configuration
                 # are temporarily unavailable. The durable intent is retained.
@@ -812,16 +815,19 @@ class MissionHost:
             self._idle(task_id)
             if mode != "abandon" and snapshot.status is not NodeStatus.SUCCEEDED:
                 raise ForgePilotError("invalid_state", "Delivery requires a successfully validated mission")
-            workflow = self._workflow(task_id)
+            workspace = self._workspace(task_id)
             if mode == "preview" or token is None:
-                result = await asyncio.to_thread(workflow.workspace.delivery_preview, task_id, target_branch)
+                result = await asyncio.to_thread(workspace.delivery_preview, task_id, target_branch)
             else:
-                bundles = [item for item in self.store.artifacts.list_for_task(task_id) if item.artifact_type == "DeliveryBundle"]
+                bundle = None
+                if mode == "bundle":
+                    bundles = [item for item in self.store.artifacts.list_for_task(task_id) if item.artifact_type == "DeliveryBundle"]
+                    bundle = bundles[-1].content if bundles else None
                 operation_id = uuid4().hex
                 self.store.missions.request_delivery(task_id, revision, mode, operation_id)
                 try:
-                    result = await asyncio.to_thread(workflow.workspace.deliver, task_id, mode,
-                        approved=True, token=token, bundle=bundles[-1].content if bundles else None,
+                    result = await asyncio.to_thread(workspace.deliver, task_id, mode,
+                        approved=True, token=token, bundle=bundle,
                         operation_id=operation_id)
                 except ForgePilotError as exc:
                     self.store.missions.record_delivery_outcome(task_id, "workspace.delivery_failed",

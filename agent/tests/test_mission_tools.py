@@ -1,6 +1,7 @@
 """Real production Mission admission, tool calls, diagnostics and frozen restoration."""
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -103,6 +104,16 @@ async def test_production_http_model_tools_fallback_and_frozen_restore(tmp_path,
             assert (await client.get("/api/v2/runtime/status")).json()["active_count"] == 0
             events = await client.get(path + "/events", headers={"Last-Event-ID": current["last_event_id"]})
             assert events.text.count("event: task.cancelled\n") == 1
+            preview = await client.post(path + "/delivery", json={
+                "mode": "abandon", "expected_revision": cancelled.json()["current_revision"]})
+            assert preview.status_code == 200, preview.text
+            abandoned = await client.post(path + "/delivery", json={
+                "mode": "abandon", "expected_revision": preview.json()["mission"]["current_revision"],
+                "token": preview.json()["delivery"]["token"]})
+            assert abandoned.status_code == 200, abandoned.text
+            delivery = abandoned.json()["delivery"]
+            assert delivery["status"] == "abandoned" and not Path(delivery["worktree_path"]).exists()
+            assert (reopened.source / "src/value.cpp").read_text(encoding="utf-8") == SOURCE
             assert not reopened.provider.seen
     finally:
         reopened.store.close()
