@@ -9,7 +9,7 @@ from time import monotonic
 from urllib.parse import urlsplit
 from starlette.datastructures import Headers
 
-from fastapi import Body, FastAPI, Header, Request, Query
+from fastapi import Body, Depends, FastAPI, Header, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException
@@ -392,51 +392,38 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     async def stop_answer(conversation_id: str, request_id: str):
         return await conversations.stop(conversation_id,request_id)
 
+    async def conversation_event_batches(conversation_id: str, request_id: str, request: Request,
+                                         last_event_id: str | None = Header(default=None)):
+        accept=request.headers.get('accept','*/*')
+        if 'text/event-stream' not in accept and '*/*' not in accept:
+            raise ForgePilotError('invalid_request','此接口只提供 text/event-stream。')
+        batches = conversations.conversation_batches(conversation_id, request_id, last_event_id,
+            heartbeat_seconds=heartbeat_seconds, idle_seconds=conversation_stream_idle_seconds)
+        try:
+            yield batches
+        finally:
+            # Release the slot even if the connection closes before the first frame is sent.
+            await host.runtime.drain(batches.aclose())
+
     @app.get('/api/v1/conversations/{conversation_id}/requests/{request_id}/events',
         summary='Subscribe to one conversation answer stream',responses={**errors,
         200:{"description":"Bounded, resumable conversation answer SSE stream",
              "content":{"text/event-stream":{"schema":{"type":"string"}}}},
         204:{"description":"Terminal stream already fully acknowledged"}})
-    async def conversation_events(conversation_id: str, request_id: str, request: Request,
-                                  last_event_id: str | None = Header(default=None)):
-        accept=request.headers.get('accept','*/*')
-        if 'text/event-stream' not in accept and '*/*' not in accept:
-            raise ForgePilotError('invalid_request','此接口只提供 text/event-stream。')
-        subscription=conversations.conversation_stream(conversation_id,request_id,last_event_id)
-        initial=subscription.read()
-        if initial.terminal and not initial.events:
-            subscription.close()
+    async def conversation_events(batches=Depends(conversation_event_batches, scope='request')):
+        initial = await host.runtime.run_request(anext(batches, None))
+        if initial is None:
             return Response(status_code=204)
 
         async def stream():
-            idle_at=monotonic()
-            pending=initial
-            try:
-                yield 'retry: 1000\n\n'
-                while True:
-                    batch=pending
-                    pending=None
-                    if batch is None:
-                        batch=subscription.read()
-                    for event in batch.events:
-                        yield event.frame()
-                    if batch.events:
-                        idle_at=monotonic()
-                        continue
-                    # StreamingResponse cancels this generator when the socket
-                    # closes.  Polling Request.is_disconnected() here is not
-                    # reliable for every ASGI transport and could suppress the
-                    # first heartbeat before an idle reconnect.
-                    if batch.terminal:
-                        return
-                    remaining=conversation_stream_idle_seconds-(monotonic()-idle_at)
-                    if remaining<=0:
-                        return
-                    changed=await subscription.wait(min(heartbeat_seconds,remaining))
-                    if not changed:
-                        yield ': heartbeat\n\n'
-            finally:
-                subscription.close()
+            yield 'retry: 1000\n\n'
+            batch = initial
+            while batch is not None:
+                for event in batch.events:
+                    yield event.frame()
+                batch = await host.runtime.run_request(anext(batches, None))
+                if batch is not None and not batch.events:
+                    yield ': heartbeat\n\n'
 
         return StreamingResponse(stream(),media_type='text/event-stream',headers={
             'Cache-Control':'no-cache','X-Accel-Buffering':'no',

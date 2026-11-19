@@ -21,8 +21,8 @@ from test_repair import reflection, script
 
 
 @contextmanager
-def serving(factory, *, heartbeat=0.05):
-    app = create_app(factory, heartbeat_seconds=heartbeat)
+def serving(factory, *, heartbeat=0.05, **app_options):
+    app = create_app(factory, heartbeat_seconds=heartbeat, **app_options)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
