@@ -953,13 +953,22 @@ print(json.dumps(result))
         }
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void legacyWorkModePreviewsBaselineBeforeCreatingMission_data()
+    {
+        QTest::addColumn<bool>("switchChat");
+        QTest::newRow("same-repository") << false;
+        QTest::newRow("other-repository") << true;
+    }
     void legacyWorkModePreviewsBaselineBeforeCreatingMission()
     {
+        QFETCH(bool, switchChat);
+        const QString nextRepository = switchChat ? "D:/fixture/other" : "D:/fixture/repository";
         Fixture fixture;
         fixture.intercept = [](const Request &request) {
-            if(request.path == "/api/v1/conversations/" + A.toUtf8()) {
-                Source::json(request, {{"conversation_id", A}, {"title", "旧工作对话"},
-                    {"repository_path", "D:/fixture/repository"}, {"messages", QJsonArray{}}});
+            const bool other = request.path == "/api/v1/conversations/" + B.toUtf8();
+            if(other || request.path == "/api/v1/conversations/" + A.toUtf8()) {
+                Source::json(request, {{"conversation_id", other ? B : A}, {"title", "旧工作对话"},
+                    {"repository_path", other ? "D:/fixture/other" : "D:/fixture/repository"}, {"messages", QJsonArray{}}});
                 return true;
             }
             return false;
@@ -974,10 +983,16 @@ print(json.dumps(result))
         QVERIFY(ui.find("missionBaselineSummary")->property("text").toString().contains(QString(40, 'a')));
         QVERIFY(ui.click("missionBaselineFile"));
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
         QVERIFY(ui.click("freeChatModeButton"));
-        ui.conversations.setMode("task"); ui.conversations.sendMessage("同一仓库的下一项需求");
-        QCOMPARE(ui.find("missionRequestInput")->property("text").toString(), QString("同一仓库的下一项需求"));
-        QCOMPARE(ui.find("missionRepositoryInput")->property("text").toString(), QString("D:/fixture/repository"));
+        if (switchChat) {
+            ui.conversations.selectConversation(B);
+            QTRY_COMPARE(ui.conversations.repositoryPath(), nextRepository);
+        }
+        ui.conversations.setMode("task"); ui.conversations.sendMessage("聊天中的下一项需求");
+        QCOMPARE(ui.find("missionRequestInput")->property("text").toString(), QString("聊天中的下一项需求"));
+        QCOMPARE(ui.find("missionRepositoryInput")->property("text").toString(), nextRepository);
         QVERIFY(ui.missions.creationPreview().isEmpty());
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
@@ -988,8 +1003,10 @@ print(json.dumps(result))
         QTRY_VERIFY(ui.missions.synchronized());
         QVERIFY(ui.window->property("agentMode").toBool());
         QCOMPARE(ui.conversations.mode(), QString("chat"));
-        QCOMPARE(fixture.creates.first().value("repository_path").toString(), QString("D:/fixture/repository"));
-        QCOMPARE(fixture.creates.first().value("request").toString(), QString("同一仓库的下一项需求"));
+        QCOMPARE(fixture.creates.first().value("repository_path").toString(), nextRepository);
+        QCOMPARE(fixture.creates.first().value("request").toString(), QString("聊天中的下一项需求"));
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(fixture.creates.first().value("use_rag"), QJsonValue(ui.rag.useForTasks()));
         for(const auto &request:fixture.source.requests)
             if(request.method == "POST") QVERIFY(request.path == "/api/v2/missions" || request.path == "/api/v2/missions/preview");
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
@@ -1026,11 +1043,16 @@ print(json.dumps(result))
         QVERIFY(ui.missions.creationPreview().isEmpty());
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
 
+        repository->setProperty("text", "D:/fixture/other");
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
         repository->setProperty("text", "D:/fixture/repository");
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
         QVERIFY(ui.click("missionCreateButton"));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QVERIFY(fixture.creates.first().value("baseline_paths").toArray().isEmpty());
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(fixture.creates.first().value("use_rag"), QJsonValue(ui.rag.useForTasks()));
         QCOMPARE(fixture.creates.first().value("request").toString(), QString("选定的任务文本"));
         QVERIFY(!fixture.creates.first().contains("conversation_id"));
         QCOMPARE(ui.conversations.mode(), QString("chat"));
@@ -1064,6 +1086,57 @@ print(json.dumps(result))
         QVERIFY(ui.click("workflowDemandToggle"));
         QTRY_VERIFY(page->property("demandCollapsed").toBool());
         QCOMPARE(fixture.creates.size(), 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void draftToolsSurviveFailedCreateAndResetForNextMission()
+    {
+        Fixture fixture;
+        QJsonObject failedRequest;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path != "/api/v2/missions" || request.method != "POST" || !failedRequest.isEmpty())
+                return false;
+            failedRequest = request.body;
+            Source::json(request, {{"error", QJsonObject{{"code", "preview_stale"}, {"message", "Refresh the preview"}}}}, 409);
+            return true;
+        };
+        Ui ui(fixture);
+        ui.rag.setUseForTasks(false);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        auto *prompt = ui.find("missionRequestInput"); QVERIFY(prompt);
+        prompt->setProperty("text", "Task A");
+        ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/repository");
+        QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_VERIFY(!ui.missions.creationError().isEmpty());
+        QCOMPARE(failedRequest.value("mcp_server_ids"), QJsonValue(QJsonArray{McpId}));
+        QCOMPARE(failedRequest.value("use_rag"), QJsonValue(true));
+
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        QCOMPARE(fixture.creates.first().value("request"), QJsonValue("Task A"));
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), failedRequest.value("mcp_server_ids"));
+        QCOMPARE(fixture.creates.first().value("use_rag"), failedRequest.value("use_rag"));
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        prompt->setProperty("text", "Task B");
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 2);
+        const auto next = fixture.creates.last();
+        QCOMPARE(next.value("request"), QJsonValue("Task B"));
+        QCOMPARE(next.value("repository_path"), failedRequest.value("repository_path"));
+        QCOMPARE(next.value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(next.value("use_rag"), QJsonValue(false));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void selectedFilesRequirePatchPreviewAndFreshConfirmation()

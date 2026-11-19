@@ -97,6 +97,7 @@ signals:
     void baseUrlChanged();
     void historyChanged();
     void creationChanged();
+    void missionCreated();
     void missionChanged();
     void availabilityChanged();
     void errorChanged();

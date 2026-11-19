@@ -13,8 +13,10 @@ Rectangle {
     property var mcp: null
     property var rag: null
     readonly property string draftRepositoryPath: repositoryInput.text.trim()
-    property bool ragRequested: rag ? rag.useForTasks : false
+    property string committedRepositoryPath: ""
+    property var ragOverride: null
     property var selectedMcpIds: []
+    property bool submittedDraft: false
     property string selectedContext: ""
     property var baselinePaths: []
     function baselineRequest() {
@@ -34,11 +36,13 @@ Rectangle {
         result.baseline_confirmed = baselineConfirmation.checked
         result.mcp_server_ids = root.selectedMcpIds
         result.use_rag = useRag.checked
+        root.submittedDraft = true
         root.mission.createMission(result)
     }
     Connections {
         target: root.mission
         function onCreationChanged() { if (baselineConfirmation && !root.mission.creationReady) baselineConfirmation.checked = false }
+        function onMissionCreated() { if (root.submittedDraft) root.resetDraftTools() }
     }
     Connections {
         target: root.mcp
@@ -56,13 +60,30 @@ Rectangle {
         baselinePaths = []
         mission.invalidateCreationPreview(true)
     }
+    function resetDraftTools() {
+        selectedMcpIds = []
+        ragOverride = null
+        submittedDraft = false
+    }
+    function commitRepository(path) {
+        if (committedRepositoryPath && committedRepositoryPath !== path) resetDraftTools()
+        committedRepositoryPath = path
+    }
     function fillDraft(request, repository, source) {
+        resetDraftTools()
+        committedRepositoryPath = repository.trim()
         requestInput.text = request
         selectedContext = source
         if (repositoryInput.text === repository) resetBaseline()
         else repositoryInput.text = repository
     }
-    FolderDialog { id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog; onAccepted: repositoryInput.text = root.mission.localPath(selectedFolder) }
+    FolderDialog {
+        id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog
+        onAccepted: {
+            repositoryInput.text = root.mission.localPath(selectedFolder)
+            root.commitRepository(repositoryInput.text.trim())
+        }
+    }
     Controls.AppScrollView {
         id: sidebarScroll
         objectName: "missionTaskCenterScroll"
@@ -100,7 +121,11 @@ Rectangle {
         Controls.AppTextField {
             id: repositoryInput; objectName: "missionRepositoryInput"; Layout.fillWidth: true
             placeholderText: "本地仓库绝对路径"
-            onTextChanged: root.resetBaseline()
+            onTextChanged: {
+                root.resetBaseline()
+                if (!activeFocus) root.commitRepository(text.trim())
+            }
+            onEditingFinished: root.commitRepository(text.trim())
         }
         Controls.LongText {
             objectName: "missionRepositoryInputFull"
@@ -114,8 +139,9 @@ Rectangle {
         }
         CheckBox {
             id: useRag; objectName: "missionUseRag"; text: "本次任务使用代码索引（RAG）"
-            Layout.fillWidth: true; checked: root.ragRequested
-            onToggled: root.ragRequested = checked
+            Layout.fillWidth: true
+            checked: root.ragOverride === null ? !!root.rag && root.rag.useForTasks : root.ragOverride
+            onToggled: root.ragOverride = checked
         }
         Label {
             text: "代码索引仅提供候选，任务会复核当前源码；不可用时退回文件检索。"

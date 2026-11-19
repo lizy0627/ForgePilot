@@ -286,6 +286,8 @@ void MissionController::received(quint64 request, const QString &task, const QJs
         if (!current()) return;
         m_mutation = 0; m_task = body.value("task_id").toString();
         m_loader.selectTask(m_task);
+        emit missionCreated();
+        if (!current()) return;
         refreshMissions();
         if (!current()) return;
         emit missionChanged();
