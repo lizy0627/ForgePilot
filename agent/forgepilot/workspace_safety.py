@@ -371,8 +371,8 @@ class Guard:
                     except OSError:
                         pass
 
-    def unlink(self, relative: str, expected_hash: str) -> None:
-        """Remove one byte-verified file by Windows handle, never by its name."""
+    def unlink(self, relative: str, expected_hash: str) -> bool:
+        """Remove one byte-verified file by Windows handle; return False if already absent."""
         if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
             raise ValueError("File deletion requires its expected SHA256")
         if os.name != "nt":
@@ -381,7 +381,7 @@ class Guard:
             try:
                 before = _identity(path)
             except FileNotFoundError:
-                return
+                return False
             if before[2] != stat.S_IFREG:
                 raise _error("Deletion requires a regular file")
             import ctypes
@@ -426,6 +426,7 @@ class Guard:
                     close = kernel.CloseHandle
                     close.argtypes = [wintypes.HANDLE]
                     close(handle)
+            return True
 
 
 def manifest(root: str | Path) -> dict[str, str]:

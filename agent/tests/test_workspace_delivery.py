@@ -19,16 +19,36 @@ def git(root, *args, data=None):
 
 
 @pytest.fixture
-def delivery_repo(tmp_path):
+def delivery_repo(tmp_path, request, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
     git(source, "init", "-q", "--initial-branch=main")
     git(source, "config", "user.name", "User")
     git(source, "config", "user.email", "user@example.invalid")
-    git(source, "config", "core.autocrlf", "false")
+    checkout = getattr(request, "param", "lf")
+    if checkout == "global-autocrlf":
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".gitconfig").write_bytes(b"[core]\n\tautocrlf = true\n")
+    else:
+        git(source, "config", "core.autocrlf", "true" if checkout == "autocrlf" else "false")
+    if checkout == "attributes":
+        (source / ".gitattributes").write_bytes(b"*.txt text eol=crlf\n")
+    elif checkout == "attributes-added-by-task":
+        (source / "unchanged.txt").write_bytes(b"unchanged\n")
     (source / "file.txt").write_bytes(b"base\n")
-    git(source, "add", "--", "file.txt")
+    git(source, "add", "--all")
     git(source, "commit", "-qm", "base")
+    if checkout == "global-autocrlf":
+        clone = tmp_path / "clone"
+        git(source, "clone", "-q", str(source), str(clone))
+        source = clone
+        assert git(source, "config", "--show-scope", "--get", "core.autocrlf").split() == [b"global", b"true"]
+    elif checkout in {"autocrlf", "attributes"}:
+        (source / "file.txt").unlink()
+        git(source, "checkout", "--", "file.txt")
+    if checkout in {"autocrlf", "global-autocrlf", "attributes"}:
+        assert (source / "file.txt").read_bytes() == b"base\r\n"
+        assert not git(source, "status", "--porcelain=v1")
     manager = WorkspaceManager(tmp_path / "data")
     task = str(uuid4())
     manager.create(source, task)
@@ -81,6 +101,51 @@ def test_squash_uses_fixed_identity_single_parent_and_keeps_task_branch(delivery
     assert (source / "file.txt").read_bytes() == b"task\n"
     assert (source / "nested" / "new" / "result.txt").read_bytes() == b"new directory tree\n"
     assert manager.inspect_task(task) == snapshot
+
+
+@pytest.mark.parametrize("delivery_repo, add_attributes", [
+    pytest.param("autocrlf", False, id="autocrlf"),
+    pytest.param("global-autocrlf", False, id="global-autocrlf"),
+    pytest.param("attributes", False, id="attributes"),
+    pytest.param("attributes-added-by-task", True, id="attributes-added-by-task"),
+], indirect=["delivery_repo"])
+def test_squash_writes_crlf_checkout_and_preserves_binary(delivery_repo, add_attributes):
+    manager, source, task = delivery_repo
+    binary = b"\x00\xffbinary\r\nsecond\n"
+    with manager.writer(task, expected=manager.inspect_task(task)) as worktree:
+        (worktree / "data.bin").write_bytes(binary)
+        if add_attributes:
+            (worktree / ".gitattributes").write_bytes(b"*.txt text eol=crlf\n")
+    snapshot = change_and_validate(manager, task)
+    evidence = manager.delivery_preview(task, "main")
+    result = manager.deliver(task, "squash", approved=True, token=evidence["token"])
+    assert evidence["target_clean"] is True
+    assert result["commit"].encode() == git(source, "rev-parse", "HEAD").strip()
+    assert git(source, "show", "HEAD:file.txt") == b"task\n"
+    assert (source / "file.txt").read_bytes() == b"task\r\n"
+    if add_attributes:
+        assert git(source, "show", "HEAD:unchanged.txt") == b"unchanged\n"
+        assert (source / "unchanged.txt").read_bytes() == b"unchanged\r\n"
+    assert (source / "data.bin").read_bytes() == git(source, "show", "HEAD:data.bin") == binary
+    assert not git(source, "status", "--porcelain=v1")
+    assert manager.inspect_task(task) == snapshot
+
+
+@pytest.mark.parametrize("delivery_repo", ["autocrlf", "attributes"], indirect=True)
+def test_checkout_bytes_changed_after_preview_invalidate_squash(delivery_repo):
+    manager, source, task = delivery_repo
+    change_and_validate(manager, task)
+    # Keep status clean so only the physical bytes reveal the later edit.
+    git(source, "update-index", "--assume-unchanged", "--", "file.txt")
+    evidence = manager.delivery_preview(task, "main")
+    assert evidence["target_clean"] is True
+    before = git(source, "rev-parse", "HEAD")
+    (source / "file.txt").write_bytes(b"base\n")
+    assert not git(source, "status", "--porcelain=v1")
+    with pytest.raises(ForgePilotError, match="delivery_changed"):
+        manager.deliver(task, "squash", approved=True, token=evidence["token"])
+    assert (source / "file.txt").read_bytes() == b"base\n"
+    assert git(source, "rev-parse", "HEAD") == before
 
 
 def test_conflict_stops_before_changing_main_and_survives_restart(delivery_repo):

@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+from tempfile import TemporaryDirectory
 
 from .artifacts.models import (ChangedFile, ChangeSet, DeliveryBundle, ExecutionPlanArtifact,
                                ReviewReport, TaskSpecArtifact, ValidationReport)
@@ -285,6 +286,22 @@ class DeliveryMixin:
         git.run(["check-ref-format", "refs/heads/" + branch])
         return branch
 
+    def _checkout_manifest(self, git, tree):
+        """Hash a clean target checkout, including the attributes in this tree."""
+        # Validate the paths, modes and blob limits before letting Git materialize them.
+        names = set(self._tree_bytes(git, tree))
+        with self.guard.protect(), TemporaryDirectory(dir=self.root) as temporary:
+            scratch = Guard(temporary)
+            checkout = Guard(scratch.mkdir("checkout"))
+            for parent in {Path(name).parent.as_posix() for name in names} - {"."}:
+                checkout.mkdir(parent)
+            git.run(["read-tree", "--reset", "-u", tree], checkout_eol=True, checkout_root=checkout.root,
+                    env={"GIT_INDEX_FILE": str(scratch.root / "index")})
+            files = manifest(checkout.root)
+            if files.keys() != names:
+                _fail("delivery_target", "Target checkout does not contain the complete Git tree")
+            return files
+
     def _delivery_target(self, state, target_branch):
         """Capture complete main bytes even when the user plans an export."""
         git = self._git(state, main=True)
@@ -296,12 +313,11 @@ class DeliveryMixin:
             head = git.run(["rev-parse", "--verify", "--end-of-options", "refs/heads/" + branch + "^{commit}"]).stdout.decode().strip()
         checked_out = git.run(["symbolic-ref", "-q", "--short", "HEAD"], allowed=(0, 1)).stdout.decode().strip() or None
         files = manifest(Path(state["repository_path"]))
-        dirty = bool(git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout)
+        dirty = bool(git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                             checkout_eol=True).stdout)
         # Index flags such as assume-unchanged/skip-worktree can hide real user
-        # edits from status. Clean means the actual bytes equal committed blobs.
-        committed_files = {name: sha256(data).hexdigest()
-                           for name, data in self._tree_bytes(git, main_head).items()}
-        dirty = dirty or files != committed_files
+        # edits. Keep the actual bytes in the preview even when Git reports clean.
+        dirty = dirty or files != self._checkout_manifest(git, main_head)
         if self._head(git) != main_head:
             _fail("delivery_changed", "Target HEAD moved while preparing delivery")
         if not _HASH.fullmatch(head):
@@ -470,8 +486,7 @@ class DeliveryMixin:
         tree = result.stdout.splitlines()[0].decode("ascii") if result.stdout.splitlines() else ""
         if not _HASH.fullmatch(tree):
             _fail("delivery_merge", "Git did not return a verifiable merge tree")
-        merged_files = {name: sha256(data).hexdigest()
-                        for name, data in self._tree_bytes(main, tree).items()}
+        merged_files = self._checkout_manifest(main, tree)
         directories = set()
         for name in merged_files:
             name = validate_relative(name)
@@ -513,28 +528,52 @@ class DeliveryMixin:
     def _publish_squash(self, state, main, target, current, tree, commit, merged_files):
         # read-tree refuses to overwrite files changed since the clean preflight.
         # update-ref publishes only if the selected branch still has its old HEAD.
-        main.run(["read-tree", "-u", "-m", target["commit"], tree])
+        main.run(["read-tree", "-u", "-m", target["commit"], tree], checkout_eol=True)
         checked_out = main.run(["symbolic-ref", "-q", "--short", "HEAD"], allowed=(0, 1)).stdout.decode().strip()
         if checked_out != target["branch"] or self._head(main) != target["commit"]:
             _fail("delivery_changed", "Target changed during delivery; user inspection is required")
         if main.run(["write-tree"]).stdout.decode().strip() != tree:
             _fail("delivery_changed", "Main index changed during delivery; user inspection is required")
+        published_files = manifest(main.root)
+        if published_files != merged_files:
+            self._recheckout_unchanged_blobs(main, target, tree, published_files, merged_files)
+            published_files = manifest(main.root)
+            if published_files != merged_files or main.run(["write-tree"]).stdout.decode().strip() != tree:
+                _fail("delivery_changed", "Main files or index changed during checkout; user inspection is required")
         # Detect non-index external file changes before publishing the commit.
-        if main.run(["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"], allowed=(0, 1)).returncode:
+        if main.run(["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"],
+                    allowed=(0, 1), checkout_eol=True).returncode:
             _fail("delivery_changed", "Main files changed during delivery; user inspection is required")
-        status = main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout
+        status = main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                          checkout_eol=True).stdout
         if any(row[:2] in {b"??", b"!!"} for row in status.split(b"\0") if row):
             _fail("delivery_changed", "Main workspace gained user files during delivery; user inspection is required")
-        published_files = manifest(Path(state["repository_path"]))
-        if published_files != merged_files:
-            _fail("delivery_changed", "Main bytes do not match the merged commit; user inspection is required")
         self._assert_expected(state, current)
         if manifest(Path(state["repository_path"])) != published_files:
             _fail("delivery_changed", "Main files changed before publication; user inspection is required")
         main.run(["update-ref", "refs/heads/" + target["branch"], commit, target["commit"]])
         if (self._head(main) != commit
-                or main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout):
+                or main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                            checkout_eol=True).stdout):
             _fail("delivery_changed", "Delivery outcome requires user inspection")
+
+    @staticmethod
+    def _recheckout_unchanged_blobs(main, target, tree, files, merged_files):
+        # A two-tree checkout skips unchanged blobs, even when new attributes
+        # require different working bytes. Only refresh their exact previewed bytes.
+        if files.keys() != merged_files.keys():
+            _fail("delivery_changed", "Main file inventory changed during delivery")
+        paths = [name for name in files if files[name] != merged_files[name]]
+        changed = set(main.run(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+                                target["commit"], tree, "--"]).stdout.split(b"\0"))
+        if any(files[name] != target["files"].get(name) or name.encode() in changed for name in paths):
+            _fail("delivery_changed", "Main bytes changed during delivery; user inspection is required")
+        for name in paths:
+            if not main.guard.unlink(name, target["files"][name]):
+                _fail("delivery_changed", "Main file disappeared before checkout")
+            # Without --force Git also preserves a file recreated after the checked unlink.
+            main.run(["checkout-index", "--index", "--ignore-skip-worktree-bits", "-z", "--stdin"],
+                     data=name.encode() + b"\0", checkout_eol=True)
 
     def deliver(self, task_id, mode, *, approved, token, bundle=None, operation_id=None):
         from .policy import Capability
