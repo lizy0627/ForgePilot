@@ -18,6 +18,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUrlQuery>
@@ -655,8 +656,9 @@ private slots:
         const auto python = qEnvironmentVariable("FORGEPILOT_TEST_PYTHON", root + "/agent.venv/Scripts/python.exe");
         QVERIFY2(QFileInfo::exists(python), "Set FORGEPILOT_TEST_PYTHON to the existing Python 3.12 environment");
         const auto configPath = directory.filePath("config.json");
+        const QStringList launcher{"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"};
         RuntimeConfigController runtime;
-        runtime.setHelperCommand(python, {"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"}, configPath);
+        runtime.setHelperCommand(python, launcher, configPath);
         Fixture fixture; Ui ui(fixture, 1280, 900, &runtime);
         ui.tasks.setBaseUrl(QUrl("http://127.0.0.1:1")); ui.missions.setBaseUrl(QUrl("http://127.0.0.1:1"));
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
@@ -671,6 +673,11 @@ private slots:
             auto *input = ui.find(name); QVERIFY2(input, qPrintable(name)); input->setProperty("text", value);
             QVERIFY(QMetaObject::invokeMethod(input, "textEdited"));
         }
+        QTcpServer occupied;
+        QVERIFY(occupied.listen(QHostAddress::LocalHost));
+        auto *port = ui.find("runtimePort"); QVERIFY(port);
+        port->setProperty("value", occupied.serverPort());
+        QVERIFY(QMetaObject::invokeMethod(port, "valueModified"));
         auto *key = ui.find("runtimeApiKey"); QVERIFY(key);
         const QString dummyKey = "offline-gui-dummy-key-not-a-real-credential";
         key->setProperty("text", dummyKey); QVERIFY(ui.click("runtimeConfigSave"));
@@ -724,8 +731,28 @@ print(json.dumps(result))
         QCOMPARE(routing.value("chat").toObject().value("model").toString(), "offline-chat");
         QCOMPARE(routing.value("summary").toObject().value("model").toString(), "offline-summary");
         QVERIFY(ui.capture("runtime-configuration-real-helper"));
+        {
+            const auto stop = qScopeGuard([&] {
+                QCOMPARE(QProcess::execute(python, launcher + QStringList{"stop", "--config", configPath}), 0);
+            });
+            QSignalSpy accepted(&runtime, &RuntimeConfigController::restartAccepted);
+            QVERIFY(ui.click("runtimeConfigRestart"));
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 30000);
+            QCOMPARE(accepted.count(), 0);
+            QVERIFY(dialog->property("visible").toBool());
+            QVERIFY(runtime.configured() && runtime.restartAllowed() && runtime.restartRequired());
+            auto *notice = ui.find("runtimeConfigMessage"); QVERIFY(notice && notice->isVisible());
+            QVERIFY2(notice->property("text").toString().contains("端口"), qPrintable(runtime.message()));
+            QVERIFY(config.open(QIODevice::ReadOnly)); QCOMPARE(config.readAll(), bytes); config.close();
+
+            occupied.close();
+            QVERIFY(ui.click("runtimeConfigRestart"));
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 180000);
+            QCOMPARE(accepted.count(), 1);
+            QVERIFY(!runtime.restartRequired());
+        }
         // A Python-generated configuration is reloaded through the same helper,
-        // without checking model endpoints or restarting any real service.
+        // without checking model endpoints.
         QVERIFY(ui.click("runtimeConfigReload")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
         QVERIFY(runtime.configured()); QVERIFY(runtime.hasApiKey());
         QCOMPARE(runtime.fields().value("task_model").toString(), "offline-task");
