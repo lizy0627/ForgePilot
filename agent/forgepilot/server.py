@@ -141,7 +141,7 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
                                  rag_coordinator=rag_coordinator, api_token=local_token,
-                                 development_config=resources.development)
+                                 development_config=resources.development, git_executable=args.git)
                 from .mission_factory import build_mission_workflow
                 app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
                     resources.mission_dependencies(events,

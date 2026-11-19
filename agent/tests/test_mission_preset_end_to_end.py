@@ -182,6 +182,9 @@ async def test_server_explicit_tools_match_preview_frozen_selection_and_build(
             binary, = artifact_root.rglob("public_test.exe")
             cache = (binary.parent / "CMakeCache.txt").read_text(encoding="utf-8")
             assert "CMAKE_BUILD_TYPE:STRING=Release" in cache and "CMAKE_GENERATOR:INTERNAL=Ninja" in cache
+            delivery = await client.post(path + "/delivery", json={"expected_revision": final["current_revision"]})
+            assert delivery.status_code == 200, delivery.text
+            assert delivery.json()["delivery"]["validated"]
     finally:
         stop.set()
         assert await service == 0

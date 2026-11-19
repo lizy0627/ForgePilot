@@ -145,7 +145,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
                model_client_closer=None, rag_coordinator=None, mission_factory=None,
-               mission_stream_max_subscribers=8, api_token=None, development_config=None):
+               mission_stream_max_subscribers=8, api_token=None, development_config=None, git_executable=None):
     if api_token is not None and (not isinstance(api_token, str) or not api_token or not api_token.isascii()):
         raise ValueError("Local API token must be nonempty ASCII")
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
@@ -157,7 +157,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         mcp_disabled=mcp_disabled)
     missions = MissionHost(workflow_factory=mission_factory, runtime=host.runtime,
         capacity=host.capacity, store=host.store, mcp_service=host.mcp_service,
-        mcp_disabled=mcp_disabled, development_config=development_config)
+        mcp_disabled=mcp_disabled, development_config=development_config, git_executable=git_executable)
     mission_streams = MissionEventStream(host.store, heartbeat_seconds=heartbeat_seconds,
                                         max_subscribers=mission_stream_max_subscribers)
 

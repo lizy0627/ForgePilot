@@ -59,7 +59,7 @@ class _SourcePreview:
 class MissionHost:
     def __init__(self, task_host=None, workflow_factory=None, *, runtime=None, capacity=None,
                  store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None,
-                 development_config=None, locked_approval_authority=None):
+                 development_config=None, locked_approval_authority=None, git_executable=None):
         # Positional TaskHost remains an in-process compatibility adapter only.
         # Production composition injects these shared components explicitly.
         self.runtime = runtime if runtime is not None else task_host.runtime
@@ -71,6 +71,7 @@ class MissionHost:
         if dependencies is not None and dependencies.events is not self.store:
             raise ValueError("Mission dependencies must use the host event store")
         self.dependencies = dependencies
+        self.git_executable = dependencies.git_executable if dependencies else git_executable
         self._development_config = development_config or (lambda: dependencies)
         self.locked_approval_authority = locked_approval_authority
         self.graphs = GraphStore(self.store)
@@ -240,7 +241,8 @@ class MissionHost:
         record = self.graphs.workspace_record(task_id)
         if record is None:
             raise ForgePilotError("workspace_state", "Mission has no registered workspace")
-        return WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts)
+        return WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts,
+                                git_executable=self.git_executable)
 
     def _reconcile_delivery(self, task_id):
         """Complete an outbox intent from WorkspaceManager's durable outcome.
