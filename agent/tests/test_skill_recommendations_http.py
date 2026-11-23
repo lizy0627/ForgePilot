@@ -145,10 +145,9 @@ def test_recommendations_follow_review_updates_and_disable(api):
     assert recommend(client, "列表排序颠倒") == []
 
 
-def test_matching_and_zero_results_never_open_project_or_start_external_services(api, qt_draft, monkeypatch):
-    skills, client = api
-    reviewed(skills, qt_draft)
-    spies = []
+def guard_recommendation_boundaries(monkeypatch):
+    """Instrument the same project/model boundaries in the functional test and benchmark."""
+    spies = {}
     for owner, method in (
         (SafeGit, "run"), (subprocess, "Popen"), (Repository, "open"),
         (Repository, "_files"), (Repository, "audit_manifest"),
@@ -159,11 +158,17 @@ def test_matching_and_zero_results_never_open_project_or_start_external_services
         name = f"{owner.__name__}.{method}"
         spy = Mock(name=name, side_effect=AssertionError(name))
         monkeypatch.setattr(owner, method, spy)
-        spies.append(spy)
+        spies[name] = spy
+    return spies
 
+
+def test_matching_and_zero_results_never_open_project_or_start_external_services(api, qt_draft, monkeypatch):
+    skills, client = api
+    reviewed(skills, qt_draft)
+    spies = guard_recommendation_boundaries(monkeypatch)
     assert len(recommend(client, SAVE_TASK)) == 1
     assert recommend(client, "统计源文件数量", project_tags=["Qt"]) == []
-    for spy in spies:
+    for spy in spies.values():
         spy.assert_not_called()
 
 

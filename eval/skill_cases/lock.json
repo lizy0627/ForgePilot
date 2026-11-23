@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "qt-signal-01",
+      "task": "e334080d89e68bfd679d8668cec810ae5ad4a77ead9e912bbd64bb96f3f84d32",
+      "fixture": "109f47359a3ca9957205986d408acad9a1647823330b4ee97b64cc00ffbdf04e",
+      "oracle": "d2fd91f36e95c2720e852695773854f346f8aa187fd4e4fd9ad2cbe0ae46fd79",
+      "solution": "61fa2f5084e11cc84a86e516d3302e25247d693f644a985ac170994ad8673028",
+      "label": "2005e46009c22034d4e07ec44e1239a04d78dd40750d6c3cda394da1e7c90fb6"
+    },
+    {
+      "id": "qt-signal-02",
+      "task": "4a01017371980ccac098ffad2ef366c8889d0e0b3b431aee9b6b862d45844926",
+      "fixture": "3b616d8d2caf141962f0184bbbe9229d46dc07e711837cf4fc51e4adc3a6986e",
+      "oracle": "d2fd91f36e95c2720e852695773854f346f8aa187fd4e4fd9ad2cbe0ae46fd79",
+      "solution": "61fa2f5084e11cc84a86e516d3302e25247d693f644a985ac170994ad8673028",
+      "label": "2005e46009c22034d4e07ec44e1239a04d78dd40750d6c3cda394da1e7c90fb6"
+    },
+    {
+      "id": "qt-list-01",
+      "task": "80b20ac07537efa26c4afaf9b21adaa0a748b1462363ca56ba0a1e0044c2cda5",
+      "fixture": "71d82cef2aaceb8c6e443a008b5ec48f92af8cefde198b94a745fb9e877c7da3",
+      "oracle": "2568de59ab95e68ab751e46cf9fef4e2e1457d56a59fa8e69d7d02b1ad8326b2",
+      "solution": "0df5477518ad72b3d97ccfea8f7bbca700fef9c7bf948aa633c2c4906c14fefd",
+      "label": "73c9a6d0b162e36e0a62c578c8df64a0ccdd1c87b32309a6030ac9bd47b341bf"
+    },
+    {
+      "id": "qt-list-02",
+      "task": "5418cdad22125ae13c348f2a71959ce7df3588ff5ae35e9118cedfa41ead27ba",
+      "fixture": "a655dcb2ae16185da9e88743b2c0f147dc2c47efafafd69deead200352debb9a",
+      "oracle": "2568de59ab95e68ab751e46cf9fef4e2e1457d56a59fa8e69d7d02b1ad8326b2",
+      "solution": "0df5477518ad72b3d97ccfea8f7bbca700fef9c7bf948aa633c2c4906c14fefd",
+      "label": "73c9a6d0b162e36e0a62c578c8df64a0ccdd1c87b32309a6030ac9bd47b341bf"
+    },
+    {
+      "id": "qt-list-03",
+      "task": "5b9b8b90f1b8bb04ecf155dfa451f41da4c9bd7707588e86244ab64e818f2a21",
+      "fixture": "84053795765e072057d788ba9afbc5d93e4d2a68293f17b40bd76a1740ca2b00",
+      "oracle": "2568de59ab95e68ab751e46cf9fef4e2e1457d56a59fa8e69d7d02b1ad8326b2",
+      "solution": "0df5477518ad72b3d97ccfea8f7bbca700fef9c7bf948aa633c2c4906c14fefd",
+      "label": "73c9a6d0b162e36e0a62c578c8df64a0ccdd1c87b32309a6030ac9bd47b341bf"
+    },
+    {
+      "id": "qt-list-04",
+      "task": "277452a3ea5616202d90fe4a0af07760747a79ae0f972336f359563e28792ac6",
+      "fixture": "4e14d94c79222fd082548c2789973373953055d609fc1f887ada6adb28c970dd",
+      "oracle": "2568de59ab95e68ab751e46cf9fef4e2e1457d56a59fa8e69d7d02b1ad8326b2",
+      "solution": "0df5477518ad72b3d97ccfea8f7bbca700fef9c7bf948aa633c2c4906c14fefd",
+      "label": "ee0e6c4e9924abe52298e0053f61a9fc29bb7cf09f710e27b46e840d1ce9839c"
+    },
+    {
+      "id": "qt-list-05",
+      "task": "9b9a7a08f567d8db763cfb0788a5cb1af78ce7c835236b2d6d4d0af7013a43af",
+      "fixture": "2c93dac892acb6434484d87eceba8664046e5a66e6458134378c8f29c9ef6d02",
+      "oracle": "2568de59ab95e68ab751e46cf9fef4e2e1457d56a59fa8e69d7d02b1ad8326b2",
+      "solution": "0df5477518ad72b3d97ccfea8f7bbca700fef9c7bf948aa633c2c4906c14fefd",
+      "label": "ee0e6c4e9924abe52298e0053f61a9fc29bb7cf09f710e27b46e840d1ce9839c"
+    }
+  ]
+}

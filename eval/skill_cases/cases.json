@@ -1,0 +1,37 @@
+[
+  {
+    "id": "qt-list-01",
+    "title": "保存后模型仍显示旧标签",
+    "request": "保存标签成功后，磁盘记录已更新，标签列表仍显示旧值。请使当前窗口立即显示刚保存的文本，其他行保持原值。",
+    "split": "holdout",
+    "relevant": true
+  },
+  {
+    "id": "qt-list-02",
+    "title": "非首行保存后不刷新",
+    "request": "在标签列表中改第一行能立即看到新名称，改第三行后必须关闭再打开才生效。修复这个按行刷新的差异，每次改名只更新当前项。",
+    "split": "holdout",
+    "relevant": true
+  },
+  {
+    "id": "qt-list-03",
+    "title": "委托未收到文本变化",
+    "request": "保存后 DisplayRole 能读到新文本，但依赖 dataChanged 角色列表的委托仍显示旧标签。修复绑定更新，并保留一次保存对应一次通知。",
+    "split": "holdout",
+    "relevant": true
+  },
+  {
+    "id": "qt-list-04",
+    "title": "重新打开后标签丢失",
+    "request": "编辑第二个标签时当前列表立即显示新名称；关掉再打开，列表仍显示旧值且第一行被覆盖。修复重开后的记录，保留当前窗口的刷新行为。",
+    "split": "counterexample",
+    "relevant": false
+  },
+  {
+    "id": "qt-list-05",
+    "title": "空白标签校验",
+    "request": "提交一串空格会清掉标签，随后列表显示空白。请拒绝只含空白的标签并保留旧文本，校验失败时不要发出 dataChanged。",
+    "split": "counterexample",
+    "relevant": false
+  }
+]

@@ -8,30 +8,16 @@ import pytest
 
 from forgepilot.llm import ChatReply
 from forgepilot.process import executable
-from forgepilot.skill_models import SkillDraftContent, SkillDraftData
 
 
 @pytest.fixture
 def qt_draft():
     """Handwritten review fixture for a Qt model/view that still displays the old value."""
-    return SkillDraftData(
-        name="Qt 保存成功后列表仍显示旧值",
-        content=SkillDraftContent(
-            body=(
-                "保存后读取对应模型行的值。若仍是旧值，追踪保存结果如何回写到模型。"
-                "若已是新值，核对 dataChanged 的行区间、角色和视图绑定。"
-                "取得能区分这两条路径的证据后，停止扩展排查，针对该路径验证。"
-            ),
-            summary="先比较保存结果和模型行，再核对视图通知。",
-            triggers=("保存成功，列表未更新", "列表仍显示旧值", "list still shows the old value"),
-            boundaries=("用于 Qt 模型与视图的只读根因分析，结论引用当前仓库证据。",),
-            exclusions=("重复发出信号", "duplicate signal"),
-            keyword_groups=(("dataChanged", "DisplayRole"),),
-            project_tags=("Qt",), task_types=("bug_fix",),
-            stages=("root_cause_analysis",),
-        ),
-        developer_note="私有手记：此判断来自开发者观察，尚未验证修复。",
-    )
+    from forgepilot_eval.reviewed_qt_skill import load_qt_skill
+
+    return load_qt_skill().model_copy(update={
+        "developer_note": "私有手记：此判断来自开发者观察，尚未验证修复。",
+    })
 
 
 def drop_skill_schema(db):
