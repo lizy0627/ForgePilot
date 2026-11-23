@@ -1,5 +1,4 @@
 """Real Windows launcher checks; dummy credentials, no model requests or user DB."""
-import importlib.util
 import asyncio
 import ctypes
 from ctypes import wintypes
@@ -21,11 +20,11 @@ from threading import Thread
 import pytest
 import httpx
 
+import desktop as launcher
+
 ROOT = Path(__file__).resolve().parents[2]
+# Existing integrations can still invoke the original script as a CLI.
 SCRIPT = ROOT / 'scripts/desktop_launcher.py'
-spec = importlib.util.spec_from_file_location('desktop_launcher', SCRIPT)
-launcher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(launcher)
 pytestmark = pytest.mark.skipif(os.name != 'nt', reason='Windows desktop lifecycle')
 KEY = 'offline-launcher-sentinel-not-a-real-key'
 
@@ -719,8 +718,8 @@ def fault_launcher(tmp_path, mode):
     harness.write_text(textwrap.dedent('''\
         import json, subprocess, sys, time
         from pathlib import Path
-        sys.path.insert(0, SCRIPTS)
-        import desktop_launcher as launcher
+        sys.path.insert(0, AGENT_DIR)
+        import desktop as launcher
         launcher.SCRIPT = Path(__file__)
         if MODE in ('delayed_exit', 'no_window', 'cancel'):
             def owned_client(job, log, port, local_token):
@@ -746,7 +745,7 @@ def fault_launcher(tmp_path, mode):
         elif MODE == 'owner_exit':
             launcher.supervise = lambda *args: 9
         raise SystemExit(launcher.main())
-        ''').replace('SCRIPTS', repr(str(SCRIPT.parent))).replace('MODE', repr(mode)), encoding='utf-8')
+        ''').replace('AGENT_DIR', repr(str(ROOT / 'agent'))).replace('MODE', repr(mode)), encoding='utf-8')
     return harness
 
 

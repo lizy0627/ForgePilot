@@ -1,5 +1,4 @@
 """An owned desktop restart validates, freezes admission, then replaces processes."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,13 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import desktop as launcher
 from forgepilot.errors import ForgePilotError
-
-
-ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("desktop_restart_launcher", ROOT / "scripts/desktop_launcher.py")
-launcher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(launcher)
 
 
 class OwnerFixture:

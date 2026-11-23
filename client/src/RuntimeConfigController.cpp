@@ -76,7 +76,7 @@ void RuntimeConfigController::configureHelper(const QString &configPath)
             setHelperCommand(frozen, {}, configPath.isEmpty() ? configurationPath(root) : configPath);
             return;
         }
-        const auto script = directory.filePath("scripts/desktop_launcher.py");
+        const auto script = directory.filePath("agent/desktop.py");
         const auto python = directory.filePath("agent.venv/Scripts/python.exe");
         if (QFileInfo::exists(script) && QFileInfo::exists(python)) {
             setHelperCommand(python, {"-X", "utf8", "-I", script},

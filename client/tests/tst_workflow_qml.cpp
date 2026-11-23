@@ -735,7 +735,7 @@ private slots:
         const auto python = qEnvironmentVariable("FORGEPILOT_TEST_PYTHON", root + "/agent.venv/Scripts/python.exe");
         QVERIFY2(QFileInfo::exists(python), "Set FORGEPILOT_TEST_PYTHON to the existing Python 3.12 environment");
         const auto configPath = directory.filePath("config.json");
-        const QStringList launcher{"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"};
+        const QStringList launcher{"-X", "utf8", "-I", root + "/agent/desktop.py"};
         RuntimeConfigController runtime;
         runtime.setHelperCommand(python, launcher, configPath);
         Fixture fixture; Ui ui(fixture, 1280, 900, &runtime);

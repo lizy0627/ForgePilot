@@ -1,6 +1,7 @@
 """Real owner/named-event restart keeps active work and adopts one saved revision."""
 import asyncio
 from contextlib import contextmanager
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -23,7 +24,7 @@ from test_workspace_manager import committed_repo
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER = ROOT / "scripts/desktop_launcher.py"
+LAUNCHER = ROOT / "agent/desktop.py"
 OLD_KEY = "offline-restart-old-dpapi-credential"
 NEW_KEY = "offline-restart-new-dpapi-credential"
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows owned desktop lifecycle")
@@ -49,8 +50,49 @@ def wait_for(operation, predicate, *, seconds=20):
 def runtime(config):
     try:
         return json.loads(config.with_name("runtime.json").read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, PermissionError, ValueError):
         return {}
+
+
+def test_run_source_file_owns_desktop_until_stopped(tmp_path):
+    local = tmp_path / "local app data"
+    identity = hashlib.sha256(str(ROOT).lower().encode("utf-8")).hexdigest()[:16].upper()
+    config = local / "ForgePilot/launcher" / identity / "config.json"
+    config.parent.mkdir(parents=True)
+    port = free_port()
+    config.write_text(json.dumps({"base_url": "http://127.0.0.1:1/v1", "model": "offline",
+        "port": port, "server_args": ["--database", str(tmp_path / "history.sqlite3")]}), encoding="utf-8")
+    config.with_name("api-key.dpapi").write_text(configuration.protect_launcher_key(OLD_KEY), encoding="ascii")
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("FORGEPILOT_")}
+    environment["LOCALAPPDATA"] = str(local)
+    command = [sys.executable, "-I", str(LAUNCHER)]
+    with subprocess.Popen(command, cwd=tmp_path, env=environment, creationflags=subprocess.CREATE_NO_WINDOW) as owner:
+        try:
+            before = wait_for(lambda: runtime(config), lambda state: state.get("status") == "running")
+            assert before["port"] == port and alive(before["client_pid"])
+            # Running the same file again reuses the original foreground owner.
+            subprocess.run(command, cwd=tmp_path, env=environment, timeout=15, check=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+            assert owner.poll() is None
+            after = runtime(config)
+            assert after["supervisor_pid"] == before["supervisor_pid"]
+            assert after["backend_pid"] == before["backend_pid"]
+            settings = json.loads(config.read_text(encoding="utf-8"))
+            settings["port"] = free_port()
+            config.write_text(json.dumps(settings), encoding="utf-8")
+            restarted = restart_to_revision(config, environment, configuration.configuration_revision(config))
+            assert restarted["port"] == settings["port"] and restarted["backend_pid"] != before["backend_pid"]
+            assert restarted["supervisor_pid"] == before["supervisor_pid"] and owner.poll() is None
+        finally:
+            try:
+                assert invoke("stop", config, environment).returncode == 0
+                assert owner.wait(timeout=15) == 0
+            finally:
+                if owner.poll() is None:
+                    owner.kill()
+    assert runtime(config)["shutdown"] == "graceful"
+    assert not alive(before["client_pid"]) and not alive(before["backend_pid"])
+    assert not alive(restarted["client_pid"]) and not alive(restarted["backend_pid"])
 
 
 def invoke(action, config, environment, *, request=None, timeout=60):

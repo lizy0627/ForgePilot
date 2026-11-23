@@ -19,8 +19,8 @@
             "label": "ForgePilot: 构建并启动",
             "dependsOn": "ForgePilot: 构建客户端",
             "type": "process",
-            "command": "cmd.exe",
-            "args": ["/d", "/c", ".\\Start-ForgePilot.cmd"],
+            "command": "${workspaceFolder}/agent.venv/Scripts/python.exe",
+            "args": ["${workspaceFolder}/agent/desktop.py"],
             "problemMatcher": []
         },
         {
