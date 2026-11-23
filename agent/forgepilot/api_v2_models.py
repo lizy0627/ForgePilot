@@ -9,6 +9,7 @@ MissionID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f
 MissionHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MissionRevision = Annotated[int, Field(ge=1, le=2**63 - 2)]
 MissionNodeID = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")]
+MissionTaskType = Literal["auto", "bug_fix", "feature"]
 
 
 class MissionRequest(BaseModel):
@@ -63,7 +64,7 @@ class MissionSourcePreview(BaseModel):
 class CreateMission(MissionRequest):
     repository_path: str = Field(min_length=1, max_length=4096)
     request: str = Field(min_length=1, max_length=8192)
-    task_type: Literal["auto", "bug_fix", "feature"] = "auto"
+    task_type: MissionTaskType = "auto"
     orchestration_mode: Literal["multi_agent"] = "multi_agent"
     base_ref: str = Field(default="HEAD", min_length=1, max_length=256)
     toolchain_profile: str = Field(default="auto", pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", max_length=128)
@@ -116,6 +117,40 @@ class CreateMission(MissionRequest):
                 or any(char in value for char in ("\x00", "\\", ":"))):
             raise ValueError("Invalid base ref")
         return value
+
+
+class SkillRecommendationRequest(MissionRequest):
+    description: str = Field(min_length=1, max_length=8192)
+    task_type: MissionTaskType = Field(default="auto", description="Auto leaves the task type unspecified.")
+    project_tags: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
+        default_factory=list, max_length=32, description="Known project tags. Omit when unknown.")
+
+    @field_validator("description")
+    @classmethod
+    def nonblank_description(cls, value):
+        return CreateMission.nonblank_request(value)
+
+    @field_validator("project_tags")
+    @classmethod
+    def valid_tags(cls, tags):
+        for tag in tags:
+            tag.encode("utf-8", errors="strict")
+            if not tag.strip() or "\x00" in tag:
+                raise ValueError("Project tags must be nonblank and contain no NUL")
+        return tags
+
+
+class SkillRecommendation(BaseModel):
+    skill_id: str
+    version: int = Field(ge=1)
+    content_sha256: MissionHash
+    name: str
+    summary: str
+    reasons: list[str] = Field(min_length=1)
+
+
+class SkillRecommendations(BaseModel):
+    recommendations: list[SkillRecommendation] = Field(max_length=3)
 
 
 class MissionControl(MissionRequest):

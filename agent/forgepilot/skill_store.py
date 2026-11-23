@@ -1,6 +1,8 @@
 """Reviewed local skills and their private working drafts in one event store."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 import sqlite3
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -12,6 +14,20 @@ from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillIdentit
 
 if TYPE_CHECKING:
     from .sqlite_store import SqliteEventStore
+
+
+@dataclass(frozen=True)
+class SkillMatchMetadata:
+    skill_id: str
+    version: int
+    content_sha256: str
+    name: str
+    summary: str
+    triggers: list[str]
+    exclusions: list[str]
+    keyword_groups: list[list[str]]
+    project_tags: list[str]
+    task_types: list[str]
 
 
 def _draft(row: sqlite3.Row) -> SkillDraft:
@@ -191,7 +207,7 @@ class SkillRepository:
                 content = draft.data.reviewed_content()
             except ValueError:
                 raise ForgePilotError("skill_draft_incomplete",
-                                      "Complete the name, guidance, stages, triggers and boundaries before review") from None
+                                      "Complete the name, guidance, stages, match rules and boundaries before review") from None
 
             base = _identity(db, draft.base_skill_id) if draft.base_skill_id is not None else None
             if base is not None and (base.current_version != draft.base_version or not base.enabled):
@@ -229,6 +245,28 @@ class SkillRepository:
                                  ON (s.skill_id,s.current_version)=(v.skill_id,v.version)
                                  WHERE s.enabled=1 ORDER BY s.skill_id""")
             return [_version(row) for row in rows]
+
+    def list_match_metadata(self) -> list[SkillMatchMetadata]:
+        """Project the enabled, current versions in a single SQLite snapshot."""
+        with self._store.locked_connection() as db:
+            rows = db.execute("""
+                SELECT v.skill_id, v.version, v.content_sha256, v.name,
+                       json_extract(v.content_json,'$.summary') AS summary,
+                       json_extract(v.content_json,'$.triggers','$.exclusions','$.keyword_groups',
+                                    '$.project_tags','$.task_types') AS rules
+                FROM skills s JOIN skill_versions v
+                    ON (s.skill_id,s.current_version)=(v.skill_id,v.version)
+                WHERE s.enabled=1""").fetchall()
+        result = []
+        for row in rows:
+            triggers, exclusions, groups, tags, types = json.loads(row["rules"])
+            summary = row["summary"] or (("适用现象：" + triggers[0])[:256] if triggers else row["name"])
+            result.append(SkillMatchMetadata(
+                skill_id=row["skill_id"], version=row["version"], content_sha256=row["content_sha256"],
+                name=row["name"], summary=summary, triggers=triggers, exclusions=exclusions,
+                keyword_groups=groups or [], project_tags=tags or [], task_types=types or [],
+            ))
+        return result
 
     def disable(self, skill_id: str, *, expected_revision: int) -> SkillIdentity:
         with self._store.transaction() as db:

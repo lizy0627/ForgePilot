@@ -25,7 +25,7 @@ from .api_models import ConversationDetail, ConversationList, ConversationReques
 from .api_models import ConversationDeleted
 from .api_models import MemoryCreate,MemoryUpdate,MemoryRecord,MemoryList,MemoryDeleted,SummaryUpdate,SummaryState
 from .mcp_api import MCPRequestGuard, register_mcp_routes
-from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes
+from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes, register_skill_routes
 from .mission_host import MissionHost
 from .mission_events import MissionEventStream
 from .runtime_control import register_runtime_routes
@@ -252,6 +252,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
     register_mission_routes(app, missions, mission_streams)
+    register_skill_routes(app, host.store.skills)
     register_runtime_routes(app, host)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)

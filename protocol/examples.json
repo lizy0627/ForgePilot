@@ -808,6 +808,38 @@
       "task_id": "11111111-1111-4111-8111-111111111111"
     }
   },
+  "skill_recommendations_empty_response": {
+    "recommendations": []
+  },
+  "skill_recommendations_excluded_request": {
+    "description": "列表仍显示旧值，实际问题是重复发出信号",
+    "task_type": "bug_fix"
+  },
+  "skill_recommendations_request": {
+    "description": "保存成功但列表仍显示旧值",
+    "project_tags": [
+      "Qt"
+    ],
+    "task_type": "bug_fix"
+  },
+  "skill_recommendations_response": {
+    "recommendations": [
+      {
+        "content_sha256": "d408c9d2375c0e929e54f54aba97c85222b538bdbff363cfd64fc9bb5241da4d",
+        "name": "Qt 保存成功后列表仍显示旧值",
+        "reasons": [
+          "命中症状「列表仍显示旧值」",
+          "命中项目标签「Qt」"
+        ],
+        "skill_id": "33333333-3333-4333-8333-333333333333",
+        "summary": "先比较保存结果和模型行，再核对视图通知。",
+        "version": 1
+      }
+    ]
+  },
+  "skill_recommendations_unmatched_request": {
+    "description": "给导出文件增加时间戳"
+  },
   "stale_plan_error": {
     "error": {
       "code": "stale_plan",

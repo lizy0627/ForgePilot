@@ -28,6 +28,20 @@ def test_skill_hash_uses_canonical_json_and_normalized_match_sets(content_fields
     assert SkillContent.model_validate_json(canonical_json_bytes(content)) == content
 
 
+def test_pre_recommendation_content_keeps_exact_hash(content_fields):
+    legacy = {**content_fields, "stages": sorted(content_fields["stages"]),
+              "triggers": sorted(content_fields["triggers"]), "schema_version": 1, "usage_scope": "local_only"}
+    loaded = SkillContent.model_validate_json(canonical_json_bytes(legacy))
+    assert canonical_json_bytes(loaded) == canonical_json_bytes(legacy)
+
+
+def test_keyword_only_skill_round_trips_and_normalizes_combinations(content_fields):
+    fields = {**content_fields, "triggers": [], "keyword_groups": [["view", "Signal"], ["model", "row"]]}
+    content = SkillContent(**fields)
+    assert content == SkillContent(**{**fields, "keyword_groups": [["row", "model"], ["Signal", "view"]]})
+    assert SkillContent.model_validate_json(canonical_json_bytes(content)) == content
+
+
 @pytest.mark.parametrize("field,value", [
     ("body", "Inspect the active filter."),
     ("stages", ["root_cause_analysis"]),
@@ -35,6 +49,10 @@ def test_skill_hash_uses_canonical_json_and_normalized_match_sets(content_fields
     ("boundaries", ["Only for filtered views."]),
     ("exclusions", []),
     ("usage_scope", "allowed_by_policy"),
+    ("keyword_groups", [["model", "role"]]),
+    ("project_tags", ["Qt"]),
+    ("task_types", ["feature"]),
+    ("summary", "Check the active model row."),
 ])
 def test_skill_hash_covers_each_execution_field(content_fields, field, value):
     original = SkillContent(**content_fields)
@@ -69,6 +87,7 @@ def test_incomplete_draft_can_be_saved_but_requires_review_fields():
     {"schema_version": 2}, {"schema_version": True}, {"schema_version": 1.0},
     {"body": " "}, {"body": "a" * 2_001},
     {"stages": ["implementation"]}, {"triggers": []}, {"boundaries": []},
+    {"keyword_groups": [["Qt"]]}, {"keyword_groups": [["Qt", "qt"]]}, {"task_types": ["auto"]},
     {"evidence_refs": []}, {"use_count": 1}, {"created_at": "private"},
 ])
 def test_review_rejects_invalid_or_private_fields(content_fields, extra_fields):

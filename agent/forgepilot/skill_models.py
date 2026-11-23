@@ -1,7 +1,9 @@
 """Editable local drafts and the version-one distributable skill content schema."""
 from __future__ import annotations
 
+from operator import not_
 from typing import Annotated, Literal
+import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -17,6 +19,11 @@ class _SkillModel(BaseModel):
 
 SkillStage = Literal["root_cause_analysis", "impact_test_analysis"]
 SkillPhrase = Annotated[str, Field(min_length=1, max_length=256)]
+KeywordGroup = Annotated[tuple[SkillPhrase, ...], Field(min_length=2, max_length=8)]
+
+
+def normalize_match_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
 def _as_tuple(value):
@@ -33,10 +40,30 @@ class SkillDraftContent(_SkillModel):
     boundaries: tuple[SkillPhrase, ...] = Field(default=(), max_length=16)
     exclusions: tuple[SkillPhrase, ...] = Field(default=(), max_length=16)
     usage_scope: Literal["local_only", "allowed_by_policy"] = "local_only"
+    # Omitting unused extensions preserves the byte identity of existing reviewed
+    # versions and the create-request fingerprint of their source drafts.
+    summary: str = Field(default="", max_length=256, exclude_if=not_)
+    keyword_groups: tuple[KeywordGroup, ...] = Field(default=(), max_length=8, exclude_if=not_)
+    project_tags: tuple[SkillPhrase, ...] = Field(default=(), max_length=16, exclude_if=not_)
+    task_types: tuple[Literal["bug_fix", "feature"], ...] = Field(default=(), max_length=2, exclude_if=not_)
 
-    _arrays = field_validator("stages", "triggers", "boundaries", "exclusions", mode="before")(_as_tuple)
+    _arrays = field_validator("stages", "triggers", "boundaries", "exclusions", "project_tags",
+                              "task_types", mode="before")(_as_tuple)
 
-    @field_validator("stages", "triggers", "exclusions")
+    @field_validator("keyword_groups", mode="before")
+    @classmethod
+    def read_groups(cls, value):
+        return tuple(_as_tuple(group) for group in value) if isinstance(value, (list, tuple)) else value
+
+    @field_validator("keyword_groups")
+    @classmethod
+    def normalize_groups(cls, groups):
+        for group in groups:
+            if len({normalize_match_text(term) for term in group}) < len(group):
+                raise ValueError("Each keyword in a group must be distinct")
+        return tuple(sorted({tuple(sorted(group)) for group in groups}))
+
+    @field_validator("stages", "triggers", "exclusions", "project_tags", "task_types")
     @classmethod
     def normalize_match_sets(cls, values):
         # Matching is independent of stage or phrase order. Keep authored prose
@@ -49,8 +76,13 @@ class SkillContent(SkillDraftContent):
 
     body: str = Field(min_length=1, max_length=2_000)
     stages: tuple[SkillStage, ...] = Field(min_length=1, max_length=2)
-    triggers: tuple[SkillPhrase, ...] = Field(min_length=1, max_length=16)
     boundaries: tuple[SkillPhrase, ...] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def require_match_rule(self):
+        if not self.triggers and not self.keyword_groups:
+            raise ValueError("A reviewed skill requires a symptom phrase or keyword group")
+        return self
 
 
 class SkillEvidenceRef(_SkillModel):

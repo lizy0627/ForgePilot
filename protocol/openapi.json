@@ -3815,6 +3815,105 @@
         "title": "RuntimeStatus",
         "type": "object"
       },
+      "SkillRecommendation": {
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Reasons",
+            "type": "array"
+          },
+          "skill_id": {
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "skill_id",
+          "version",
+          "content_sha256",
+          "name",
+          "summary",
+          "reasons"
+        ],
+        "title": "SkillRecommendation",
+        "type": "object"
+      },
+      "SkillRecommendationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "project_tags": {
+            "description": "Known project tags. Omit when unknown.",
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Project Tags",
+            "type": "array"
+          },
+          "task_type": {
+            "default": "auto",
+            "description": "Auto leaves the task type unspecified.",
+            "enum": [
+              "auto",
+              "bug_fix",
+              "feature"
+            ],
+            "title": "Task Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description"
+        ],
+        "title": "SkillRecommendationRequest",
+        "type": "object"
+      },
+      "SkillRecommendations": {
+        "properties": {
+          "recommendations": {
+            "items": {
+              "$ref": "#/components/schemas/SkillRecommendation"
+            },
+            "maxItems": 3,
+            "title": "Recommendations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recommendations"
+        ],
+        "title": "SkillRecommendations",
+        "type": "object"
+      },
       "SummaryState": {
         "properties": {
           "conversation_id": {
@@ -11877,6 +11976,115 @@
           }
         },
         "summary": "Runtime Status"
+      }
+    },
+    "/api/v2/skills/recommendations": {
+      "post": {
+        "description": "Return up to three enabled, reviewed skills for the task description.\n\nExclusion phrases veto a match. A symptom phrase or a complete keyword group\nqualifies a candidate. Rank by counts of matched symptoms, complete groups and\nproject tags, in that order. Break ties by ascending skill ID.",
+        "operationId": "skill_recommendations_api_v2_skills_recommendations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillRecommendationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillRecommendations"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Skill Recommendations"
       }
     }
   }

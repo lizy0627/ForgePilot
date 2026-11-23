@@ -10,6 +10,7 @@ from forgepilot.api_models import ConversationEvent, EventPayload
 from forgepilot.api_v2_models import (
     CreateMission, MissionApproval, MissionControl, MissionDelivery, MissionErrorResponse,
     MissionResume, MissionResponse, MissionRetry, MissionScopeExpansion,
+    SkillRecommendationRequest, SkillRecommendations,
 )
 from forgepilot.export_protocol import export, generated_protocol
 from forgepilot.mission_events import MissionEvent
@@ -75,6 +76,11 @@ def test_all_generated_protocol_artifacts_have_no_drift(tmp_path):
 def test_v2_request_examples_match_strict_transport_schemas():
     samples = examples()
     for name, model in (
+        ("skill_recommendations_request", SkillRecommendationRequest),
+        ("skill_recommendations_excluded_request", SkillRecommendationRequest),
+        ("skill_recommendations_unmatched_request", SkillRecommendationRequest),
+        ("skill_recommendations_response", SkillRecommendations),
+        ("skill_recommendations_empty_response", SkillRecommendations),
         ("mission_create_request", CreateMission),
         ("mission_approve_request", MissionApproval),
         ("mission_reject_request", MissionApproval),

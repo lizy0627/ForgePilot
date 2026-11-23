@@ -1,4 +1,6 @@
-"""Bounded HTTP adapter for mission application services and durable SSE."""
+"""Bounded HTTP adapter for missions and local skill recommendations."""
+import logging
+
 from fastapi import Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import Headers
@@ -8,10 +10,12 @@ from .api_v2_models import (
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
     MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
     MissionValidation, PreviewMission, MissionSourcePreview, MissionScopeExpansion,
+    SkillRecommendationRequest, SkillRecommendations,
 )
 from .errors import ForgePilotError
 from .mcp import decode
 from .orchestration.models import NodeStatus
+from .skill_recommendations import recommend_skills
 
 
 MAX_MISSION_BODY = 65_536
@@ -80,6 +84,23 @@ class MissionRequestGuard:
             return await receive()
 
         await self.app(scope, replay, send)
+
+
+def register_skill_routes(app, skills):
+    errors = {status: {"model": MissionErrorResponse} for status in (400, 401, 403, 413, 415, 422, 500, 503)}
+
+    @app.post("/api/v2/skills/recommendations", response_model=SkillRecommendations, responses=errors)
+    def skill_recommendations(body: SkillRecommendationRequest):
+        """Return up to three enabled, reviewed skills for the task description.
+
+        Exclusion phrases veto a match. A symptom phrase or a complete keyword group
+        qualifies a candidate. Rank by counts of matched symptoms, complete groups and
+        project tags, in that order. Break ties by ascending skill ID.
+        """
+        matches = recommend_skills(skills, **body.model_dump())
+        logging.getLogger(__name__).info("Skill recommendation count=%d", len(matches),
+                                         extra={"recommendation_count": len(matches)})
+        return {"recommendations": matches}
 
 
 def register_mission_routes(app, host, streams):
