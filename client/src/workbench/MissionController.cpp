@@ -7,6 +7,10 @@
 
 MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
 {
+    m_skillDrafts.setContext(baseUrl(), m_task);
+    const auto updateSkillDraftContext = [this] { m_skillDrafts.setContext(baseUrl(), m_task); };
+    connect(this, &MissionController::missionChanged, this, updateSkillDraftContext);
+    connect(this, &MissionController::baseUrlChanged, this, updateSkillDraftContext);
     m_recommendationTimer.setSingleShot(true);
     m_recommendationTimer.setInterval(250);
     connect(&m_recommendationTimer, &QTimer::timeout, this, [this] {

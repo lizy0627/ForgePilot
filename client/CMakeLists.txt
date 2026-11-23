@@ -28,6 +28,7 @@ add_library(ForgePilotCommunication STATIC
     src/RepositoryModel.h src/RepositoryModel.cpp)
 target_sources(ForgePilotCommunication PRIVATE
     src/workbench/MissionProtocol.h src/workbench/MissionProtocol.cpp
+    src/workbench/SkillDraftClient.h src/workbench/SkillDraftClient.cpp
     src/workbench/WorkbenchListModel.h src/workbench/WorkbenchListModel.cpp
     src/workbench/MissionListModel.h src/workbench/MissionListModel.cpp
     src/workbench/GraphModel.h src/workbench/GraphModel.cpp
@@ -56,6 +57,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppTextField.qml panels/AppTextArea.qml panels/AppComboBox.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
     workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHistory.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
     workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js workbench/WorkflowTheme.js
+    workbench/SkillDraftPanel.qml workbench/SkillDraftEditor.qml
     workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
     workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml
     workbench/ValidationPanel.qml workbench/ReviewPanel.qml workbench/DeliveryPanel.qml

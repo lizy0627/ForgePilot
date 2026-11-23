@@ -1,6 +1,7 @@
 #include "AgentApiClient.h"
 #include "JsonHttp.h"
 #include "workbench/MissionProtocol.h"
+#include "workbench/SkillDraftClient.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QtTest>
@@ -46,6 +47,139 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void skillDraftEditingContract() {
+        Source source;
+        SkillDraftClient api;
+        api.setContext(source.url(), A);
+        QSignalSpy ok(&api, &SkillDraftClient::succeeded), errors(&api, &SkillDraftClient::failed);
+        const auto draft = example("skill_draft_create_response");
+        const auto id = draft.value("draft_id").toString();
+        const auto skill = example("skill_version_detail_response").value("skill_id").toString();
+        const QByteArray draftPath = "/api/v2/skill-drafts/" + id.toUtf8();
+        const QByteArray skillPath = "/api/v2/skills/" + skill.toUtf8();
+        const auto save = example("skill_draft_save_request");
+        auto changes = save.toVariantMap();
+        changes.remove("expected_revision");
+        auto check = [&](quint64 serial, const QByteArray &method, const QByteArray &path,
+                         const QJsonObject &body, const QString &response, int status = 200) {
+            QTRY_COMPARE_WITH_TIMEOUT(source.requests.size(), 1, 3000);
+            const auto call = source.requests.takeFirst();
+            QCOMPARE(call.path, path);
+            QCOMPARE(call.method, method);
+            QCOMPARE(call.body, body);
+            const auto reply = example(response);
+            Source::json(call, reply, status);
+            QTRY_COMPARE_WITH_TIMEOUT(ok.size(), 1, 3000);
+            const auto args = ok.takeFirst();
+            QCOMPARE(args.at(0).toULongLong(), serial);
+            QCOMPARE(args.at(1).toMap(), reply.toVariantMap());
+        };
+        const auto key = api.newRequestId();
+        QVERIFY(key != api.newRequestId());
+        check(api.listDrafts(), "GET", "/api/v2/skill-drafts?source_mission_id=" + A.toUtf8() + "&limit=20&offset=0",
+              {}, "skill_draft_page_response");
+        check(api.listAllDrafts(20), "GET", "/api/v2/skill-drafts?limit=20&offset=20", {}, "skill_draft_page_response");
+        check(api.createDraft("手记", "manual", key), "POST", "/api/v2/missions/" + A.toUtf8() + "/skill-drafts",
+              {{"developer_note", "手记"}, {"generation_mode", "manual"}, {"request_id", key}}, "skill_draft_create_response", 201);
+        check(api.getDraft(id), "GET", draftPath, {}, "skill_draft_detail_response");
+        check(api.saveDraft(id, 1, changes), "PATCH", draftPath, save, "skill_draft_save_response");
+        check(api.regenerate(id, 2, key), "POST", draftPath + "/regenerate", {{"expected_revision", 2}, {"request_id", key}},
+              "skill_draft_create_response", 202);
+        check(api.publish(id, 2, key), "POST", draftPath + "/publish-local",
+              {{"expected_revision", 2}, {"request_id", key}}, "skill_publish_local_response");
+        check(api.listSkills(), "GET", "/api/v2/skills?limit=20&offset=0", {}, "skill_page_response");
+        check(api.getVersion(skill, 1), "GET", skillPath + "/versions/1", {}, "skill_version_detail_response");
+        check(api.revise(skill, 1, key), "POST", skillPath + "/drafts",
+              {{"version", 1}, {"request_id", key}}, "skill_revision_draft_response", 201);
+        check(api.disable(skill, 1), "PATCH", skillPath, example("skill_disable_request"), "skill_disable_response");
+        QVERIFY(errors.isEmpty());
+
+        api.saveDraft(id, 1, changes);
+        QTRY_COMPARE(source.requests.size(), 1);
+        Source::json(source.requests.takeFirst(), example("skill_save_conflict_error"), 409);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.takeFirst().at(2).toString(), "skill_revision_conflict");
+        api.listDrafts();
+        QTRY_COMPARE(source.requests.size(), 1);
+        Source::json(source.requests.takeFirst(), {{"detail", "Not Found"}}, 404);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.takeFirst().at(2).toString(), "skill_api_unavailable");
+        api.listDrafts();
+        QTRY_COMPARE(source.requests.size(), 1);
+        Source::json(source.requests.takeFirst(), {{"error", QJsonObject{{"code", "route_not_found"}, {"message", "Not Found"},
+            {"details", QJsonArray{}}, {"task_id", QJsonValue::Null}}}}, 404);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.takeFirst().at(2).toString(), "skill_api_unavailable");
+        QVERIFY(ok.isEmpty());
+    }
+    void skillDraftIsolation() {
+        Source first, second;
+        SkillDraftClient api;
+        api.setContext(first.url(), A);
+        QSignalSpy ok(&api, &SkillDraftClient::succeeded), errors(&api, &SkillDraftClient::failed);
+        const auto page = example("skill_draft_page_response");
+        const auto emptyPage = QJsonObject{{"drafts", QJsonArray{}}, {"next_offset", QJsonValue::Null}};
+        const auto windowOne = api.listDrafts();
+        QTRY_COMPARE(first.requests.size(), 1);
+        const auto windowTwo = api.listDrafts();
+        QVERIFY(windowTwo != windowOne);
+        QTRY_COMPARE(first.requests.size(), 2);
+        Source::json(first.requests.last(), emptyPage);
+        QTRY_COMPARE(ok.size(), 1);
+        QCOMPARE(ok.last()[0].toULongLong(), windowTwo);
+        Source::json(first.requests.first(), page);
+        QTRY_COMPARE(ok.size(), 2);
+        QCOMPARE(ok.last()[0].toULongLong(), windowOne);
+        first.requests.clear();
+        ok.clear();
+
+        api.listDrafts();
+        QTRY_COMPARE(first.requests.size(), 1);
+        api.setContext(first.url(), B);
+        Source::json(first.requests.takeFirst(), page);
+        api.listDrafts();
+        QTRY_COMPARE(first.requests.size(), 1);
+        api.setContext(second.url(), A);
+        Source::json(first.requests.takeFirst(), emptyPage);
+        const auto current = api.listDrafts();
+        QTRY_COMPARE(second.requests.size(), 1);
+        Source::json(second.requests.takeFirst(), page);
+        QTRY_COMPARE(ok.size(), 1);
+        QCOMPARE(ok.first()[0].toULongLong(), current);
+        QVERIFY(errors.isEmpty());
+
+        api.setContext(second.url(), B);
+        api.listDrafts();
+        QTRY_COMPARE(second.requests.size(), 1);
+        Source::json(second.requests.takeFirst(), page); // A's records in B's list.
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first()[2].toString(), "invalid_response");
+        QCOMPARE(ok.size(), 1);
+    }
+    void skillDraftHistoricalEvent() {
+        Source source;
+        SkillDraftClient api;
+        api.setContext(source.url(), A);
+        QSignalSpy ok(&api, &SkillDraftClient::succeeded), errors(&api, &SkillDraftClient::failed);
+        const auto id = A + ":9";
+        const auto serial = api.getSourceEvent(id);
+        QTRY_COMPARE(source.requests.size(), 1);
+        const auto call = source.requests.takeFirst();
+        QCOMPARE(call.path, "/api/v2/missions/" + A.toUtf8() + "/events");
+        QVERIFY(call.headers.toLower().contains("last-event-id: " + A.toUtf8() + ":8"));
+        QJsonObject event{{"event_id", id}, {"task_id", A}, {"task_revision", 11}, {"event_type", "task.completed"},
+            {"timestamp", "2026-10-27T08:00:00Z"}, {"actor", QJsonValue::Null}, {"node_id", QJsonValue::Null},
+            {"data", QJsonObject{}}};
+        Source::stream(call, "retry: 1000\r\n\r\nid: " + id.toUtf8() + "\r\nevent: task.completed\r\ndata: "
+            + QJsonDocument(event).toJson(QJsonDocument::Compact) + "\r\n\r\n", false);
+        QTRY_COMPARE(ok.size(), 1);
+        QCOMPARE(ok.first().at(0).toULongLong(), serial);
+        QCOMPARE(ok.first().at(1).toMap(), event.toVariantMap());
+        api.getSourceEvent(B + ":9");
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first().at(2).toString(), "invalid_request");
+        QVERIFY(source.requests.isEmpty());
+    }
     void skillRecommendationContract() {
         const QString op = "mission.recommendations";
         const auto request = example("skill_recommendations_request");

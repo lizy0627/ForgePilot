@@ -5,6 +5,7 @@
 #include "DeliveryController.h"
 #include "MissionSnapshotLoader.h"
 #include "MissionListModel.h"
+#include "SkillDraftClient.h"
 #include "GraphModel.h"
 #include "ArtifactModel.h"
 #include "EvidenceModel.h"
@@ -34,6 +35,7 @@ class MissionController : public QObject {
     Q_PROPERTY(QVariantMap missionSkills READ missionSkills NOTIFY missionSkillsChanged)
     Q_PROPERTY(bool missionSkillsLoading READ missionSkillsLoading NOTIFY missionSkillsChanged)
     Q_PROPERTY(QString missionSkillsError READ missionSkillsError NOTIFY missionSkillsChanged)
+    Q_PROPERTY(SkillDraftClient* skillDrafts READ skillDrafts CONSTANT)
     Q_PROPERTY(bool busy READ busy NOTIFY availabilityChanged)
     Q_PROPERTY(bool synchronized READ synchronized NOTIFY availabilityChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
@@ -74,6 +76,7 @@ public:
     QVariantMap missionSkills() const { return m_missionSkills.toVariantMap(); }
     bool missionSkillsLoading() const { return m_missionSkillsRequest != 0; }
     QString missionSkillsError() const { return m_missionSkillsError; }
+    SkillDraftClient *skillDrafts() { return &m_skillDrafts; }
     bool busy() const { return m_mutation || m_approval.busy() || m_delivery.busy(); }
     bool synchronized() const { return m_synchronized; }
     QString error() const { return m_error; }
@@ -148,6 +151,7 @@ private:
     AgentApiClient m_api;
     AgentApiClient m_historyApi;
     AgentApiClient m_creationApi;
+    SkillDraftClient m_skillDrafts;
     MissionSnapshotLoader m_loader;
     SseClient m_sse;
     MissionListModel m_missions;

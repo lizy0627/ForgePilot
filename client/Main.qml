@@ -125,6 +125,12 @@ ApplicationWindow {
             ActionButton { objectName: "agentWorkbenchModeButton"; text: "Agent 工作台"; checked: window.agentMode; Accessible.name: "Agent 工作台模式"; Accessible.checkable: true; Accessible.checked: checked
                 onClicked: { window.agentMode = true; window.conversations.mode = "chat" } }
             Item { Layout.fillWidth: true }
+            ActionButton {
+                objectName: "workbenchSkillLibraryButton"
+                text: "本机技能库"; flat: true
+                visible: window.agentMode && !!workflowLoader.item
+                onClicked: workflowLoader.item.openSkillLibrary()
+            }
             ActionButton { objectName: "workbenchSettingsButton"; text: "设置"; flat: true; visible: window.agentMode; onClicked: settingsDialog.open() }
             Label { visible: !window.agentMode && window.width >= 1080; text: "只读问答 · 不执行代码修改"; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm }
         }

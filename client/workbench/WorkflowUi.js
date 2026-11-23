@@ -32,6 +32,17 @@ function idOf(record) { return record ? (record.nodeId || record.node_id || "") 
 function artifactId(record) { return record.artifactId || record.artifact_id || ""; }
 function artifactType(record) { return record.artifactType || record.artifact_type || ""; }
 
+function skillMatchDetails(content) {
+    var lines = [];
+    if (content.summary) lines.push("推荐摘要 · " + content.summary);
+    if (content.keyword_groups && content.keyword_groups.length)
+        lines.push("关键词组 · " + content.keyword_groups.map(function(group) { return group.join(" + "); }).join("、"));
+    if (content.exclusions && content.exclusions.length) lines.push("排除条件 · " + content.exclusions.join("、"));
+    if (content.project_tags && content.project_tags.length) lines.push("项目标签 · " + content.project_tags.join("、"));
+    if (content.task_types && content.task_types.length) lines.push("任务类型 · " + content.task_types.join("、"));
+    return lines.join("\n");
+}
+
 // Persisted Artifacts are immutable. Their identity and verified content hash
 // describe the complete reader payload without serializing large Diff/log text.
 function sameArtifacts(current, next) {

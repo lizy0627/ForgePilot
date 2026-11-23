@@ -927,6 +927,178 @@ print(json.dumps(result))
         QCOMPARE(ui.mcp.draft().value("modes").toList(), QVariantList{"task"});
         QVERIFY(ui.mcp.canSave());
     }
+    void terminalSkillDraftFromHistory_data()
+    {
+        QTest::addColumn<QString>("status");
+        QTest::newRow("success") << QString("succeeded");
+        QTest::newRow("failure") << QString("failed");
+        QTest::newRow("cancelled") << QString("cancelled");
+    }
+    void terminalSkillDraftFromHistory()
+    {
+        QFETCH(QString, status);
+        Fixture fixture;
+        fixture.setPhase(status, "");
+        const auto examples = fixtureJson("protocol/examples.json");
+        auto draft = examples.value("skill_draft_create_response").toObject();
+        draft["source_mission_id"] = MissionId;
+        const QString note = "Check the row value before inspecting view notifications.";
+        QJsonObject create, patch;
+        bool sourceFilter = false;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path.startsWith("/api/v2/missions?")) {
+                Source::json(request, {{"items", QJsonArray{fixture.mission}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            } else if (request.path.startsWith("/api/v2/skill-drafts?")) {
+                sourceFilter = QUrlQuery(QUrl::fromEncoded(request.path)).queryItemValue("source_mission_id") == MissionId;
+                Source::json(request, {{"drafts", QJsonArray{}}, {"next_offset", QJsonValue::Null}});
+            } else if (request.path == "/api/v2/missions/" + MissionId.toUtf8() + "/skill-drafts") {
+                create = request.body;
+                auto data = draft.value("data").toObject();
+                data["developer_note"] = create.value("developer_note");
+                draft["data"] = data;
+                Source::json(request, draft, 201);
+            } else if (request.path == "/api/v2/skill-drafts/" + draft["draft_id"].toString().toUtf8()) {
+                if (request.method == "PATCH") {
+                    patch = request.body;
+                    Source::json(request, examples.value("skill_save_conflict_error").toObject(), 409);
+                } else Source::json(request, draft);
+            } else return false;
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QTRY_VERIFY(ui.find("missionTaskRow", "taskId", MissionId));
+        QVERIFY(ui.click(ui.find("missionTaskRow", "taskId", MissionId)));
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowExtractSkillButton"));
+        QTRY_VERIFY(sourceFilter);
+        QTRY_VERIFY(ui.find("skillDraftNote") && ui.find("skillDraftNote")->isVisible());
+        ui.find("skillDraftNote")->setProperty("text", note);
+        QVERIFY(ui.click("skillDraftCreateManual"));
+        QTRY_COMPARE(create.value("developer_note").toString(), note);
+        QCOMPARE(create.value("generation_mode").toString(), QString("manual"));
+        const QString edited = "Inspect the model row";
+        QTRY_VERIFY(ui.find("skillDraftName") && ui.find("skillDraftName")->isVisible());
+        ui.find("skillDraftName")->setProperty("text", edited);
+        QVERIFY(ui.click("skillDraftSave"));
+        QTRY_COMPARE(patch.value("name").toString(), edited);
+        QCOMPARE(patch.value("expected_revision").toInt(), 1);
+        QTRY_VERIFY(ui.find("skillDraftError") && ui.find("skillDraftError")->isVisible());
+        QVERIFY(ui.find("skillDraftError")->property("text").toString().contains("冲突"));
+        QCOMPARE(ui.find("skillDraftName")->property("text").toString(), edited);
+        QVERIFY(ui.missions.error().isEmpty());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void retrySkillGenerationKeepsDeveloperEdit()
+    {
+        Fixture fixture;
+        fixture.setPhase("succeeded", "");
+        const auto examples = fixtureJson("protocol/examples.json");
+        auto draft = examples.value("skill_generate_accepted_response").toObject();
+        draft["source_mission_id"] = MissionId;
+        const auto path = "/api/v2/skill-drafts/" + draft.value("draft_id").toString().toUtf8();
+        const auto completed = [&](const QString &example) {
+            auto result = draft;
+            auto attempt = examples.value(example).toObject();
+            auto data = draft.value("data").toObject();
+            data["generation_status"] = attempt.value("status");
+            result["data"] = data;
+            result["latest_attempt"] = attempt;
+            return result;
+        };
+        int retries = 0;
+        Request pendingPoll;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path.startsWith("/api/v2/skill-drafts?"))
+                Source::json(request, {{"drafts", QJsonArray{}}, {"next_offset", QJsonValue::Null}});
+            else if (request.path == "/api/v2/missions/" + MissionId.toUtf8() + "/skill-drafts")
+                Source::json(request, draft, 202);
+            else if (request.path == path + "/regenerate") {
+                ++retries;
+                Source::json(request, draft, 202);
+            } else if (request.path == path && !retries)
+                Source::json(request, completed("skill_generation_insufficient_response"));
+            else if (request.path == path) pendingPoll = request;
+            else return false;
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowExtractSkillButton"));
+        QTRY_VERIFY(ui.find("skillDraftCreateModel") && ui.find("skillDraftCreateModel")->isEnabled());
+        QVERIFY(ui.click("skillDraftCreateModel"));
+        QTRY_VERIFY(ui.find("skillDraftStatus")->property("text").toString().contains("起草失败"));
+        QVERIFY(ui.click("skillDraftRetry"));
+        QTRY_COMPARE(retries, 1);
+        QTRY_VERIFY(pendingPoll.socket);
+        const QString localEdit = "Keep the developer diagnosis";
+        QVERIFY(ui.find("skillDraftBody")->isEnabled());
+        ui.find("skillDraftBody")->setProperty("text", localEdit);
+        const auto ready = completed("skill_generation_ready_response");
+        Source::json(pendingPoll, ready);
+        const auto suggestion = ready["latest_attempt"].toObject()["suggestion"].toObject();
+        QTRY_VERIFY(ui.find("skillDraftSuggestion")->isVisible());
+        QVERIFY(ui.find("skillDraftSuggestion")->property("text").toString().contains(suggestion["conclusion"].toString()));
+        QCOMPARE(ui.find("skillDraftBody")->property("text").toString(), localEdit);
+        QVERIFY(ui.find("skillDraftSave")->isEnabled());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void reopenedSkillEditorIgnoresEarlierResponse()
+    {
+        Fixture fixture;
+        fixture.setPhase("failed", "");
+        Request held;
+        int listings = 0;
+        fixture.intercept = [&](const Request &request) {
+            if (!request.path.startsWith("/api/v2/skill-drafts?")) return false;
+            if (++listings == 1) held = request;
+            else Source::json(request, {{"drafts", QJsonArray{}}, {"next_offset", QJsonValue::Null}});
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowExtractSkillButton"));
+        QTRY_VERIFY(held.socket);
+        // Close the editor while the read is still in flight. Both openings
+        // share the same controller, backend and Mission identity.
+        ui.window->setProperty("agentMode", false);
+        QTRY_VERIFY(!ui.find("skillDraftNote") || !ui.find("skillDraftNote")->isVisible());
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QVERIFY(ui.click("workflowExtractSkillButton"));
+        QTRY_COMPARE(listings, 2);
+        QTRY_VERIFY(ui.find("skillDraftCreateManual") && ui.find("skillDraftCreateManual")->isEnabled());
+        const QString note = "Second editor note";
+        ui.find("skillDraftNote")->setProperty("text", note);
+        Source::json(held, {{"detail", "Not Found"}}, 404);
+        QTRY_VERIFY(!held.socket);
+        QCOMPARE(ui.find("skillDraftNote")->property("text").toString(), note);
+        QVERIFY(!ui.find("skillDraftError") || !ui.find("skillDraftError")->isVisible());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void skillLibraryOnLegacyBackend()
+    {
+        Fixture fixture;
+        fixture.intercept = [](const Request &request) {
+            if (!request.path.startsWith("/api/v2/skills?") && request.path != "/api/v2/skills") return false;
+            Source::json(request, {{"detail", "Not Found"}}, 404);
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QVERIFY(ui.click("workbenchSkillLibraryButton"));
+        QTRY_VERIFY(ui.find("skillDraftError") && ui.find("skillDraftError")->isVisible());
+        QVERIFY(ui.find("skillDraftError")->property("text").toString().contains("后端"));
+        QVERIFY(ui.missions.error().isEmpty());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void skillChoicesFromMainSubmitOnlyCheckedVersions_data()
     {
         QTest::addColumn<bool>("selectSkill");
@@ -1757,6 +1929,93 @@ print(json.dumps(result))
         ui.missions.approval()->approve();
         QTest::qWait(30);
         QCOMPARE(fixture.approvals.size(), 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void missionSkillsFromMain()
+    {
+        const QString url = qEnvironmentVariable("FORGEPILOT_SKILLS_URL");
+        if (url.isEmpty()) QSKIP("Run client/tests/run_mission_skills_integration.py for the local backend");
+        const QString phase = qEnvironmentVariable("FORGEPILOT_SKILLS_PHASE");
+        Ui ui{QUrl(url)};
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        if (phase == "publish") {
+            const auto source = qEnvironmentVariable("FORGEPILOT_SKILLS_SOURCE_ID");
+            QTRY_VERIFY(ui.find("missionTaskRow", "taskId", source));
+            QVERIFY(ui.click(ui.find("missionTaskRow", "taskId", source)));
+            QTRY_VERIFY(ui.missions.synchronized() && ui.missions.snapshot().value("status") == "cancelled");
+            QVERIFY(ui.click("workflowExtractSkillButton"));
+            auto fill = [&](const QString &field, const QString &value) {
+                auto *input = ui.find(field);
+                if (!ui.click(input)) return false;
+                QTest::keyClick(ui.window, Qt::Key_A, Qt::ControlModifier);
+                for (const QChar ch : value) QTest::keyClick(ui.window, ch.toLatin1());
+                return input->property("text").toString() == value;
+            };
+            QTRY_VERIFY(ui.find("skillDraftNote") && ui.find("skillDraftNote")->isVisible());
+            QVERIFY(fill("skillDraftNote", "Checked at cancellation."));
+            QTRY_VERIFY(ui.find("skillDraftCreateManual") && ui.find("skillDraftCreateManual")->isEnabled());
+            QVERIFY(ui.click("skillDraftCreateManual"));
+            QTRY_VERIFY(ui.find("skillDraftName") && ui.find("skillDraftName")->isVisible());
+            // Locate a specific JSON pointer in the immutable TaskSpec. The
+            // runner reads the expected ID and value independently over HTTP.
+            const auto locator = qEnvironmentVariable("FORGEPILOT_SKILLS_SOURCE_ARTIFACT") + "/objective";
+            auto *pointer = ui.find("skillDraftEvidence", "text", QStringLiteral("来源记录 · ") + locator);
+            QVERIFY(ui.click(pointer));
+            QTRY_VERIFY(ui.find("skillDraftSourceRecord") && ui.find("skillDraftSourceRecord")->isVisible());
+            QCOMPARE(ui.find("skillDraftSourceRecord")->property("text").toString(),
+                source + "\n\n" + locator + "\n\n" + qEnvironmentVariable("FORGEPILOT_SKILLS_SOURCE_VALUE"));
+            QTest::keyClick(ui.window, Qt::Key_Escape);
+            QTRY_VERIFY(!ui.find("skillDraftSourceRecord") || !ui.find("skillDraftSourceRecord")->isVisible());
+            QTest::keyClick(ui.window, Qt::Key_Escape);
+            QTRY_VERIFY(!ui.find("skillDraftName") || !ui.find("skillDraftName")->isVisible());
+            QVERIFY(ui.click("workflowExtractSkillButton"));
+            QTRY_VERIFY(ui.find("skillDraftListItem") && ui.find("skillDraftListItem")->isEnabled());
+            QVERIFY(ui.click("skillDraftListItem"));
+            QTRY_VERIFY(ui.find("skillDraftObservation") && ui.find("skillDraftObservation")->isVisible());
+            QCOMPARE(ui.find("skillDraftObservation")->property("text").toString(), QString("Checked at cancellation."));
+            QVERIFY(fill("skillDraftName", "Clamp investigation"));
+            QVERIFY(fill("skillDraftTriggers", "negative inputs"));
+            QVERIFY(fill("skillDraftBody", "Check the value before clamping."));
+            QVERIFY(fill("skillDraftBoundaries", "Only signed input validation."));
+            auto *rootStage = ui.find("skillDraftRootStage");
+            QVERIFY(rootStage);
+            if (!rootStage->property("checked").toBool()) QVERIFY(ui.click(rootStage));
+            QVERIFY(ui.click("skillDraftSave"));
+            QTRY_VERIFY(ui.find("skillDraftPublish") && ui.find("skillDraftPublish")->isEnabled());
+            QVERIFY(ui.click("skillDraftPublish"));
+            QTRY_VERIFY(ui.find("skillDraftPublishedVersion") && ui.find("skillDraftPublishedVersion")->isVisible());
+        } else {
+            QVERIFY(phase == "selected" || phase == "zero");
+            const bool selected = phase == "selected";
+            ui.find("missionRequestInput")->setProperty("text", "Clamp negative inputs");
+            ui.find("missionRepositoryInput")->setProperty("text", qEnvironmentVariable("FORGEPILOT_SKILLS_REPO"));
+            ui.find("missionTaskType")->setProperty("currentIndex", 1);
+            QTRY_VERIFY(ui.find("missionSkillChoice") && ui.find("missionSkillChoice")->isVisible());
+            QVERIFY(!ui.find("missionSkillChoice")->property("checked").toBool());
+            QVERIFY(ui.click("missionPreviewButton"));
+            QTRY_VERIFY_WITH_TIMEOUT(ui.missions.creationReady(), 20000);
+            QTRY_VERIFY(ui.find("missionSkillChoice") && ui.find("missionSkillChoice")->isEnabled());
+            auto *choice = ui.find("missionSkillChoice");
+            QVERIFY(choice->property("text").toString().contains("Clamp investigation"));
+            QVERIFY(!choice->property("checked").toBool());
+            if (selected) {
+                QVERIFY(ui.click(choice));
+                QVERIFY(choice->property("checked").toBool());
+            }
+            QVERIFY(ui.click("missionCreateButton"));
+            QTRY_VERIFY_WITH_TIMEOUT(ui.missions.approval()->available() && ui.missions.synchronized(), 30000);
+            QVERIFY(ui.click("workflowSkillHistoryButton"));
+            auto *history = ui.find("missionSkillHistoryText");
+            QVERIFY(history);
+            QTRY_VERIFY(history->property("text").toString().contains(selected
+                ? QStringLiteral("已提供给模型 · 分析问题根因") : QStringLiteral("创建此任务时未选择技能")));
+            if (selected)
+                QVERIFY(history->property("text").toString().contains(qEnvironmentVariable("FORGEPILOT_SKILLS_HASH")));
+        }
+        QFile receipt(qEnvironmentVariable("FORGEPILOT_SKILLS_RECEIPT"));
+        QVERIFY(!ui.missions.taskId().isEmpty() && receipt.open(QIODevice::WriteOnly));
+        QCOMPARE(receipt.write(ui.missions.taskId().toUtf8()), ui.missions.taskId().size());
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void scopeExpansionFromMain()

@@ -30,6 +30,8 @@ Item {
     readonly property bool historyVisible: compactHistory ? historyDrawer.visible : !historyCollapsed
     readonly property bool compactLayout: workspace.width < 960
     readonly property string repositoryPath: mission.snapshot.repository_path || ""
+    readonly property bool terminalTask: ["succeeded", "completed", "failed", "cancelled", "skipped"].indexOf(mission.status) >= 0
+    function openSkillLibrary() { draftPanel.showLibrary() }
     function toggleHistory() {
         if (compactHistory) {
             if (historyDrawer.visible) historyDrawer.close()
@@ -42,6 +44,7 @@ Item {
     onVisibleChanged: if (!visible) {
         if (historyDrawer) historyDrawer.close()
         if (skillHistory) skillHistory.close()
+        if (draftPanel) draftPanel.close()
     }
     readonly property string attentionNodeId: {
         for (var i = 0; i < nodeRecords.length; ++i)
@@ -286,6 +289,21 @@ Item {
             title: "工具详情全文"; text: toolPreview.text; monospace: false; maximumHeight: 120
         }
         Rectangle { visible: root.demandCollapsed; Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
+        RowLayout {
+            visible: root.demandCollapsed && root.terminalTask
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spaceXl; Layout.rightMargin: Theme.spaceLg
+            Layout.topMargin: Theme.spaceSm; Layout.bottomMargin: Theme.spaceSm
+            Label {
+                Layout.fillWidth: true
+                text: "任务结果 · " + (Flow.statusLabels[root.mission.status] || W.label(root.mission.status))
+                color: Theme.text; font.weight: Font.DemiBold
+            }
+            Controls.ActionButton {
+                objectName: "workflowExtractSkillButton"; text: "提炼为技能"
+                onClicked: draftPanel.showSource()
+            }
+        }
         Rectangle {
             visible: !!root.mission.error || (root.hasTask && !root.mission.synchronized)
             Layout.fillWidth: true; implicitHeight: connectionRow.implicitHeight + Theme.spaceSm * 2; color: Theme.dangerFill
@@ -351,6 +369,11 @@ Item {
         sequence: "Escape"
         enabled: root.visible && root.hasTask && (root.detailsVisible || root.taskCenterExpanded)
         onActivated: { if (root.detailsVisible) root.closeDetails(); else root.taskCenterExpanded = false }
+    }
+    SkillDraftPanel {
+        id: draftPanel; mission: root.mission
+        width: Math.min(740, root.width - Theme.spaceLg * 2)
+        height: Math.min(800, root.height - Theme.spaceLg * 2)
     }
     Dialog {
         id: skillHistory; objectName: "missionSkillHistoryDialog"

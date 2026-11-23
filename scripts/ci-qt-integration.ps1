@@ -4,10 +4,7 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $python = Join-Path $root 'agent.venv\Scripts\python.exe'
 $runner = Join-Path $root 'client\tests\run_backend_integration.py'
-$binary = Join-Path $root 'client\build\Release\ForgePilotBackendTests.exe'
-foreach ($path in @($python, $runner, $binary)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing Qt integration input: $path" }
-}
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Missing Qt integration input: $python" }
 if ($env:CI -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'local-env.cmd'))) {
     throw 'CI must not read personal local-env.cmd.'
 }
@@ -37,7 +34,8 @@ $cases = @(
     @{ name = 'deletion'; args = @('--deletion') },
     @{ name = 'memory'; args = @('--memory') },
     @{ name = 'mcp management'; args = @('--mcp') },
-    @{ name = 'mcp runtime'; args = @('--mcp-runtime') }
+    @{ name = 'mcp runtime'; args = @('--mcp-runtime') },
+    @{ name = 'mission skills'; runner = 'client\tests\run_mission_skills_integration.py'; args = @() }
 )
 if ($Only -and $Only -notin @($cases | ForEach-Object { $_.name })) {
     throw "Unknown Qt integration case: $Only"
@@ -45,8 +43,15 @@ if ($Only -and $Only -notin @($cases | ForEach-Object { $_.name })) {
 foreach ($case in $cases) {
     if ($Only -and $case.name -ne $Only) { continue }
     Write-Output "Qt offline integration: $($case.name)"
-    $arguments = @($runner) + $case.args + @('--output-root', $output)
-    $log = Join-Path $output (($case.name -replace ' ', '-') + '.log')
+    $caseRunner = if ($case.runner) { Join-Path $root $case.runner } else { $runner }
+    $binaryName = if ($case.runner) { 'ForgePilotWorkflowQmlTests.exe' } else { 'ForgePilotBackendTests.exe' }
+    foreach ($path in @($caseRunner, (Join-Path $root "client\build\Release\$binaryName"))) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing Qt integration input: $path" }
+    }
+    $caseOutput = if ($case.runner) { Join-Path $output ([Guid]::NewGuid().ToString('N')) } else { $output }
+    New-Item -ItemType Directory -Path $caseOutput -Force | Out-Null
+    $arguments = @($caseRunner) + $case.args + @('--output-root', $caseOutput)
+    $log = Join-Path $caseOutput (($case.name -replace ' ', '-') + '.log')
     # Native tools may print harmless Git line-ending warnings to stderr.
     # Decide success from the process exit code, not PowerShell's stderr record.
     $previousErrorAction = $ErrorActionPreference
