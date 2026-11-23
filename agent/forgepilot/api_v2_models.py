@@ -4,6 +4,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .skill_models import SelectedSkill, SkillStage
+
 
 MissionID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")]
 MissionHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -71,6 +73,8 @@ class CreateMission(MissionRequest):
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
     mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
     use_rag: bool = False
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=2,
+        description="Exact reviewed versions to freeze. Omit for a mission without skill guidance.")
     baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
     preview_token: MissionHash | None = None
     baseline_confirmed: bool = False
@@ -88,6 +92,13 @@ class CreateMission(MissionRequest):
     def unique_mcp_servers(cls, value):
         if len(value) != len(set(value)):
             raise ValueError("MCP server selection contains duplicates")
+        return value
+
+    @field_validator("selected_skills")
+    @classmethod
+    def unique_skills(cls, value):
+        if len({skill.skill_id for skill in value}) != len(value):
+            raise ValueError("Select each skill ID at most once")
         return value
 
     @field_validator("repository_path")
@@ -151,6 +162,17 @@ class SkillRecommendation(BaseModel):
 
 class SkillRecommendations(BaseModel):
     recommendations: list[SkillRecommendation] = Field(max_length=3)
+
+
+class SkillInjection(SelectedSkill):
+    node_id: SkillStage
+    attempt: int = Field(ge=1)
+
+
+class MissionSkills(BaseModel):
+    task_id: MissionID
+    selected_skills: list[SelectedSkill] = Field(max_length=2)
+    injections: list[SkillInjection]
 
 
 class MissionControl(MissionRequest):

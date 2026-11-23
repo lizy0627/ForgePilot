@@ -140,6 +140,15 @@ class SkillVersion(_SkillModel):
     created_at: str
 
 
+class SelectedSkill(_SkillModel):
+    """Exact reviewed identity accepted from the recommendation client."""
+
+    model_config = ConfigDict(str_strip_whitespace=False)
+    skill_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$")
+    version: int = Field(ge=1, le=2**63 - 2)
+    content_sha256: Sha256Text
+
+
 class SkillIdentity(_SkillModel):
     skill_id: str
     source: Literal["local", "builtin", "team"]

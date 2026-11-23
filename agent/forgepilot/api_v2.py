@@ -10,7 +10,7 @@ from .api_v2_models import (
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
     MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
     MissionValidation, PreviewMission, MissionSourcePreview, MissionScopeExpansion,
-    SkillRecommendationRequest, SkillRecommendations,
+    SkillRecommendationRequest, SkillRecommendations, MissionSkills,
 )
 from .errors import ForgePilotError
 from .mcp import decode
@@ -37,6 +37,9 @@ V2_ERROR_STATUS = {
     "artifact_storage": 503, "mission_unavailable": 503,
     "baseline_changed": 409, "baseline_approval": 403, "baseline_capacity": 429,
     "build_selection_changed": 409, "mission_frozen_config_missing": 409,
+    "skill_selection_changed": 409, "skill_snapshot_invalid": 409,
+    "skill_route_denied": 403, "invalid_skill_selection": 422,
+    "skill_stage_unavailable": 422, "skill_budget_exceeded": 422,
 }
 
 
@@ -109,6 +112,7 @@ def register_mission_routes(app, host, streams):
 
     @app.post(prefix, response_model=MissionResponse, status_code=202, responses=errors)
     async def create_mission(body: CreateMission):
+        """Freeze the selected reviewed versions at admission. Refresh choices after a 409 skill_selection_changed."""
         return await host.create(**body.model_dump())
 
     @app.post(prefix + "/preview", response_model=MissionSourcePreview, responses=errors)
@@ -135,6 +139,11 @@ def register_mission_routes(app, host, streams):
     @app.get(prefix + "/{task_id}", response_model=MissionResponse, responses=errors)
     def get_mission(task_id: MissionID):
         return host.get(task_id)
+
+    @app.get(prefix + "/{task_id}/skills", response_model=MissionSkills, responses=errors)
+    def mission_skills(task_id: MissionID):
+        """Show admitted selections and actual model input by analysis node and attempt."""
+        return host.mission_skills(task_id)
 
     @app.get(prefix + "/{task_id}/graph", response_model=MissionGraph, responses=errors)
     def mission_graph(task_id: MissionID):

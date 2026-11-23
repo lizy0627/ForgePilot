@@ -66,6 +66,31 @@ bool only(const QJsonObject &o, const QSet<QString> &fields) {
 bool optional(const QJsonObject &o, const QString &name, bool (*check)(const QJsonValue &)) {
     return !o.contains(name) || check(o.value(name));
 }
+bool selectedSkills(const QJsonValue &value) {
+    if (!value.isArray() || value.toArray().size() > 2) return false;
+    static const QRegularExpression idPattern(QRegularExpression::anchoredPattern("[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}"));
+    QSet<QString> ids;
+    for (const auto &entry : value.toArray()) {
+        const auto skill = entry.toObject();
+        const auto id = skill.value("skill_id").toString();
+        if (!only(skill, {"skill_id", "version", "content_sha256"}) || !idPattern.match(id).hasMatch()
+            || ids.contains(id) || !integer(skill.value("version"), 1)
+            || skill.value("content_sha256").toString().size() != 64
+            || !MissionProtocol::validHash(skill.value("content_sha256"))) return false;
+        ids.insert(id);
+    }
+    return true;
+}
+bool missionSkills(const QJsonObject &o) {
+    if (!selectedSkills(o.value("selected_skills")) || !o.value("injections").isArray()) return false;
+    const auto selected = o.value("selected_skills").toArray();
+    for (const auto &entry : o.value("injections").toArray()) {
+        auto skill = entry.toObject();
+        if (!oneOf(skill.take("node_id"), {"root_cause_analysis", "impact_test_analysis"})
+            || !integer(skill.take("attempt"), 1) || !selected.contains(skill)) return false;
+    }
+    return true;
+}
 bool nodeType(const QJsonValue &v) {
     return oneOf(v, {"agent", "deterministic", "parallel_fanout", "join", "human_gate", "conditional", "checkpoint", "delivery"});
 }
@@ -423,6 +448,7 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     }
     if (op != "mission.create" && o.value("task_id").toString() != id) return false;
     if (op == "mission.graph") return validGraph(o);
+    if (op == "mission.skills") return missionSkills(o);
     if (op == "mission.scope-expansion") return scopeExpansion(o);
     if (op == "mission.artifacts") return validArtifacts(o);
     if (op == "mission.artifact") return validArtifact(o);
@@ -442,8 +468,9 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
     if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
-            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag"})
+            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag", "selected_skills"})
         && text(o.value("repository_path")) && text(o.value("request"))
+        && optional(o, "selected_skills", selectedSkills)
         && (!o.contains("mcp_server_ids") || serverIds(o.value("mcp_server_ids")))
         && (!o.contains("use_rag") || o.value("use_rag").isBool())
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
@@ -455,7 +482,7 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("configure_preset") || text(o.value("configure_preset")))
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
-    if (op == "mission.get" || op == "mission.graph" || op == "mission.scope-expansion"
+    if (op == "mission.get" || op == "mission.graph" || op == "mission.skills" || op == "mission.scope-expansion"
         || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
     if (op == "mission.artifact") return only(o, {"artifact_id"}) && validId(o.value("artifact_id").toString());
     if (!validRevision(o.value("expected_revision"))) return false;
@@ -484,6 +511,12 @@ bool MissionProtocol::staleError(const QString &code) {
     return QSet<QString>{"revision_conflict", "mission_revision_conflict", "approval_conflict", "mission_approval_conflict", "approval_stale", "recovery_conflict", "recovery_stale", "delivery_changed"}.contains(code);
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
+    if (code == "skill_selection_changed") return "所选技能已升级或停用，请刷新候选并重新勾选。";
+    if (code == "invalid_skill_selection") return "请选择至多两项不同的技能，并核对推荐版本及哈希。";
+    if (code == "skill_snapshot_invalid") return "任务冻结的技能数据缺失或校验失败，请检查任务历史及数据库备份。";
+    if (code == "skill_route_denied") return "分析节点的主备模型路由与所选技能的传输范围不符。";
+    if (code == "skill_stage_unavailable") return "当前工作流未启用所选技能的分析阶段。";
+    if (code == "skill_budget_exceeded") return "所选技能超出分析节点的输入预算，请减少所选内容。";
     if (code == "mission_cancel_required") return "请先取消任务，再放弃隔离工作区。";
     if (code == "delivery_recovery") return "请检查工作区状态；如有中断的压缩合并，可在交付方式中选择“核验中断的合并”。";
     if (staleError(code)) return "任务版本或审批内容已变化，请刷新并重新审阅后提交。旧审批不会自动重试。";

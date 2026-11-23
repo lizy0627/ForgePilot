@@ -25,6 +25,22 @@ def request_body(**updates):
 
 
 @pytest.mark.asyncio
+async def test_mission_rejects_malformed_skill_selection_without_echoing_content():
+    skill = {"skill_id": str(uuid4()), "version": 1, "content_sha256": "a" * 64}
+    invalid = [
+        None, skill, [skill, {**skill, "version": 2}], [skill] * 3,
+        [{**skill, "body": "private-text"}], [{**skill, "content_sha256": "private-text"}],
+        [{**skill, "version": True}], [{**skill, "version": "1"}], [{"skill_id": skill["skill_id"]}],
+    ]
+    async with api() as (_, client):
+        for selection in invalid:
+            response = await client.post("/api/v2/missions", json=request_body(selected_skills=selection))
+            assert response.status_code == 422
+            assert response.json()["error"]["code"] == "invalid_skill_selection"
+            assert "private-text" not in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("updates", [
     {"request": " "}, {"request": "x" * 8193}, {"request": 1},
     {"request": "hello\x00"}, {"repository_path": "relative"},

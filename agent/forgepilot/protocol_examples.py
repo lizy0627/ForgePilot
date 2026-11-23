@@ -78,12 +78,36 @@ def examples():
             "message": "Mission revision changed; refresh the mission before retrying",
             "details": [], "task_id": TASK_ID,
         }},
+        "mission_skill_selection_changed_error": {"error": {
+            "code": "skill_selection_changed", "message": "Selected skill was disabled or superseded",
+            "details": [], "task_id": None,
+        }},
         "mission_approval_conflict_error": {"error": {
             "code": "mission_approval_conflict",
             "message": "TaskSpec, Plan or Scope changed; review the current approval package",
             "details": [], "task_id": TASK_ID,
         }},
     })
+    candidate = result["skill_recommendations_response"]["recommendations"][0]
+    selected = [
+        {key: candidate[key] for key in ("skill_id", "version", "content_sha256")},
+        {"skill_id": "44444444-4444-4444-8444-444444444444", "version": 2, "content_sha256": "e" * 64},
+    ]
+    result["mission_create_with_skills_request"] = {
+        **result["mission_create_request"], "request": "保存成功但列表仍显示旧值", "selected_skills": selected,
+    }
+    result["mission_skills_response"] = {
+        "task_id": TASK_ID, "selected_skills": selected,
+        "injections": [{**selected[0], "node_id": "root_cause_analysis", "attempt": 1}],
+    }
+    result["mission_skills_empty_response"] = {"task_id": TASK_ID, "selected_skills": [], "injections": []}
+    result["mission_missing_current_evidence_node"] = {
+        "node_id": "root_cause_analysis", "node_type": "agent", "status": "failed", "attempt": 1,
+        "result": {"status": "failed", "output_artifact_ids": [], "decision_summary": "",
+                   "next_route": None, "retryable": False, "failure_kind": "model_contract_violation",
+                   "error_summary": "evidence_location",
+                   "metrics": {"duration_ms": 650, "model_calls": 2, "tool_calls": 0, "total_tokens": 430}},
+    }
     result["mission_query_response"] = {
         **result["mission_create_request"], "task_id": TASK_ID,
         "status": "awaiting_human", "current_revision": 8,
@@ -119,4 +143,9 @@ def examples():
             "task_revision": sequence, "timestamp": STAMP, "event_type": event_type,
             "node_id": node_id, "actor": actor, "data": data,
         }
+    result["mission_event_skill_injection"] = {
+        "event_id": f"{TASK_ID}:10", "task_id": TASK_ID, "task_revision": 10, "timestamp": STAMP,
+        "event_type": "node.skills_injected", "node_id": "root_cause_analysis", "actor": "orchestrator",
+        "data": {"attempt": 1, "skills": [selected[0]]},
+    }
     return result

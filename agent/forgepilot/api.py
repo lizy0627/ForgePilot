@@ -234,6 +234,11 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     async def validation_error(request, exc):
         # Never echo invalid input, request bodies, credentials, or raw validation contexts.
         if request.url.path.startswith("/api/v2/"):
+            if request.url.path == "/api/v2/missions" and any(
+                error["loc"][:2] == ("body", "selected_skills") for error in exc.errors()
+            ):
+                return error_response("invalid_skill_selection",
+                    "Select up to two distinct skill IDs, each with its integer version and content SHA-256", 422)
             return error_response("invalid_request", "Request does not match the v2 schema", 422)
         if request.url.path.startswith("/api/v1/mcp/"):
             # Even field names/loc entries may be an attacker-supplied secret.

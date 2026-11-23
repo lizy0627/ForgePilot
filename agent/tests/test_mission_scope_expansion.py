@@ -33,7 +33,7 @@ def request_scope():
 
 
 @asynccontextmanager
-async def scope_app(case, tmp_path, git_exe, *, restart=False):
+async def scope_app(case, tmp_path, git_exe, *, restart=False, analyst_provider=None):
     # Reopen all durable state and use fresh service, validator and model budget
     # instances. Only the offline providers' queues represent the external model.
     manager = WorkspaceManager(tmp_path / "host data", git_executable=git_exe) if restart else case.manager
@@ -44,7 +44,7 @@ async def scope_app(case, tmp_path, git_exe, *, restart=False):
         api_key_ref="env:FORGEPILOT_API_KEY", model="fake-analysis", family="analyst")
     config = ModelConfiguration(profiles=(*base.profiles, analyst), routes=(*base.routes,
         ModelRoute(route_id="analysis", primary="analysis"), ModelRoute(route_id="orchestration", primary="analysis")))
-    providers = {**case.providers, "analysis": AnalysisProvider(case)}
+    providers = {**case.providers, "analysis": analyst_provider or AnalysisProvider(case)}
     gateway = ModelGateway(config, secret_resolver=lambda _: "offline-only",
         provider_factory=lambda profile, _: providers[profile.profile_id])
     validator = ValidationService(manager, case.validator.profile, build_root=case.validator.guard.root,

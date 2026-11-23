@@ -9,8 +9,10 @@ from uuid import uuid4
 
 from .artifacts.canonical import canonical_json_bytes, content_sha256
 from .errors import ForgePilotError
+from .mission_events import append_mission_event
 from .recording import now
 from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillIdentity, SkillVersion
+from .skill_selection import FrozenSkill, load_frozen, resolve_selection
 
 if TYPE_CHECKING:
     from .sqlite_store import SqliteEventStore
@@ -120,6 +122,39 @@ def _check_source(db: sqlite3.Connection, source_mission_id: str | None, data: S
 class SkillRepository:
     def __init__(self, store: SqliteEventStore) -> None:
         self._store = store
+
+    def resolve_selection(self, selected_skills) -> tuple[FrozenSkill, ...]:
+        with self._store.locked_connection() as db:
+            return resolve_selection(db, selected_skills)
+
+    def load_frozen(self, task_id: str, expected_manifest_sha256: str) -> tuple[FrozenSkill, ...]:
+        with self._store.locked_connection() as db:
+            metadata = self._store.missions.metadata(task_id)
+            return load_frozen(db, task_id, metadata, expected_manifest_sha256)
+
+    def record_injection(self, task_id: str, node_id: str, attempt: int, skills: tuple[FrozenSkill, ...]) -> None:
+        if not skills:
+            return
+        with self._store.transaction() as db:
+            previous = db.execute("""SELECT 1 FROM graph_events WHERE task_id=? AND node_id=?
+                AND event_type='node.skills_injected' AND json_extract(payload_json,'$.attempt')=? LIMIT 1""",
+                (task_id, node_id, attempt)).fetchone()
+            if previous is None:
+                append_mission_event(self._store, task_id, "node.skills_injected",
+                                     {"attempt": attempt, "skills": [s.identity() for s in skills]}, node_id=node_id)
+
+    def mission_usage(self, task_id: str) -> dict:
+        # History needs only admission and injection receipts, even when execution
+        # rejects a missing or damaged snapshot body.
+        with self._store.locked_connection() as db:
+            metadata = self._store.missions.metadata(task_id)
+            injections = []
+            for row in db.execute("""SELECT node_id,payload_json FROM graph_events WHERE task_id=?
+                    AND event_type='node.skills_injected' ORDER BY sequence""", (task_id,)):
+                event = json.loads(row["payload_json"])
+                injections.extend({**identity, "node_id": row["node_id"], "attempt": event["attempt"]}
+                                  for identity in event["skills"])
+            return {"selected_skills": metadata.get("selected_skills", []), "injections": injections}
 
     def get_draft(self, draft_id: str) -> SkillDraft:
         with self._store.locked_connection() as db:

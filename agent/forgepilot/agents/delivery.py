@@ -118,9 +118,11 @@ class DeliveryWorkflow(ImplementationService):
                                else f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None,
-                        allow_locked_test_scope=False):
+                        allow_locked_test_scope=False, skills=None):
+        if skills is None:
+            skills = getattr(self, "mission_skills", ())
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec,
-            allow_locked_test_scope=allow_locked_test_scope)
+            allow_locked_test_scope=allow_locked_test_scope, skills=skills)
         execution = self.graph()
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
@@ -130,7 +132,8 @@ class DeliveryWorkflow(ImplementationService):
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
-        graph = GraphDefinition.from_dict(json.loads(self.events.missions.get_graph_run(task_id)["definition_json"]))
+        run = self.events.missions.get_graph_run(task_id)
+        graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
         if graph.graph_id in LEGACY_DELIVERY_GRAPH_IDS:
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
@@ -140,16 +143,18 @@ class DeliveryWorkflow(ImplementationService):
             expected = self.graph()
         elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2",
                                "task-analysis-delivery-single-locked.v2"}:
-            from .analysis import AnalysisRequest
+            from .analysis import AnalysisRequest, stored_graph_skills, validate_skill_routes
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None
-            expected = self._analysis_graph(task_id,
-                AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
-                locked_task_spec=locked,
+            request = AnalysisRequest.model_validate(_plain_json(draft.settings["request"]))
+            skills = stored_graph_skills(self.events, task_id, graph)
+            validate_skill_routes(self, skills, request.data_policy)
+            expected = self._analysis_graph(task_id, request, locked_task_spec=locked, skills=skills,
                 allow_locked_test_scope=bool(draft.settings.get("allow_locked_test_scope", False)))
         else:
             raise ForgePilotError("graph_definition", "Task is not a validated delivery graph")
-        if expected.definition_hash != graph.definition_hash:
+        persisted_hash = run["definition_hash"]
+        if expected.definition_hash != persisted_hash or graph.definition_hash != persisted_hash:
             raise ForgePilotError("graph_definition", "Frozen delivery graph changed")
         return expected
 

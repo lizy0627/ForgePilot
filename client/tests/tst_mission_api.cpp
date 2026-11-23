@@ -46,6 +46,33 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void reviewedSkillSelectionAndInjectionHistory() {
+        const auto request = example("mission_create_with_skills_request");
+        const auto history = example("mission_skills_response");
+        const auto selected = request.value("selected_skills").toArray();
+        QVERIFY(MissionProtocol::validRequest("mission.create", request));
+        auto body = request;
+        body["selected_skills"] = QJsonArray{selected.first(), selected.first()};
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        auto extra = selected.first().toObject();
+        extra["body"] = "private";
+        body["selected_skills"] = QJsonArray{extra};
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        QVERIFY(MissionProtocol::validResponse("mission.skills", A, history));
+        auto invalid = history;
+        invalid["selected_skills"] = QJsonArray{};
+        QVERIFY(!MissionProtocol::validResponse("mission.skills", A, invalid));
+
+        Source source;
+        source.handle = [history](const Request &r) { Source::json(r, history); };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived);
+        api.getMissionSkills(A);
+        QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/skills");
+        QCOMPARE(source.requests.first().method, "GET");
+    }
     void scopeExpansionPreviewAndDecision() {
         const auto preview = example("mission_scope_expansion_preview");
         const auto decision = example("mission_scope_approval_request");

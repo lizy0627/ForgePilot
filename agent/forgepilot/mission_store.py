@@ -19,6 +19,7 @@ from .errors import ForgePilotError
 from .history_cursor import decode_cursor, encode_cursor
 from .mission_events import append_mission_event
 from .path_identity import path_key
+from .skill_selection import admit_selection
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -555,8 +556,8 @@ class MissionRepository:
                 'workspace.delivery_failed','workspace.delivery_restored') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
             yield dict(row) if row is not None else None
 
-    def admit_mission(self, task_id, workspace_record, fields):
-        """Commit workspace binding and both admission events as one unit."""
+    def admit_mission(self, task_id, workspace_record, fields, *, selected_skills=()):
+        """Commit skill snapshots, workspace binding and both admission events together."""
         record = workspace_record
         with self.events._transaction():
             stamp = _now()
@@ -566,6 +567,8 @@ class MissionRepository:
                 "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
             self.events._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
                                    (record["workspace_id"], task_id))
+            if selected_skills:
+                fields = {**fields, **admit_selection(self.events._db, task_id, selected_skills, stamp)}
             append_mission_event(self.events, task_id, "task.created", fields, actor="user")
             append_mission_event(self.events, task_id, "workspace.created", {
                 "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],

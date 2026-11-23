@@ -614,6 +614,15 @@
             "title": "Request",
             "type": "string"
           },
+          "selected_skills": {
+            "description": "Exact reviewed versions to freeze. Omit for a mission without skill guidance.",
+            "items": {
+              "$ref": "#/components/schemas/SelectedSkill"
+            },
+            "maxItems": 2,
+            "title": "Selected Skills",
+            "type": "array"
+          },
           "task_type": {
             "default": "auto",
             "enum": [
@@ -3203,6 +3212,37 @@
         "title": "MissionScopeFile",
         "type": "object"
       },
+      "MissionSkills": {
+        "properties": {
+          "injections": {
+            "items": {
+              "$ref": "#/components/schemas/SkillInjection"
+            },
+            "title": "Injections",
+            "type": "array"
+          },
+          "selected_skills": {
+            "items": {
+              "$ref": "#/components/schemas/SelectedSkill"
+            },
+            "maxItems": 2,
+            "title": "Selected Skills",
+            "type": "array"
+          },
+          "task_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "selected_skills",
+          "injections"
+        ],
+        "title": "MissionSkills",
+        "type": "object"
+      },
       "MissionSourcePreview": {
         "properties": {
           "base_commit": {
@@ -3813,6 +3853,78 @@
           "restarting"
         ],
         "title": "RuntimeStatus",
+        "type": "object"
+      },
+      "SelectedSkill": {
+        "additionalProperties": false,
+        "description": "Exact reviewed identity accepted from the recommendation client.",
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "skill_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$",
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "skill_id",
+          "version",
+          "content_sha256"
+        ],
+        "title": "SelectedSkill",
+        "type": "object"
+      },
+      "SkillInjection": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "minimum": 1.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "node_id": {
+            "enum": [
+              "root_cause_analysis",
+              "impact_test_analysis"
+            ],
+            "title": "Node Id",
+            "type": "string"
+          },
+          "skill_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$",
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "skill_id",
+          "version",
+          "content_sha256",
+          "node_id",
+          "attempt"
+        ],
+        "title": "SkillInjection",
         "type": "object"
       },
       "SkillRecommendation": {
@@ -9636,6 +9748,7 @@
         "summary": "List Missions"
       },
       "post": {
+        "description": "Freeze the selected reviewed versions at admission. Refresh choices after a 409 skill_selection_changed.",
         "operationId": "create_mission_api_v2_missions_post",
         "requestBody": {
           "content": {
@@ -11790,6 +11903,137 @@
           }
         },
         "summary": "Mission Scope Expansion"
+      }
+    },
+    "/api/v2/missions/{task_id}/skills": {
+      "get": {
+        "description": "Show admitted selections and actual model input by analysis node and attempt.",
+        "operationId": "mission_skills_api_v2_missions__task_id__skills_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionSkills"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Mission Skills"
       }
     },
     "/api/v2/missions/{task_id}/validation": {

@@ -10,7 +10,7 @@ from forgepilot.api_models import ConversationEvent, EventPayload
 from forgepilot.api_v2_models import (
     CreateMission, MissionApproval, MissionControl, MissionDelivery, MissionErrorResponse,
     MissionResume, MissionResponse, MissionRetry, MissionScopeExpansion,
-    SkillRecommendationRequest, SkillRecommendations,
+    MissionNode, MissionSkills, SkillRecommendationRequest, SkillRecommendations,
 )
 from forgepilot.export_protocol import export, generated_protocol
 from forgepilot.mission_events import MissionEvent
@@ -82,6 +82,11 @@ def test_v2_request_examples_match_strict_transport_schemas():
         ("skill_recommendations_response", SkillRecommendations),
         ("skill_recommendations_empty_response", SkillRecommendations),
         ("mission_create_request", CreateMission),
+        ("mission_create_with_skills_request", CreateMission),
+        ("mission_skill_selection_changed_error", MissionErrorResponse),
+        ("mission_skills_response", MissionSkills),
+        ("mission_skills_empty_response", MissionSkills),
+        ("mission_missing_current_evidence_node", MissionNode),
         ("mission_approve_request", MissionApproval),
         ("mission_reject_request", MissionApproval),
         ("mission_scope_approval_request", MissionApproval),

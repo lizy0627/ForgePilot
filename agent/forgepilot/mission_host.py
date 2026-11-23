@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
-from .agents.analysis import AnalysisRequest
+from .agents.analysis import AnalysisRequest, validate_skill_bindings, validate_skill_routes
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
@@ -234,6 +234,9 @@ class MissionHost:
     def observability(self, task_id):
         self._metadata(task_id)
         return self.store.missions.observability(task_id)
+
+    def mission_skills(self, task_id):
+        return {"task_id": task_id, **self.store.skills.mission_usage(task_id)}
 
     def _workspace(self, task_id):
         workflow = self._services.get(task_id)
@@ -492,6 +495,7 @@ class MissionHost:
                     or fields["task_type"] not in {"auto", locked_task_spec.task_type}
                     or fields["base_ref"] != locked_task_spec.repository.base_ref):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec does not match the mission request or base")
+        selected_skills = self.store.skills.resolve_selection(fields.pop("selected_skills", []))
         token = fields.get("preview_token")
         preview = self._previews.get(token) if token else None
         if token and (preview is None or monotonic() >= preview.expires_at or self._preview_fields(fields) != preview.fields):
@@ -514,6 +518,7 @@ class MissionHost:
         task_id = preview.task_id if preview else str(uuid4())
         workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()),
                                   single_agent=fields["orchestration_mode"] == "single_agent")
+        workspace_claimed = False
         try:
             # Trusted profile selection never accepts executable paths or shell text.
             profile = workflow.validator.profile.profile_id
@@ -521,14 +526,19 @@ class MissionHost:
                     locked_task_spec.repository.toolchain_profile != profile
                     or locked_task_spec.data_policy != getattr(workflow, "mission_data_policy", DataPolicy())):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted toolchain or data policy")
+            if selected_skills:
+                validate_skill_routes(workflow, selected_skills, getattr(workflow, "mission_data_policy", DataPolicy()))
+                workflow.mission_skills = selected_skills
             from .presets import Presets
             from .build_process import build_environment
             if preview is None:
+                workspace_claimed = True
                 await self._create_workspace(workflow.workspace, fields, task_id)
             else:
                 if workflow.workspace.root != preview.workspace.root:
                     raise ForgePilotError("workspace_unavailable", "Preview and task must share the same WorkspaceManager root")
                 self._previews.pop(token)
+                workspace_claimed = True
                 if preview.patch_sha256 is not None:
                     prepared = await asyncio.to_thread(workflow.workspace.prepare_baseline, task_id, fields["baseline_paths"])
                     if (prepared["sha256"] != preview.patch_sha256 or prepared["source_head"] != preview.source_head
@@ -578,11 +588,15 @@ class MissionHost:
                 definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request,
                                                      locked_task_spec=locked_task_spec,
                                                      allow_locked_test_scope=allow_locked_test_scope)
+            if selected_skills:
+                validate_skill_bindings(definition, selected_skills)
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
             record = workflow.workspace.record(task_id)
             self.store.missions.admit_mission(task_id, record,
-                {**fields, "locked_authorization_ref": locked_authorization_ref, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))})
+                {**fields, "locked_authorization_ref": locked_authorization_ref,
+                 "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))},
+                selected_skills=selected_skills)
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
         except BaseException:
@@ -591,13 +605,6 @@ class MissionHost:
             except ForgePilotError:
                 # Only a newly allocated, app-owned worktree is eligible. The
                 # manager proves identity and refuses unknown user bytes.
-                try:
-                    expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
-                    await asyncio.to_thread(workflow.workspace.cleanup, task_id, approved=True, expected=expected)
-                except (ForgePilotError, OSError) as cleanup_error:
-                    if preview is not None:
-                        raise ForgePilotError("baseline_cleanup",
-                            "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
                 self._services.pop(task_id, None)
                 candidate = getattr(workflow, "mission_candidate_runner", None)
                 if candidate is not None:
@@ -605,7 +612,16 @@ class MissionHost:
                         await asyncio.to_thread(candidate.close)
                     except Exception:
                         pass
-                self.store.missions.discard_unadmitted_graph(task_id)
+                try:
+                    if workspace_claimed:
+                        expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
+                        await asyncio.to_thread(workflow.workspace.cleanup, task_id, approved=True, expected=expected)
+                except (ForgePilotError, OSError) as cleanup_error:
+                    if preview is not None:
+                        raise ForgePilotError("baseline_cleanup",
+                            "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
+                finally:
+                    self.store.missions.discard_unadmitted_graph(task_id)
             raise
 
     def _launch(self, task_id, operation, *, admission=None):
