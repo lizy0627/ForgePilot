@@ -1,0 +1,6 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}/client",
+    "cmake.configureOnOpen": false,
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "python.defaultInterpreterPath": "${workspaceFolder}/agent.venv/Scripts/python.exe"
+}

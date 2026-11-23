@@ -1,0 +1,34 @@
+{
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}"
+    },
+    "tasks": [
+        {
+            "label": "ForgePilot: 构建客户端",
+            "type": "process",
+            "command": "cmd.exe",
+            "args": ["/d", "/c", ".\\scripts\\Build-Client.cmd"],
+            "problemMatcher": "$msCompile",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "ForgePilot: 构建并启动",
+            "dependsOn": "ForgePilot: 构建客户端",
+            "type": "process",
+            "command": "cmd.exe",
+            "args": ["/d", "/c", ".\\Start-ForgePilot.cmd"],
+            "problemMatcher": []
+        },
+        {
+            "label": "ForgePilot: 停止",
+            "type": "process",
+            "command": "cmd.exe",
+            "args": ["/d", "/c", ".\\Stop-ForgePilot.cmd"],
+            "problemMatcher": []
+        }
+    ]
+}
