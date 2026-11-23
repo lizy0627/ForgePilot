@@ -8,11 +8,12 @@
 #include "HttpFixture.h"
 
 namespace {
-QJsonObject mission() {
+QJsonObject example(const QString &name) {
     QFile file(QFINDTESTDATA("../../protocol/examples.json"));
     if (!file.open(QIODevice::ReadOnly)) qFatal("Missing canonical protocol examples");
-    return QJsonDocument::fromJson(file.readAll()).object().value("mission_query_response").toObject();
+    return QJsonDocument::fromJson(file.readAll()).object().value(name).toObject();
 }
+QJsonObject mission() { return example("mission_query_response"); }
 QJsonObject artifact() {
     const QJsonObject item{{"evidence_id", "EV-1"}, {"claim", "Worker is still active"}, {"path", QJsonValue::Null},
         {"start_line", QJsonValue::Null}, {"end_line", QJsonValue::Null}, {"file_hash", QJsonValue::Null},
@@ -45,6 +46,139 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void skillRecommendationContract() {
+        const QString op = "mission.recommendations";
+        const auto request = example("skill_recommendations_request");
+        QVERIFY(MissionProtocol::validRequest(op, request));
+        QVERIFY(MissionProtocol::validRequest(op, example("skill_recommendations_unmatched_request")));
+        auto invalid = request;
+        invalid["repository_path"] = "D:/fixture";
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        invalid = request; invalid["task_type"] = "analysis";
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        for (const QString &value : {QString(" "), QString(8193, 'x'), QString(QChar::Null)}) {
+            invalid = request; invalid["description"] = value;
+            QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        }
+        invalid = request; invalid["project_tags"] = QJsonArray{QString(257, 'x')};
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        const auto response = example("skill_recommendations_response");
+        QVERIFY(MissionProtocol::validResponse(op, {}, response));
+        QVERIFY(MissionProtocol::validResponse(op, {}, example("skill_recommendations_empty_response")));
+        const auto candidate = response.value("recommendations").toArray().first().toObject();
+        for (const auto &key : {"skill_id", "version", "content_sha256", "name", "summary", "reasons"}) {
+            auto broken = candidate;
+            broken.remove(key);
+            QVERIFY2(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}), key);
+        }
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{candidate, candidate}}}));
+        auto broken = candidate;
+        broken["reasons"] = QJsonArray{};
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+        broken = candidate; broken["version"] = "1";
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+        broken = candidate; broken["content_sha256"] = QString(64, 'g');
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+    }
+    void skillRecommendationAndCreatePostBodies() {
+        const auto request = example("skill_recommendations_request");
+        const auto response = example("skill_recommendations_response");
+        const auto withSkills = example("mission_create_with_skills_request");
+        Source source;
+        source.handle = [&](const Request &r) {
+            if (r.path == "/api/v2/skills/recommendations") Source::json(r, response);
+            else if (r.body.contains("selected_skills")) Source::json(r, example("mission_skill_selection_changed_error"), 409);
+            else Source::json(r, mission(), 202);
+        };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy received(&api, &AgentApiClient::responseReceived), errors(&api, &AgentApiClient::requestError);
+        const auto serial = api.recommendSkills(request);
+        QTRY_COMPARE(received.size(), 1);
+        QCOMPARE(received.first()[0].toULongLong(), serial);
+        QCOMPARE(received.first()[1].toString(), "mission.recommendations");
+        QCOMPARE(received.first()[3].toJsonObject(), response);
+        QCOMPARE(source.requests.first().method, "POST");
+        QCOMPARE(source.requests.first().path, "/api/v2/skills/recommendations");
+        QCOMPARE(source.requests.first().body, request);
+        api.createMission(withSkills);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first()[3].toInt(), 409);
+        QCOMPARE(errors.first()[4].toString(), "skill_selection_changed");
+        QCOMPARE(source.requests.last().method, "POST");
+        QCOMPARE(source.requests.last().path, "/api/v2/missions");
+        QCOMPARE(source.requests.last().body, withSkills);
+        auto empty = withSkills;
+        empty["selected_skills"] = QJsonArray{};
+        api.createMission(empty);
+        QTRY_COMPARE(received.size(), 2);
+        empty.remove("selected_skills");
+        QCOMPARE(source.requests.last().body, empty);
+        QCOMPARE(source.requests.size(), 3);
+    }
+    void reviewedSkillSelectionAndInjectionHistory() {
+        const auto request = example("mission_create_with_skills_request");
+        const auto history = example("mission_skills_response");
+        const auto selected = request.value("selected_skills").toArray();
+        QVERIFY(MissionProtocol::validRequest("mission.create", request));
+        auto body = request;
+        body["selected_skills"] = QJsonArray{selected.first(), selected.first()};
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        auto extra = selected.first().toObject();
+        extra["body"] = "private";
+        body["selected_skills"] = QJsonArray{extra};
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
+        QVERIFY(MissionProtocol::validResponse("mission.skills", A, history));
+        auto invalid = history;
+        invalid["selected_skills"] = QJsonArray{};
+        QVERIFY(!MissionProtocol::validResponse("mission.skills", A, invalid));
+
+        Source source;
+        source.handle = [history](const Request &r) { Source::json(r, history); };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived);
+        api.getMissionSkills(A);
+        QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/skills");
+        QCOMPARE(source.requests.first().method, "GET");
+    }
+    void scopeExpansionPreviewAndDecision() {
+        const auto preview = example("mission_scope_expansion_preview");
+        const auto decision = example("mission_scope_approval_request");
+        const QString op = "mission.scope-expansion";
+        QVERIFY(MissionProtocol::validResponse(op, A, preview));
+        QVERIFY(!MissionProtocol::validResponse(op, B, preview));
+        for (const auto &key : {"attempt", "revision", "partial_patch", "partial_change_set_artifact_id",
+                                "task_spec_hash", "scope_hash", "plan_hash", "checkpoint_id", "files"}) {
+            auto incomplete = preview;
+            incomplete.remove(key);
+            QVERIFY2(!MissionProtocol::validResponse(op, A, incomplete), key);
+        }
+        auto malformed = preview;
+        auto file = preview.value("files").toArray().first().toObject();
+        file.remove("reason");
+        malformed["files"] = QJsonArray{file};
+        QVERIFY(!MissionProtocol::validResponse(op, A, malformed));
+
+        Source source;
+        source.handle = [&](const Request &r) {
+            if (r.method == "GET") Source::json(r, preview);
+            else Source::json(r, mission(), 202);
+        };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived);
+        api.getMissionScopeExpansion(A);
+        QTRY_COMPARE(responses.size(), 1);
+        QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/scope-expansion");
+        QCOMPARE(source.requests.first().method, "GET");
+        api.approveMission(A, decision);
+        QTRY_COMPARE(responses.size(), 2);
+        QCOMPARE(source.requests.last().path, "/api/v2/missions/" + A.toUtf8() + "/approvals");
+        QCOMPARE(source.requests.last().method, "POST");
+        QCOMPARE(source.requests.last().body, decision);
+    }
     void missionToolSelectionIsValidatedAndSent() {
         const QJsonObject request{{"repository_path", "D:/fixture"}, {"request", "Use selected tools"},
             {"mcp_server_ids", QJsonArray{B}}, {"use_rag", true}};
@@ -102,13 +236,17 @@ private slots:
         bad = page; bad["items"] = QJsonArray{malformed}; QVERIFY(!MissionProtocol::validMissionPage(bad));
         Source source; source.handle = [&](const Request &r) { Source::json(r, page); };
         AgentApiClient api; api.setBaseUrl(source.url()); QSignalSpy responses(&api, &AgentApiClient::responseReceived);
-        api.listMissions("page-two", "D:/项目 with spaces/Example", "interrupted");
+        const QString repository = "D:/项目 with spaces/C++ 100%/%2B";
+        const QString cursor = "page+two%20";
+        api.listMissions(cursor, repository, "interrupted");
         QTRY_COMPARE(responses.size(), 1); QCOMPARE(source.requests.size(), 1);
         const auto &request = source.requests.first(); QCOMPARE(request.method, "GET"); QVERIFY(request.body.isEmpty());
+        // The HTTP server treats a raw '+' in query values as a space.
+        QVERIFY(!request.path.contains('+'));
         const auto url = QUrl::fromEncoded(request.path); QCOMPARE(url.path(), "/api/v2/missions");
         const QUrlQuery query(url); QCOMPARE(query.queryItemValue("limit"), "20");
-        QCOMPARE(query.queryItemValue("before"), "page-two"); QCOMPARE(query.queryItemValue("status"), "interrupted");
-        QCOMPARE(query.queryItemValue("repository_path"), "D:/项目 with spaces/Example");
+        QCOMPARE(query.queryItemValue("before", QUrl::FullyDecoded), cursor); QCOMPARE(query.queryItemValue("status"), "interrupted");
+        QCOMPARE(query.queryItemValue("repository_path", QUrl::FullyDecoded), repository);
     }
     void strictRawJson() {
         QJsonObject o;
@@ -176,6 +314,14 @@ private slots:
         bad = preview; bad["validated"] = "true"; d["delivery"] = bad;
         QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
         d["delivery"] = QJsonObject{}; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
+        auto recovered = QJsonObject{{"mode", "squash"}, {"status", "active"}, {"outcome", "restored"},
+            {"target_branch", "main"}, {"target_commit", QString(40, 'a')}};
+        d["delivery"] = recovered; QVERIFY(MissionProtocol::validResponse("mission.delivery", A, d));
+        recovered["outcome"] = "completed";
+        d["delivery"] = recovered; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
+        auto manual = preview;
+        manual["outcome"] = "manual_inspection";
+        d["delivery"] = manual; QVERIFY(!MissionProtocol::validResponse("mission.delivery", A, d));
         const QJsonObject plan{{"task_id", A}, {"revision", 8}, {"token", QString(64, 'd')}, {"blocked_reason", QJsonValue::Null}};
         QJsonObject r{{"mission", mission()}, {"recovery", plan}};
         QVERIFY(MissionProtocol::validResponse("mission.resume", A, r));

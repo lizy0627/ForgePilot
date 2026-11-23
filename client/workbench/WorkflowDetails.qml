@@ -20,7 +20,10 @@ Item {
     readonly property string status: visual.status
     readonly property bool approvalNode: nodeId === "execution_approval"
     readonly property bool deliveryNode: nodeId === "delivery_bundle" || node.nodeType === "delivery"
+    readonly property bool pausedWriter: mission.status === "awaiting_human" && node.status === "awaiting_human"
+        && (nodeId === "implementer" || /^repair_\d+$/.test(nodeId))
     signal closeRequested()
+    signal cancelRequested()
     implicitWidth: 420
     implicitHeight: 640
 
@@ -75,7 +78,7 @@ Item {
             break;
         case "ChangeSet":
             add("修改摘要", data.summary);
-            if (data.requires_additional_approval) add("范围变化", "本次修改需要额外审批。请审阅当前冻结方案。");
+            if (data.requires_additional_approval) add("范围变化", "这是该次执行暂停时保存的部分改动。");
             break;
         case "ValidationReport":
             add("验证结论", text(data.summary) + "\n结果：" + text(data.status) + "\n测试通过：" + (data.tests_passed || 0)
@@ -228,6 +231,20 @@ Item {
         }
     }
 
+    component ScopeDecisionButton: Controls.ActionButton {
+        required property bool approve
+        required property var proposal
+        property var pressedProposal: null
+        // A refresh between press and release must not authorize a different revision.
+        onPressed: pressedProposal = Object.assign({}, proposal)
+        onCanceled: pressedProposal = null
+        onClicked: {
+            var reviewed = pressedProposal || proposal
+            pressedProposal = null
+            root.mission.approval.decideScopeExpansion(reviewed, approve)
+        }
+    }
+
     Rectangle { anchors.fill: parent; color: Theme.sidebar; border.color: Theme.border }
     ColumnLayout {
         anchors.fill: parent; anchors.margins: Theme.spaceMd; spacing: Theme.spaceSm
@@ -268,7 +285,7 @@ Item {
                     heading: "执行问题"; value: (root.result.failure_kind ? "类型：" + root.result.failure_kind + "\n" : "") + (root.result.error_summary || "")
                 }
                 Label {
-                    visible: !!root.nodeId && !root.artifacts.length && !root.approvalNode && !root.deliveryNode
+                    visible: !!root.nodeId && !root.artifacts.length && !root.approvalNode && !root.deliveryNode && !root.pausedWriter
                     text: root.node.status === "pending" ? "节点尚未开始，完成后可在这里查看本节点的具体结果。"
                         : root.node.status === "running" ? "节点正在执行，产物生成后会自动更新。"
                         : root.node.status === "skipped" ? "当前执行路径已跳过该节点。"
@@ -276,6 +293,102 @@ Item {
                     color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
                 }
                 ApprovalPanel { mission: root.mission; visible: root.approvalNode; Layout.fillWidth: true }
+                Controls.Panel {
+                    id: scopePanel
+                    objectName: "workflowScopePanel"
+                    visible: root.pausedWriter
+                    Layout.fillWidth: true
+                    readonly property var proposal: {
+                        var p = root.mission.approval.scopeExpansion
+                        return root.pausedWriter && p && p.task_id === root.mission.taskId
+                            && p.node_id === root.nodeId && p.attempt === root.node.attempt ? p : ({})
+                    }
+                    readonly property bool structured: !!proposal.status
+                    readonly property var reviewedRevision: proposal.revision
+                    onReviewedRevisionChanged: {
+                        if (reviewedRevision && detailsScroll.contentItem) detailsScroll.contentItem.contentY = 0
+                    }
+                    readonly property bool rejected: proposal.status === "rejected"
+                    readonly property var proposedSpec: W.artifactById(root.mission.artifacts, proposal.task_spec_artifact_id)
+                    readonly property var proposedPlan: W.artifactById(root.mission.artifacts, proposal.plan_artifact_id)
+                    readonly property var originalSpec: W.artifactById(root.mission.artifacts, (proposedSpec.parentArtifactIds || [])[0])
+                    readonly property var originalPlan: W.artifactById(root.mission.artifacts, (proposedPlan.parentArtifactIds || [])[1])
+                    readonly property bool bundleMatches: structured && proposedSpec.contentHash === proposal.task_spec_hash
+                        && proposedPlan.contentHash === proposal.plan_hash && !!originalSpec.content && !!originalPlan.content
+                        && (proposedPlan.parentArtifactIds || [])[0] === proposedSpec.artifactId
+                        && proposedPlan.content.task_spec_artifact_id === proposedSpec.artifactId
+                        && originalPlan.content.task_spec_artifact_id === originalSpec.artifactId
+                    title: structured ? (rejected ? "扩围申请已拒绝" : "文件扩围审批") : "节点暂停"
+                    subtitle: structured ? "修订 " + proposal.revision + " · 第 " + proposal.attempt + " 次尝试" : ""
+                    function step(id) {
+                        return ((originalPlan.content || {}).steps || []).find(function(item) { return item.step_id === id }) || {}
+                    }
+                    Label {
+                        visible: !scopePanel.structured || scopePanel.rejected || !scopePanel.bundleMatches
+                        Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: Theme.warning; textFormat: Text.PlainText
+                        text: !root.mission.synchronized ? "正在同步当前节点…"
+                            : !scopePanel.structured ? "此暂停记录缺少结构化扩围申请。可查看节点摘要、已有改动，或取消任务。"
+                            : scopePanel.rejected ? "任务保持暂停。可继续查看已保存的改动，或取消任务。"
+                            : "原范围或计划尚未核对，请刷新任务后重新审阅。"
+                    }
+                    ReadableBlock {
+                        objectName: "workflowScopeOriginal"; visible: scopePanel.structured; Layout.fillWidth: true
+                        heading: "原文件范围"
+                        value: scopePanel.structured ? (scopePanel.originalSpec.content
+                            ? root.list(scopePanel.originalSpec.content.allowed_scope.path_patterns) : "正在读取原范围…")
+                            + "\n文件数量上限：" + scopePanel.proposal.previous_max_changed_files
+                            + " → " + scopePanel.proposal.max_changed_files : ""
+                    }
+                    ReadableBlock {
+                        objectName: "workflowScopeFiles"; visible: scopePanel.structured; Layout.fillWidth: true
+                        heading: "申请新增的文件"
+                        value: (scopePanel.proposal.files || []).map(function(file) {
+                            var step = scopePanel.step(file.plan_step_id)
+                            return file.path + "\n原因：" + file.reason
+                                + "\n计划步骤：" + file.plan_step_id + (step.action ? " · " + step.action : "")
+                                + (step.expected_files ? "\n步骤原定文件：" + root.list(step.expected_files) : "")
+                                + "\n对应验收：" + root.list(file.acceptance_criteria_ids)
+                        }).join("\n\n")
+                    }
+                    ReadableBlock {
+                        objectName: "workflowScopeReplay"; visible: scopePanel.structured; Layout.fillWidth: true
+                        heading: "批准后的执行方式"
+                        value: scopePanel.structured ? "从进入此节点时的检查点重新执行，保留先前已完成的节点。"
+                            + (scopePanel.proposal.partial_change_set_artifact_id
+                                ? "\n本轮部分改动会从工作区撤回，已保存的差异仍可查看。" : "\n本轮没有已保存的部分改动。")
+                            + "\n检查点：" + scopePanel.proposal.checkpoint_id : ""
+                    }
+                    PagedText {
+                        objectName: "workflowScopeDiff"; visible: !!scopePanel.proposal.partial_change_set_artifact_id
+                        Layout.fillWidth: true; heading: "本轮已保存的差异"; value: scopePanel.proposal.partial_patch || ""
+                    }
+                    Controls.LongText {
+                        visible: scopePanel.structured; Layout.fillWidth: true; title: "后端重做说明"
+                        text: scopePanel.proposal.replay_behavior || ""; monospace: false; maximumHeight: 160
+                    }
+                    Label {
+                        visible: !!text; Layout.fillWidth: true; text: root.mission.approval.error
+                        wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText; color: Theme.warning
+                    }
+                    RowLayout {
+                        visible: scopePanel.proposal.status === "pending"; Layout.fillWidth: true
+                        enabled: scopePanel.bundleMatches && root.mission.approval.scopeAvailable
+                        ScopeDecisionButton {
+                            objectName: "workflowScopeApprove"; text: "批准扩围"; highlighted: true
+                            proposal: scopePanel.proposal; approve: true
+                        }
+                        ScopeDecisionButton {
+                            objectName: "workflowScopeReject"; text: "拒绝扩围"; danger: true
+                            proposal: scopePanel.proposal; approve: false
+                        }
+                    }
+                    Controls.ActionButton {
+                        objectName: "workflowScopeCancel"; text: "取消任务"; danger: true
+                        visible: scopePanel.rejected || !scopePanel.structured
+                        enabled: root.mission.synchronized && !root.mission.busy
+                        onClicked: root.cancelRequested()
+                    }
+                }
                 DeliveryPanel { mission: root.mission; visible: root.deliveryNode; Layout.fillWidth: true }
                 ReadableBlock {
                     visible: root.deliveryNode && !!value; Layout.fillWidth: true; heading: "使用说明"

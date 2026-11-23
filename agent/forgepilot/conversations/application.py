@@ -234,6 +234,30 @@ class ConversationHost:
                 message_id=message['message_id'] if message else None)
         return broker.subscribe(last_event_id)
 
+    async def conversation_batches(self, cid, rid, last_event_id, *, heartbeat_seconds, idle_seconds):
+        """Iterate on the broker's worker loop. After the initial read, an empty batch is a heartbeat."""
+        subscription = self.conversation_stream(cid, rid, last_event_id)
+        try:
+            batch = subscription.read()
+            if batch.terminal and not batch.events:
+                return
+            idle_at = monotonic()
+            yield batch
+            while not batch.terminal:
+                if batch.events:
+                    idle_at = monotonic()
+                batch = subscription.read()
+                if batch.events:
+                    yield batch
+                elif not batch.terminal:
+                    remaining = idle_seconds - (monotonic() - idle_at)
+                    if remaining <= 0:
+                        return
+                    if not await subscription.wait(min(heartbeat_seconds, remaining)):
+                        yield batch
+        finally:
+            subscription.close()
+
     async def _prepare_context(self,request,metrics=None):
         cid,rid=request['conversation_id'],request['request_id']
         context_started=monotonic()

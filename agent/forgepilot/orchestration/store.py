@@ -241,6 +241,13 @@ class GraphStore:
                     "SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)
                 ).fetchone()[0]
                 event_payload = {"from": source.value, "to": target.value, **dict(payload or {})}
+                if target is NodeStatus.AWAITING_HUMAN:
+                    proposal = db.execute("""SELECT checkpoint_id,partial_change_set_id
+                        FROM writer_scope_expansions WHERE task_id=? AND node_id=? AND attempt=?
+                        AND status='pending'""", (task_id, node_id, actual_attempt)).fetchone()
+                    if proposal:
+                        event_payload.update(approval_type="scope_expansion", checkpoint_id=proposal[0],
+                                             partial_change_set_artifact_id=proposal[1])
                 db.execute(
                     """INSERT INTO graph_events(task_id,sequence,revision,event_type,node_id,attempt,state,
                        payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",

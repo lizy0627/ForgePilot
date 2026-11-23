@@ -174,8 +174,8 @@ class ImplementationTools:
         if key not in self._step_paths[plan_step_id]:
             raise ForgePilotError("scope_approval_required", "File is not approved for this frozen plan step")
         criteria = set(acceptance_criteria_ids)
-        if not criteria or not criteria <= set(step.acceptance_criteria_ids):
-            raise ForgePilotError("mapping_invalid", "Write criteria must belong to the mapped plan step")
+        if not criteria or not criteria.issubset(step.criteria_for_path(normalized)):
+            raise ForgePilotError("mapping_invalid", "Write criteria must be approved for this file and plan step")
         if key not in self.changes.snapshots and len(self.changes.snapshots) >= self.spec.allowed_scope.max_changed_files:
             raise ForgePilotError("file_limit", "Frozen TaskSpec changed-file budget is exhausted")
         existing = key in self.changes._scope_baseline
@@ -345,7 +345,7 @@ class ImplementationTools:
         self.changes.verify_scope()
         return self.integrity.verify()
 
-    def change_set(self, summary="Approved implementation changes"):
+    def change_set(self, summary="Approved implementation changes", *, partial=False):
         self.audit()
         observed = self.changes.diff(limit=None)
         files = []
@@ -377,9 +377,11 @@ class ImplementationTools:
                 plan_step_ids=tuple(sorted(mappings)), acceptance_criteria_ids=tuple(sorted({ac for ids in mappings.values() for ac in ids})),
                 test_change=classification))
         if not files:
+            if partial:
+                return None
             raise ForgePilotError("implementation_no_changes", "Implementer produced no net changes")
         return ChangeSet(execution_plan_artifact_id=self.plan_artifact.artifact_id, files=tuple(files),
-                         requires_additional_approval=False, summary=summary)
+                         requires_additional_approval=partial, summary=summary)
 
 
 __all__ = ["ImplementationTools", "ImplementationToolRegistry", "IMPLEMENTATION_TOOLS"]

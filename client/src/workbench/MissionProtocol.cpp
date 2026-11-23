@@ -66,6 +66,60 @@ bool only(const QJsonObject &o, const QSet<QString> &fields) {
 bool optional(const QJsonObject &o, const QString &name, bool (*check)(const QJsonValue &)) {
     return !o.contains(name) || check(o.value(name));
 }
+bool skillIdentity(const QJsonObject &skill) {
+    static const QRegularExpression idPattern(QRegularExpression::anchoredPattern("[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}"));
+    return idPattern.match(skill.value("skill_id").toString()).hasMatch()
+        && integer(skill.value("version"), 1) && skill.value("content_sha256").toString().size() == 64
+        && MissionProtocol::validHash(skill.value("content_sha256"));
+}
+bool selectedSkills(const QJsonValue &value) {
+    if (!value.isArray() || value.toArray().size() > 2) return false;
+    QSet<QString> ids;
+    for (const auto &entry : value.toArray()) {
+        const auto skill = entry.toObject();
+        const auto id = skill.value("skill_id").toString();
+        if (!only(skill, {"skill_id", "version", "content_sha256"}) || !skillIdentity(skill) || ids.contains(id)) return false;
+        ids.insert(id);
+    }
+    return true;
+}
+bool recommendationText(const QJsonValue &value, qsizetype maxLength) {
+    const auto text = value.toString();
+    return !text.trimmed().isEmpty() && !text.contains(QChar::Null) && text.isValidUtf16()
+        && text.size() <= 2 * maxLength && text.toUcs4().size() <= maxLength;
+}
+bool recommendationRequest(const QJsonObject &body) {
+    if (!only(body, {"description", "task_type", "project_tags"}) || !recommendationText(body.value("description"), 8192)
+        || (body.contains("task_type") && !oneOf(body.value("task_type"), {"auto", "bug_fix", "feature"}))) return false;
+    if (!body.contains("project_tags")) return true;
+    const auto tags = body.value("project_tags");
+    if (!tags.isArray() || tags.toArray().size() > 32) return false;
+    for (const auto &tag : tags.toArray()) if (!recommendationText(tag, 256)) return false;
+    return true;
+}
+bool recommendations(const QJsonValue &value) {
+    if (!value.isArray() || value.toArray().size() > 3) return false;
+    QSet<QString> ids;
+    for (const auto &entry : value.toArray()) {
+        const auto skill = entry.toObject();
+        const auto id = skill.value("skill_id").toString();
+        const auto reasons = skill.value("reasons");
+        if (!skillIdentity(skill) || ids.contains(id) || !text(skill.value("name")) || !skill.value("summary").isString()
+            || !strings(reasons) || reasons.toArray().isEmpty()) return false;
+        ids.insert(id);
+    }
+    return true;
+}
+bool missionSkills(const QJsonObject &o) {
+    if (!selectedSkills(o.value("selected_skills")) || !o.value("injections").isArray()) return false;
+    const auto selected = o.value("selected_skills").toArray();
+    for (const auto &entry : o.value("injections").toArray()) {
+        auto skill = entry.toObject();
+        if (!oneOf(skill.take("node_id"), {"root_cause_analysis", "impact_test_analysis"})
+            || !integer(skill.take("attempt"), 1) || !selected.contains(skill)) return false;
+    }
+    return true;
+}
 bool nodeType(const QJsonValue &v) {
     return oneOf(v, {"agent", "deterministic", "parallel_fanout", "join", "human_gate", "conditional", "checkpoint", "delivery"});
 }
@@ -204,6 +258,27 @@ bool artifactContent(const QString &type, const QJsonObject &o) {
         && strings(o.value("risks")) && text(o.value("rollback"));
     return false;
 }
+bool scopeExpansion(const QJsonObject &o) {
+    if (!MissionProtocol::validRevision(o.value("revision")) || !text(o.value("node_id"))
+        || !integer(o.value("attempt"), 1) || !oneOf(o.value("status"), {"pending", "approved", "rejected"})
+        || !integer(o.value("previous_max_changed_files"), 1) || !integer(o.value("max_changed_files"), 1)
+        || !text(o.value("checkpoint_id")) || !text(o.value("replay_behavior"))
+        || !o.value("partial_patch").isString()) return false;
+    for (const auto &key : {"task_spec_hash", "plan_hash", "scope_hash"})
+        if (!MissionProtocol::validHash(o.value(key))) return false;
+    for (const auto &key : {"task_spec_artifact_id", "plan_artifact_id"})
+        if (!MissionProtocol::validId(o.value(key).toString())) return false;
+    const auto partial = o.value("partial_change_set_artifact_id");
+    if (!partial.isNull() && !MissionProtocol::validId(partial.toString())) return false;
+    const auto files = o.value("files").toArray();
+    if (files.isEmpty()) return false;
+    for (const auto &value : files) {
+        const auto file = value.toObject();
+        if (!text(file.value("path")) || !text(file.value("reason")) || !text(file.value("plan_step_id"))
+            || !strings(file.value("acceptance_criteria_ids"))) return false;
+    }
+    return true;
+}
 bool artifactList(const QJsonValue &v, const QString &id, const QString &type = {}) {
     if (!v.isArray()) return false;
     QSet<QString> ids;
@@ -247,6 +322,17 @@ bool delivery(const QJsonValue &v, const QString &id) {
     if (o.contains("task_id") && o.value("task_id").toString() != id) return false;
     if (o.contains("token")) {
         if (!MissionProtocol::validHash(o.value("token")) || o.value("task_id").toString() != id) return false;
+        if (o.contains("outcome")) {
+            if (!oneOf(o.value("outcome"), {"completed", "restored", "manual_inspection"})
+                || !o.contains("target_clean") || !o.contains("file_hashes")) return false;
+            for (const auto &key : {"target_branch", "task_commit", "current_target_commit", "parent_commit", "delivery_commit"})
+                if (!text(o.value(key))) return false;
+            if (o.value("outcome") == "manual_inspection" && !text(o.value("reason"))) return false;
+        }
+    } else if (o.contains("outcome")) {
+        const bool completed = o.value("outcome") == "completed" && o.value("status") == "delivered";
+        const bool restored = o.value("outcome") == "restored" && o.value("status") == "active";
+        if (!(completed || restored) || !text(o.value("target_branch")) || !text(o.value("target_commit"))) return false;
     } else if (!oneOf(o.value("mode"), {"squash", "keep_branch", "patch", "bundle", "abandon"})
         && o.value("status").toString() != "abandoned") return false;
     if (o.contains("mode") && !oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon"})) return false;
@@ -377,6 +463,7 @@ bool MissionProtocol::validEvent(const QJsonObject &o, const QString &event, con
         && (!d.contains("artifact_ids") || strings(d.value("artifact_ids")));
 }
 bool MissionProtocol::validResponse(const QString &op, const QString &id, const QJsonObject &o) {
+    if (op == "mission.recommendations") return recommendations(o.value("recommendations"));
     if (op == "mission.discard_preview") return o.value("discarded").isBool() && o.value("discarded").toBool();
     if (op == "mission.preview") return validHash(o.value("preview_token"))
         && text(o.value("base_commit")) && text(o.value("source_head"))
@@ -391,6 +478,8 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     }
     if (op != "mission.create" && o.value("task_id").toString() != id) return false;
     if (op == "mission.graph") return validGraph(o);
+    if (op == "mission.skills") return missionSkills(o);
+    if (op == "mission.scope-expansion") return scopeExpansion(o);
     if (op == "mission.artifacts") return validArtifacts(o);
     if (op == "mission.artifact") return validArtifact(o);
     if (op == "mission.diff") return validDiff(o);
@@ -398,6 +487,7 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     return validMission(o);
 }
 bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
+    if (op == "mission.recommendations") return recommendationRequest(o);
     if (op == "mission.list") return only(o, {"before", "repository_path", "status"})
         && o.value("before").isString() && o.value("repository_path").isString()
         && o.value("status").isString() && (o.value("status").toString().isEmpty() || validState(o.value("status").toString()));
@@ -409,8 +499,9 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
     if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
-            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag"})
+            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag", "selected_skills"})
         && text(o.value("repository_path")) && text(o.value("request"))
+        && optional(o, "selected_skills", selectedSkills)
         && (!o.contains("mcp_server_ids") || serverIds(o.value("mcp_server_ids")))
         && (!o.contains("use_rag") || o.value("use_rag").isBool())
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
@@ -422,11 +513,12 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("configure_preset") || text(o.value("configure_preset")))
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
-    if (op == "mission.get" || op == "mission.graph" || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
+    if (op == "mission.get" || op == "mission.graph" || op == "mission.skills" || op == "mission.scope-expansion"
+        || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
     if (op == "mission.artifact") return only(o, {"artifact_id"}) && validId(o.value("artifact_id").toString());
     if (!validRevision(o.value("expected_revision"))) return false;
     if (op == "mission.approve") return only(o, {"expected_revision", "approval_type", "task_spec_hash", "plan_hash", "scope_hash", "decision"})
-        && (!o.contains("approval_type") || o.value("approval_type").toString() == "execution")
+        && (!o.contains("approval_type") || oneOf(o.value("approval_type"), {"execution", "scope_expansion"}))
         && validHash(o.value("task_spec_hash")) && validHash(o.value("plan_hash")) && validHash(o.value("scope_hash"))
         && oneOf(o.value("decision"), {"approved", "rejected"});
     if (op == "mission.cancel") return only(o, {"expected_revision"});
@@ -436,7 +528,7 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
     }
     if (op == "mission.resume") return only(o, {"expected_revision", "recovery_token"}) && optional(o, "recovery_token", validHash);
     if (op == "mission.delivery") return only(o, {"expected_revision", "mode", "token", "target_branch"})
-        && (!o.contains("mode") || oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon"}))
+        && (!o.contains("mode") || oneOf(o.value("mode"), {"preview", "squash", "keep_branch", "patch", "bundle", "abandon", "recover"}))
         && optional(o, "token", validHash) && (!o.contains("target_branch") || text(o.value("target_branch")));
     return false;
 }
@@ -450,7 +542,14 @@ bool MissionProtocol::staleError(const QString &code) {
     return QSet<QString>{"revision_conflict", "mission_revision_conflict", "approval_conflict", "mission_approval_conflict", "approval_stale", "recovery_conflict", "recovery_stale", "delivery_changed"}.contains(code);
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
+    if (code == "skill_selection_changed") return "所选技能已升级或停用，请刷新候选并重新勾选。";
+    if (code == "invalid_skill_selection") return "请选择至多两项不同的技能，并核对推荐版本及哈希。";
+    if (code == "skill_snapshot_invalid") return "任务冻结的技能数据缺失或校验失败，请检查任务历史及数据库备份。";
+    if (code == "skill_route_denied") return "分析节点的主备模型路由与所选技能的传输范围不符。";
+    if (code == "skill_stage_unavailable") return "当前工作流未启用所选技能的分析阶段。";
+    if (code == "skill_budget_exceeded") return "所选技能超出分析节点的输入预算，请减少所选内容。";
     if (code == "mission_cancel_required") return "请先取消任务，再放弃隔离工作区。";
+    if (code == "delivery_recovery") return "请检查工作区状态；如有中断的压缩合并，可在交付方式中选择“核验中断的合并”。";
     if (staleError(code)) return "任务版本或审批内容已变化，请刷新并重新审阅后提交。旧审批不会自动重试。";
     if (code == "invalid_response") return "后端响应格式无效，请刷新任务；已发送的操作可能已经执行。";
     if (code == "invalid_request" || code == "invalid_task_id") return "任务请求无效，请检查任务标识、版本和必填内容。";

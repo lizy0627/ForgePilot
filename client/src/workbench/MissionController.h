@@ -10,6 +10,8 @@
 #include "EvidenceModel.h"
 #include "DiffModel.h"
 #include "ValidationModel.h"
+#include <QJsonArray>
+#include <QTimer>
 #include <functional>
 
 // Presents Mission state and operations to QML; read coordination is delegated.
@@ -25,6 +27,13 @@ class MissionController : public QObject {
     Q_PROPERTY(bool previewLoading READ previewLoading NOTIFY creationChanged)
     Q_PROPERTY(bool creationReady READ creationReady NOTIFY creationChanged)
     Q_PROPERTY(QString creationError READ creationError NOTIFY creationChanged)
+    Q_PROPERTY(QVariantList skillRecommendations READ skillRecommendations NOTIFY skillRecommendationsChanged)
+    Q_PROPERTY(QStringList selectedSkillIds READ selectedSkillIds NOTIFY recommendationsChanged)
+    Q_PROPERTY(QString recommendationError READ recommendationError NOTIFY recommendationsChanged)
+    Q_PROPERTY(bool recommendationsLoading READ recommendationsLoading NOTIFY recommendationsChanged)
+    Q_PROPERTY(QVariantMap missionSkills READ missionSkills NOTIFY missionSkillsChanged)
+    Q_PROPERTY(bool missionSkillsLoading READ missionSkillsLoading NOTIFY missionSkillsChanged)
+    Q_PROPERTY(QString missionSkillsError READ missionSkillsError NOTIFY missionSkillsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY availabilityChanged)
     Q_PROPERTY(bool synchronized READ synchronized NOTIFY availabilityChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
@@ -58,6 +67,13 @@ public:
     bool previewLoading() const { return m_previewRequest != 0; }
     bool creationReady() const { return m_creationReady; }
     QString creationError() const { return m_creationError; }
+    QVariantList skillRecommendations() const { return m_recommendations.toVariantList(); }
+    QStringList selectedSkillIds() const { return m_selectedSkillIds; }
+    QString recommendationError() const { return m_recommendationError; }
+    bool recommendationsLoading() const { return m_recommendationTimer.isActive() || m_recommendationRequest != 0; }
+    QVariantMap missionSkills() const { return m_missionSkills.toVariantMap(); }
+    bool missionSkillsLoading() const { return m_missionSkillsRequest != 0; }
+    QString missionSkillsError() const { return m_missionSkillsError; }
     bool busy() const { return m_mutation || m_approval.busy() || m_delivery.busy(); }
     bool synchronized() const { return m_synchronized; }
     QString error() const { return m_error; }
@@ -80,6 +96,11 @@ public:
     ApprovalController *approval() { return &m_approval; }
     DeliveryController *delivery() { return &m_delivery; }
     Q_INVOKABLE void createMission(const QVariantMap &request);
+    Q_INVOKABLE void updateSkillContext(const QString &description, const QString &taskType,
+                                        const QString &repository, const QStringList &projectTags);
+    Q_INVOKABLE void resetSkillContext();
+    Q_INVOKABLE void setSkillSelected(const QString &skillId, bool selected);
+    Q_INVOKABLE void loadMissionSkills();
     Q_INVOKABLE void previewCreation(const QVariantMap &request);
     Q_INVOKABLE void invalidateCreationPreview(bool forget = false);
     Q_INVOKABLE void refreshMissions();
@@ -97,6 +118,10 @@ signals:
     void baseUrlChanged();
     void historyChanged();
     void creationChanged();
+    void recommendationsChanged();
+    void skillRecommendationsChanged();
+    void missionSkillsChanged();
+    void missionCreated();
     void missionChanged();
     void availabilityChanged();
     void errorChanged();
@@ -116,6 +141,8 @@ private:
     void setError(const QString &message, bool streamError = false);
     void requestHistory(bool append);
     void observeMission(const QJsonObject &mission);
+    void refreshRecommendations();
+    bool currentRecommendation(quint64 request) const;
     // A synchronous signal may delete the controller or select another mission.
     std::function<bool()> continuation();
     AgentApiClient m_api;
@@ -136,6 +163,18 @@ private:
     QString m_creationError;
     quint64 m_previewRequest = 0;
     bool m_creationReady = false;
+    QTimer m_recommendationTimer;
+    QUrl m_recommendationBackend;
+    QString m_recommendationRepository, m_recommendationError;
+    QJsonObject m_recommendationBody;
+    quint64 m_recommendationRequest = 0;
+    quint64 m_skillContextGeneration = 0, m_submittedSkillGeneration = 0;
+    QJsonArray m_recommendations;
+    QStringList m_selectedSkillIds;
+    bool m_submittedWithSkills = false;
+    quint64 m_missionSkillsRequest = 0;
+    QJsonObject m_missionSkills;
+    QString m_missionSkillsError;
     QString m_task, m_error;
     quint64 m_mutation = 0, m_artifactRequest = 0;
     quint64 m_generation = 0;

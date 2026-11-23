@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
 import pytest
@@ -22,6 +23,35 @@ from test_implementation_workflow import (
     make_case, patch, create, completed,
 )
 from test_workspace_manager import committed_repo, git
+from conftest import reply
+
+
+@pytest.mark.asyncio
+async def test_scope_approval_retries_restore_after_outbox_failure(tmp_path, committed_repo, git_exe):
+    ask = reply(json.dumps({"status": "awaiting_human", "summary": "Need header", "scope_expansion": {
+        "files": [{"path": "worker.hpp", "reason": "Declare the worker API", "plan_step_id": "STEP-1",
+                   "acceptance_criteria_ids": ["AC-1"]}]}}))
+    case = await make_case(tmp_path, committed_repo, git_exe, [patch(), ask])
+    try:
+        assert (await case.service.approve(case.review)).status is NodeStatus.AWAITING_HUMAN
+        expansions = case.service.scope_expansions
+        preview = expansions.preview(case.task_id)
+        decide = dict(approved=True, expected_revision=preview["revision"],
+                      before_approve=case.service.restore_scope_checkpoint,
+                      **{key: preview[key] for key in ("scope_hash", "task_spec_hash", "plan_hash")})
+        case.events._db.execute("""CREATE TEMP TRIGGER fail_scope_approval BEFORE INSERT ON graph_events
+            WHEN NEW.event_type='approval.approved' BEGIN SELECT RAISE(ABORT,'outbox failure'); END""")
+        with pytest.raises(sqlite3.IntegrityError, match="outbox failure"):
+            expansions.decide(case.task_id, **decide)
+        assert expansions.preview(case.task_id) == preview
+        assert expansions.approved_package(case.task_id) is None
+        assert (case.worktree / "source.txt").read_bytes() == SOURCE
+        case.events._db.execute("DROP TRIGGER fail_scope_approval")
+        expansions.decide(case.task_id, **decide)
+        assert expansions.approved_package(case.task_id) == (preview["task_spec_artifact_id"], preview["plan_artifact_id"])
+        assert_user_files_unchanged(case)
+    finally:
+        await close_case(case)
 
 
 @pytest.mark.asyncio

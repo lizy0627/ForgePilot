@@ -21,7 +21,9 @@ DeliveryController::DeliveryController(AgentApiClient *api, QObject *parent) : Q
         if (request != m_request) return;
         const auto current = continuation();
         m_request = 0; m_enabled = false; m_preview = {}; m_previewRevision = 0;
-        m_error = MissionProtocol::errorMessage(code, status);
+        if (m_mode == "recover" && !m_confirming && code == "delivery_recovery")
+            m_error = "当前工作区没有待核验的中断合并。";
+        else m_error = MissionProtocol::errorMessage(code, status);
         emit refreshRequired();
         if (current()) emit changed();
     });
@@ -64,6 +66,7 @@ bool DeliveryController::canPreview() const
 bool DeliveryController::canConfirm() const
 {
     static const QRegularExpression hash("^[0-9a-f]{64}$");
+    if (m_mode == "recover" && m_preview.value("outcome") != "completed" && m_preview.value("outcome") != "restored") return false;
     return canPreview() && !m_mode.isEmpty() && m_previewRevision == m_mission.value("current_revision").toInteger()
         && hash.match(m_preview.value("token").toString()).hasMatch()
         && m_preview.value("task_id") == m_mission.value("task_id");
@@ -81,7 +84,7 @@ QString DeliveryController::previewTarget() const
 { return busy() || !m_preview.isEmpty() ? m_target : QString{}; }
 void DeliveryController::prepare(const QString &mode, const QString &targetBranch)
 {
-    const QStringList modes{"squash", "keep_branch", "patch", "bundle", "abandon"};
+    const QStringList modes{"squash", "keep_branch", "patch", "bundle", "abandon", "recover"};
     if (mode == "abandon" && !abandonBlockReason().isEmpty()) {
         m_error = abandonBlockReason(); emit changed(); return;
     }
@@ -89,9 +92,9 @@ void DeliveryController::prepare(const QString &mode, const QString &targetBranc
         m_error = "当前任务不可执行所选交付操作，请刷新任务状态。"; emit changed(); return;
     }
     m_preview = {}; m_previewRevision = 0; m_result = {}; m_mode = mode;
-    m_target = targetBranch; m_error.clear(); m_confirming = false;
+    m_target = mode == "recover" ? QString{} : targetBranch; m_error.clear(); m_confirming = false;
     QJsonObject body{{"expected_revision", m_mission.value("current_revision")}, {"mode", mode}};
-    if (!targetBranch.isEmpty()) body.insert("target_branch", targetBranch);
+    if (!m_target.isEmpty()) body.insert("target_branch", m_target);
     m_request = m_api->deliverMission(m_mission.value("task_id").toString(), body); emit changed();
 }
 void DeliveryController::confirm()

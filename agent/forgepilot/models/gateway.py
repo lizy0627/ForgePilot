@@ -248,9 +248,10 @@ class GatewayClient:
         return None
 
     async def chat(self, messages, tools=None, *, output_schema=None,
-                   is_cancelled: Callable[[], bool] | None = None):
+                   is_cancelled: Callable[[], bool] | None = None,
+                   on_dispatch: Callable[[], None] | None = None, allow_recovery=True):
         iterator = self._request(messages, tools, stream=False, output_schema=output_schema,
-                                 is_cancelled=is_cancelled)
+                                 is_cancelled=is_cancelled, on_dispatch=on_dispatch, allow_recovery=allow_recovery)
         try:
             async for reply in iterator:
                 return reply
@@ -289,7 +290,7 @@ class GatewayClient:
                 raise ForgePilotError("policy_denied", "MCP is unavailable to this Agent")
 
     async def _request(self, messages, tools, *, stream, output_schema, diagnostics=None, model_started=None,
-                       is_cancelled: Callable[[], bool] | None = None):
+                       is_cancelled: Callable[[], bool] | None = None, on_dispatch=None, allow_recovery=True):
         messages, tools = deepcopy(messages), deepcopy(tools)
         self._check_tools(tools)
         validator = _output_validator(output_schema)
@@ -321,10 +322,15 @@ class GatewayClient:
             error = None
             pending_events = []
             request_hash = response_hash({"messages": messages, "tools": [t.model_dump() for t in tools or []]})
+            timeout = profile.timeout_seconds
+            if self.budget is not None:
+                timeout = min(timeout, self.budget.remaining_seconds())
+            # A durable dispatch receipt must succeed before handing messages to
+            # the provider. Local storage failures must not enter provider recovery.
+            if on_dispatch is not None:
+                on_dispatch()
+                on_dispatch = None
             try:
-                timeout = profile.timeout_seconds
-                if self.budget is not None:
-                    timeout = min(timeout, self.budget.remaining_seconds())
                 async with asyncio.timeout(timeout):
                     if stream:
                         kwargs = {"tools": deepcopy(tools)}
@@ -406,7 +412,7 @@ class GatewayClient:
                     yield reply
                 return
             category = category_of(error)
-            if emitted or repaired:
+            if emitted or repaired or not allow_recovery:
                 raise error
             if category == "schema" or error.code == "llm_tool_schema":
                 repaired = True

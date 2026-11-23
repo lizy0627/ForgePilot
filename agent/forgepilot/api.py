@@ -1,6 +1,6 @@
 """Thin FastAPI adapter for the existing task service and ordered session events."""
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import asyncio
 import hmac
 import json
@@ -9,7 +9,7 @@ from time import monotonic
 from urllib.parse import urlsplit
 from starlette.datastructures import Headers
 
-from fastapi import Body, FastAPI, Header, Request, Query
+from fastapi import Body, Depends, FastAPI, Header, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException
@@ -25,10 +25,11 @@ from .api_models import ConversationDetail, ConversationList, ConversationReques
 from .api_models import ConversationDeleted
 from .api_models import MemoryCreate,MemoryUpdate,MemoryRecord,MemoryList,MemoryDeleted,SummaryUpdate,SummaryState
 from .mcp_api import MCPRequestGuard, register_mcp_routes
-from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes
+from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_routes, register_skill_routes
 from .mission_host import MissionHost
 from .mission_events import MissionEventStream
 from .runtime_control import register_runtime_routes
+from .skill_draft_jobs import SkillDraftJobs
 
 MAX_API_BODY = 1_048_576
 MAX_API_TARGET = 8_192
@@ -145,7 +146,8 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
                model_client_closer=None, rag_coordinator=None, mission_factory=None,
-               mission_stream_max_subscribers=8, api_token=None, development_config=None):
+               mission_stream_max_subscribers=8, api_token=None, development_config=None, git_executable=None,
+               skill_gateway=None, skill_data_policy=None):
     if api_token is not None and (not isinstance(api_token, str) or not api_token or not api_token.isascii()):
         raise ValueError("Local API token must be nonempty ASCII")
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
@@ -157,26 +159,22 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         mcp_disabled=mcp_disabled)
     missions = MissionHost(workflow_factory=mission_factory, runtime=host.runtime,
         capacity=host.capacity, store=host.store, mcp_service=host.mcp_service,
-        mcp_disabled=mcp_disabled, development_config=development_config)
+        mcp_disabled=mcp_disabled, development_config=development_config, git_executable=git_executable)
     mission_streams = MissionEventStream(host.store, heartbeat_seconds=heartbeat_seconds,
                                         max_subscribers=mission_stream_max_subscribers)
+    draft_jobs = SkillDraftJobs(host.store, host.runtime, skill_gateway, skill_data_policy, capacity=host.capacity)
 
     @asynccontextmanager
     async def lifespan(app):
         await host.start()
-        try:
+        async with AsyncExitStack() as cleanup:
+            cleanup.push_async_callback(host.close, close_resources=model_client_closer)
+            cleanup.push_async_callback(conversations.close)
+            cleanup.push_async_callback(missions.close)
+            cleanup.push_async_callback(draft_jobs.close)
+            cleanup.push_async_callback(host.runtime.begin_shutdown)
+            await draft_jobs.start()
             yield
-        finally:
-            try:
-                try:
-                    await host.runtime.begin_shutdown()
-                finally:
-                    await missions.close()
-            finally:
-                try:
-                    await conversations.close()
-                finally:
-                    await host.close(close_resources=model_client_closer)
 
     app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
@@ -234,6 +232,11 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     async def validation_error(request, exc):
         # Never echo invalid input, request bodies, credentials, or raw validation contexts.
         if request.url.path.startswith("/api/v2/"):
+            if request.url.path == "/api/v2/missions" and any(
+                error["loc"][:2] == ("body", "selected_skills") for error in exc.errors()
+            ):
+                return error_response("invalid_skill_selection",
+                    "Select up to two distinct skill IDs, each with its integer version and content SHA-256", 422)
             return error_response("invalid_request", "Request does not match the v2 schema", 422)
         if request.url.path.startswith("/api/v1/mcp/"):
             # Even field names/loc entries may be an attacker-supplied secret.
@@ -252,6 +255,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
     register_mission_routes(app, missions, mission_streams)
+    register_skill_routes(app, host.store, draft_jobs)
     register_runtime_routes(app, host)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)
@@ -392,51 +396,38 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     async def stop_answer(conversation_id: str, request_id: str):
         return await conversations.stop(conversation_id,request_id)
 
+    async def conversation_event_batches(conversation_id: str, request_id: str, request: Request,
+                                         last_event_id: str | None = Header(default=None)):
+        accept=request.headers.get('accept','*/*')
+        if 'text/event-stream' not in accept and '*/*' not in accept:
+            raise ForgePilotError('invalid_request','此接口只提供 text/event-stream。')
+        batches = conversations.conversation_batches(conversation_id, request_id, last_event_id,
+            heartbeat_seconds=heartbeat_seconds, idle_seconds=conversation_stream_idle_seconds)
+        try:
+            yield batches
+        finally:
+            # Release the slot even if the connection closes before the first frame is sent.
+            await host.runtime.drain(batches.aclose())
+
     @app.get('/api/v1/conversations/{conversation_id}/requests/{request_id}/events',
         summary='Subscribe to one conversation answer stream',responses={**errors,
         200:{"description":"Bounded, resumable conversation answer SSE stream",
              "content":{"text/event-stream":{"schema":{"type":"string"}}}},
         204:{"description":"Terminal stream already fully acknowledged"}})
-    async def conversation_events(conversation_id: str, request_id: str, request: Request,
-                                  last_event_id: str | None = Header(default=None)):
-        accept=request.headers.get('accept','*/*')
-        if 'text/event-stream' not in accept and '*/*' not in accept:
-            raise ForgePilotError('invalid_request','此接口只提供 text/event-stream。')
-        subscription=conversations.conversation_stream(conversation_id,request_id,last_event_id)
-        initial=subscription.read()
-        if initial.terminal and not initial.events:
-            subscription.close()
+    async def conversation_events(batches=Depends(conversation_event_batches, scope='request')):
+        initial = await host.runtime.run_request(anext(batches, None))
+        if initial is None:
             return Response(status_code=204)
 
         async def stream():
-            idle_at=monotonic()
-            pending=initial
-            try:
-                yield 'retry: 1000\n\n'
-                while True:
-                    batch=pending
-                    pending=None
-                    if batch is None:
-                        batch=subscription.read()
-                    for event in batch.events:
-                        yield event.frame()
-                    if batch.events:
-                        idle_at=monotonic()
-                        continue
-                    # StreamingResponse cancels this generator when the socket
-                    # closes.  Polling Request.is_disconnected() here is not
-                    # reliable for every ASGI transport and could suppress the
-                    # first heartbeat before an idle reconnect.
-                    if batch.terminal:
-                        return
-                    remaining=conversation_stream_idle_seconds-(monotonic()-idle_at)
-                    if remaining<=0:
-                        return
-                    changed=await subscription.wait(min(heartbeat_seconds,remaining))
-                    if not changed:
-                        yield ': heartbeat\n\n'
-            finally:
-                subscription.close()
+            yield 'retry: 1000\n\n'
+            batch = initial
+            while batch is not None:
+                for event in batch.events:
+                    yield event.frame()
+                batch = await host.runtime.run_request(anext(batches, None))
+                if batch is not None and not batch.events:
+                    yield ': heartbeat\n\n'
 
         return StreamingResponse(stream(),media_type='text/event-stream',headers={
             'Cache-Control':'no-cache','X-Accel-Buffering':'no',

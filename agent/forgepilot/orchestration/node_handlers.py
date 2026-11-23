@@ -17,6 +17,7 @@ class NodeContext:
     input_artifact_hashes: tuple[str, ...]
     artifacts: ArtifactStore
     is_cancelled: Callable[[], bool]
+    checkpoint_id: str | None = None
 
 
 class NodeHandler(Protocol):

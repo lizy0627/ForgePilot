@@ -54,7 +54,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/McpSettingsPanel.qml panels/McpServerDialog.qml panels/McpToolsDialog.qml
     panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppTextField.qml panels/AppTextArea.qml panels/AppComboBox.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
-    workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
+    workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHistory.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
     workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js workbench/WorkflowTheme.js
     workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
     workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml
@@ -113,6 +113,7 @@ if(BUILD_TESTING)
     forgepilot_backend_test(ForgePilotMissionBackendTests tests/tst_mission_backend.cpp)
     forgepilot_backend_test(ForgePilotWorkbenchQmlTests tests/tst_workbench_qml.cpp)
     forgepilot_backend_test(ForgePilotWorkflowQmlTests tests/tst_workflow_qml.cpp)
+    add_dependencies(ForgePilotWorkflowQmlTests ForgePilotClient)
     target_compile_options(ForgePilotWorkflowQmlTests PRIVATE /utf-8)
     target_compile_definitions(ForgePilotWorkflowQmlTests PRIVATE FORGEPILOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME client_workflow_qml COMMAND ForgePilotWorkflowQmlTests -o "${CMAKE_CURRENT_BINARY_DIR}/workflow_qml-results.txt,txt")

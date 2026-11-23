@@ -38,10 +38,12 @@ class GraphRunner:
 
     def __init__(self, event_store, handlers: HandlerRegistry, *,
                  artifact_store=None, policy: FailurePolicy | None = None,
-                 workspace_backend=None, coordinator: ExecutionCoordinator | None = None) -> None:
+                 workspace_backend=None, coordinator: ExecutionCoordinator | None = None,
+                 resolve_approved_inputs: Callable[[str, tuple[str, ...]], tuple[str, ...]] | None = None) -> None:
         self.store = GraphStore(event_store)
         self.coordinator = coordinator if coordinator is not None else coordinator_for_storage(event_store)
         self.handlers = handlers
+        self.resolve_approved_inputs = resolve_approved_inputs
         self.artifacts = artifact_store or event_store.artifacts
         self.policy = policy or DefaultFailurePolicy()
         self.recovery = RecoveryManager(event_store, artifacts=self.artifacts,
@@ -62,7 +64,7 @@ class GraphRunner:
             snapshot = self.store.create_run(
                 task_id, validated, inputs=tuple(zip(requested_inputs, requested_hashes)),
                 policy_hash=self.policy.definition_hash)
-        self._assert_definition(snapshot, validated)
+        self.assert_definition(snapshot, validated)
         stored_inputs = self.store.initial_inputs(task_id)
         if requested_inputs and stored_inputs != tuple(zip(requested_inputs, requested_hashes)):
             raise ForgePilotError("graph_inputs_changed", "Persisted graph inputs do not match")
@@ -162,7 +164,7 @@ class GraphRunner:
         with self._exclusive_control():
             validated = validate_graph(graph)
             snapshot = self.store.snapshot(task_id)
-            self._assert_definition(snapshot, validated)
+            self.assert_definition(snapshot, validated)
             if self.store.recovery_required(task_id):
                 raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm recovery before approval")
             if snapshot.revision != expected_revision:
@@ -170,6 +172,8 @@ class GraphRunner:
             current = self._node(snapshot, node_id)
             if current.status is not NodeStatus.AWAITING_HUMAN or current.result is None:
                 raise ForgePilotError("invalid_state", "Node is not awaiting a human decision")
+            if recovery_role(validated.nodes[node_id]) == "writer":
+                raise ForgePilotError("invalid_state", "A paused writer requires a new authorized attempt")
             result = NodeResult(
                 status=NodeStatus.SUCCEEDED,
                 output_artifact_ids=current.result.output_artifact_ids,
@@ -193,7 +197,7 @@ class GraphRunner:
               expected_revision: int, input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
         validated = validate_graph(graph)
         snapshot = self.store.snapshot(task_id)
-        self._assert_definition(snapshot, validated)
+        self.assert_definition(snapshot, validated)
         current = self._node(snapshot, node_id)
         if (self.store.recovery_required(task_id) or current.status in {NodeStatus.INTERRUPTED, NodeStatus.RUNNING}
                 or recovery_role(validated.nodes[node_id]) in {"writer", "delivery"}):
@@ -213,14 +217,14 @@ class GraphRunner:
     def prepare_recovery(self, task_id: str, graph: GraphDefinition):
         with self._exclusive_control():
             validated = validate_graph(graph)
-            self._assert_definition(self.store.snapshot(task_id), validated)
+            self.assert_definition(self.store.snapshot(task_id), validated)
             return self.recovery.prepare(task_id, graph)
 
     def confirm_recovery(self, task_id: str, graph: GraphDefinition, *, token: str,
                          expected_revision: int) -> GraphSnapshot:
         with self._exclusive_control():
             validated = validate_graph(graph)
-            self._assert_definition(self.store.snapshot(task_id), validated)
+            self.assert_definition(self.store.snapshot(task_id), validated)
             return self.recovery.confirm(task_id, graph, token=token, expected_revision=expected_revision)
 
     @contextmanager
@@ -245,7 +249,7 @@ class GraphRunner:
         except StopIteration:
             raise ForgePilotError("unknown_node", "Graph node does not exist") from None
 
-    def _assert_definition(self, snapshot: GraphSnapshot, graph: ValidatedGraph) -> None:
+    def assert_definition(self, snapshot: GraphSnapshot, graph: ValidatedGraph) -> None:
         if (snapshot.graph_id != graph.definition.graph_id
                 or snapshot.graph_version != graph.definition.version
                 or snapshot.definition_hash != graph.definition.definition_hash
@@ -353,6 +357,13 @@ class GraphRunner:
         hashes = self._validate_artifacts(task_id, artifact_ids)
         if frozen is not None and hashes != tuple(value for _, value in frozen):
             raise ForgePilotError("artifact_integrity", "Frozen retry inputs changed")
+        # A human-approved package revision applies only to the new execution
+        # identity. The previous attempt and its frozen artifacts remain intact.
+        if self.resolve_approved_inputs is not None:
+            revised = self.resolve_approved_inputs(task_id, artifact_ids)
+            if revised != artifact_ids:
+                artifact_ids = revised
+                hashes = self._validate_artifacts(task_id, artifact_ids)
         baseline = None
         if recovery_role(definition) == "writer":
             baseline = self.recovery.writer_preflight(task_id)
@@ -390,6 +401,7 @@ class GraphRunner:
             input_artifact_ids=artifact_ids, input_artifact_hashes=hashes,
             artifacts=self.artifacts,
             is_cancelled=lambda: self.store.is_cancelled(task_id, state.node_id),
+            checkpoint_id=baseline.checkpoint_id if baseline else None,
         )
         started = monotonic()
         try:
@@ -483,6 +495,10 @@ class GraphRunner:
                     graph_status = status
                     break
             cp = self.recovery.record_completed(task_id, definition, attempt, result, baseline=baseline)
+            if target is NodeStatus.AWAITING_HUMAN and baseline is not None:
+                observe_pause = getattr(self.recovery.workspace, "record_writer_pause", None)
+                if observe_pause is not None:
+                    observe_pause(task_id)
             return self.store.transition(
                 task_id, state.node_id, expected_revision=current.revision,
                 source=NodeStatus.RUNNING, target=target,

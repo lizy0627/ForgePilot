@@ -18,6 +18,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUrlQuery>
@@ -150,6 +151,10 @@ struct Fixture {
                         QJsonObject{{"name", "write"}, {"compatible", false}, {"annotations", QJsonObject{{"readOnlyHint", false}}}}}}});
             } else if (request.path.startsWith("/api/v1/")) {
                 Source::json(request, {{"items", QJsonArray{}}, {"total", 0}, {"next_cursor", QJsonValue::Null}});
+            } else if (request.path == "/api/v2/skills/recommendations" && request.method == "POST") {
+                Source::json(request, {{"recommendations", QJsonArray{}}});
+            } else if (request.path.endsWith("/skills") && request.method == "GET") {
+                Source::json(request, {{"task_id", MissionId}, {"selected_skills", QJsonArray{}}, {"injections", QJsonArray{}}});
             } else if (request.path == "/api/v2/missions/preview" && request.method == "POST") {
                 const auto paths = request.body.value("baseline_paths").toArray();
                 Source::json(request, {{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
@@ -287,8 +292,11 @@ struct Ui {
     QStringList warnings;
 
     explicit Ui(Fixture &fixture, int width = 1600, int height = 900, RuntimeConfigController *runtime = nullptr)
+        : Ui(fixture.source.url(), width, height, runtime) {}
+
+    explicit Ui(const QUrl &url, int width = 1600, int height = 900, RuntimeConfigController *runtime = nullptr)
     {
-        tasks.setBaseUrl(fixture.source.url()); missions.setBaseUrl(fixture.source.url());
+        tasks.setBaseUrl(url); missions.setBaseUrl(url);
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings.append(error.toString());
         });
@@ -396,14 +404,86 @@ private slots:
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
+    void historyNavigationPreservesTheDraft_data()
+    {
+        QTest::addColumn<int>("width");
+        QTest::addColumn<bool>("docked");
+        QTest::newRow("desktop") << 1320 << true;
+        QTest::newRow("minimum") << 860 << false;
+    }
+    void historyNavigationPreservesTheDraft()
+    {
+        QFETCH(int, width);
+        QFETCH(bool, docked);
+        Fixture fixture;
+        fixture.intercept = [&](const Request &request) {
+            if (request.method != "GET" || !request.path.startsWith("/api/v2/missions?")) return false;
+            Source::json(request, {{"items", QJsonArray{fixture.mission}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            return true;
+        };
+        Ui ui(fixture, width, 640);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        auto *page = ui.find("workflowPage"); QVERIFY(page);
+        QTRY_COMPARE(page->property("historyVisible").toBool(), docked);
+        auto *goal = ui.find("missionRequestInput"); QVERIFY(goal && goal->isVisible());
+        auto *repository = ui.find("missionRepositoryInput"); QVERIFY(repository && repository->isVisible());
+        auto *rag = ui.find("missionUseRag"); QVERIFY(rag && !rag->isVisible());
+        auto *graph = ui.find("workflowGraph"); QVERIFY(graph && !graph->isVisible());
+        if (docked) {
+            auto *sidebar = ui.find("workflowHistorySidebar"); QVERIFY(sidebar && sidebar->isVisible());
+            QVERIFY(sidebar->mapToScene(QPointF(sidebar->width(), 0)).x() <= goal->mapToScene(QPointF()).x());
+        }
+        QVERIFY(ui.capture(docked ? "workflow-compose-wide" : "workflow-compose-narrow"));
+        goal->setProperty("text", "保留尚未提交的任务目标");
+        repository->setProperty("text", "D:/fixture/draft");
+        if (docked) {
+            QVERIFY(ui.click("workflowHistoryToggle"));
+            QTRY_VERIFY(!page->property("historyVisible").toBool());
+        }
+        QVERIFY(ui.click("workflowHistoryToggle"));
+        QTRY_VERIFY(page->property("historyVisible").toBool());
+        QTRY_VERIFY(ui.find("workflowHistorySidebar"));
+        auto *sidebar = ui.find("workflowHistorySidebar");
+        QTRY_VERIFY(sidebar->isVisible() && sidebar->mapToScene(QPointF()).x() >= -1);
+        QTRY_VERIFY(ui.find("missionTaskRow", "taskId", MissionId));
+        QVERIFY(ui.click(ui.find("missionTaskRow", "taskId", MissionId)));
+        QTRY_COMPARE(ui.missions.taskId(), MissionId);
+        QTRY_VERIFY(graph->isVisible());
+        QVERIFY(!goal->isVisible());
+        QTRY_COMPARE(page->property("historyVisible").toBool(), docked);
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QTRY_VERIFY(goal->isVisible());
+        QVERIFY(!graph->isVisible());
+        QCOMPARE(goal->property("text").toString(), QString("保留尚未提交的任务目标"));
+        QCOMPARE(repository->property("text").toString(), QString("D:/fixture/draft"));
+        if (docked) {
+            ui.window->resize(860, 640);
+            QTRY_VERIFY(page->property("compactHistory").toBool());
+            QTRY_VERIFY(!page->property("historyVisible").toBool());
+            QVERIFY(ui.click("workflowHistoryToggle"));
+            QTRY_VERIFY(sidebar->isVisible() && sidebar->mapToScene(QPointF()).x() >= -1);
+            ui.window->resize(width, 640);
+            QTRY_VERIFY(!page->property("compactHistory").toBool());
+            QTRY_VERIFY(sidebar->isVisible());
+            // An orphaned modal overlay would intercept this click after the drawer redocks.
+            QTRY_VERIFY(ui.click(goal) && goal->hasActiveFocus());
+            QTest::keyClick(ui.window, Qt::Key_End, Qt::ControlModifier);
+            QTest::keyClick(ui.window, Qt::Key_X);
+            QCOMPARE(goal->property("text").toString(), QString("保留尚未提交的任务目标x"));
+        }
+        QVERIFY(fixture.creates.isEmpty());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void openingMissionByIdShowsErrorsInEmptyWorkbench()
     {
         Fixture fixture;
         Ui ui(fixture);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("agentWorkbenchModeButton"));
-        auto *input = ui.find("missionIdInput"); QVERIFY(input);
-        auto *open = ui.find({}, "text", "打开", input->parentItem()); QVERIFY(open);
+        QVERIFY(ui.click("missionHistoryFiltersToggle"));
+        auto *input = ui.find("missionIdInput"); QVERIFY(input && input->isVisible());
+        auto *open = ui.find("missionOpenById"); QVERIFY(open);
         QVERIFY(ui.missions.taskId().isEmpty());
         input->setProperty("text", "invalid-id");
         QVERIFY(ui.click(open));
@@ -655,8 +735,9 @@ private slots:
         const auto python = qEnvironmentVariable("FORGEPILOT_TEST_PYTHON", root + "/agent.venv/Scripts/python.exe");
         QVERIFY2(QFileInfo::exists(python), "Set FORGEPILOT_TEST_PYTHON to the existing Python 3.12 environment");
         const auto configPath = directory.filePath("config.json");
+        const QStringList launcher{"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"};
         RuntimeConfigController runtime;
-        runtime.setHelperCommand(python, {"-X", "utf8", "-I", root + "/scripts/desktop_launcher.py"}, configPath);
+        runtime.setHelperCommand(python, launcher, configPath);
         Fixture fixture; Ui ui(fixture, 1280, 900, &runtime);
         ui.tasks.setBaseUrl(QUrl("http://127.0.0.1:1")); ui.missions.setBaseUrl(QUrl("http://127.0.0.1:1"));
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
@@ -671,6 +752,11 @@ private slots:
             auto *input = ui.find(name); QVERIFY2(input, qPrintable(name)); input->setProperty("text", value);
             QVERIFY(QMetaObject::invokeMethod(input, "textEdited"));
         }
+        QTcpServer occupied;
+        QVERIFY(occupied.listen(QHostAddress::LocalHost));
+        auto *port = ui.find("runtimePort"); QVERIFY(port);
+        port->setProperty("value", occupied.serverPort());
+        QVERIFY(QMetaObject::invokeMethod(port, "valueModified"));
         auto *key = ui.find("runtimeApiKey"); QVERIFY(key);
         const QString dummyKey = "offline-gui-dummy-key-not-a-real-credential";
         key->setProperty("text", dummyKey); QVERIFY(ui.click("runtimeConfigSave"));
@@ -724,8 +810,28 @@ print(json.dumps(result))
         QCOMPARE(routing.value("chat").toObject().value("model").toString(), "offline-chat");
         QCOMPARE(routing.value("summary").toObject().value("model").toString(), "offline-summary");
         QVERIFY(ui.capture("runtime-configuration-real-helper"));
+        {
+            const auto stop = qScopeGuard([&] {
+                QCOMPARE(QProcess::execute(python, launcher + QStringList{"stop", "--config", configPath}), 0);
+            });
+            QSignalSpy accepted(&runtime, &RuntimeConfigController::restartAccepted);
+            QVERIFY(ui.click("runtimeConfigRestart"));
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 30000);
+            QCOMPARE(accepted.count(), 0);
+            QVERIFY(dialog->property("visible").toBool());
+            QVERIFY(runtime.configured() && runtime.restartAllowed() && runtime.restartRequired());
+            auto *notice = ui.find("runtimeConfigMessage"); QVERIFY(notice && notice->isVisible());
+            QVERIFY2(notice->property("text").toString().contains("端口"), qPrintable(runtime.message()));
+            QVERIFY(config.open(QIODevice::ReadOnly)); QCOMPARE(config.readAll(), bytes); config.close();
+
+            occupied.close();
+            QVERIFY(ui.click("runtimeConfigRestart"));
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 180000);
+            QCOMPARE(accepted.count(), 1);
+            QVERIFY(!runtime.restartRequired());
+        }
         // A Python-generated configuration is reloaded through the same helper,
-        // without checking model endpoints or restarting any real service.
+        // without checking model endpoints.
         QVERIFY(ui.click("runtimeConfigReload")); QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 15000);
         QVERIFY(runtime.configured()); QVERIFY(runtime.hasApiKey());
         QCOMPARE(runtime.fields().value("task_model").toString(), "offline-task");
@@ -821,11 +927,243 @@ print(json.dumps(result))
         QCOMPARE(ui.mcp.draft().value("modes").toList(), QVariantList{"task"});
         QVERIFY(ui.mcp.canSave());
     }
+    void skillChoicesFromMainSubmitOnlyCheckedVersions_data()
+    {
+        QTest::addColumn<bool>("selectSkill");
+        QTest::addColumn<bool>("preset");
+        QTest::newRow("zero-checked") << false << false;
+        QTest::newRow("one-checked") << true << false;
+        QTest::newRow("preview-confirms-cmake") << true << true;
+    }
+    void skillChoicesFromMainSubmitOnlyCheckedVersions()
+    {
+        QFETCH(bool, selectSkill);
+        QFETCH(bool, preset);
+        Fixture fixture;
+        const auto examples = fixtureJson("protocol/examples.json");
+        const auto response = examples.value("skill_recommendations_response").toObject();
+        const auto candidate = response.value("recommendations").toArray().first().toObject();
+        const auto identity = examples.value("mission_create_with_skills_request").toObject()
+                                  .value("selected_skills").toArray().first();
+        QList<QJsonObject> recommendations;
+        int previews = 0, discards = 0;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path == "/api/v2/skills/recommendations" && request.method == "POST") {
+                recommendations.append(request.body);
+                Source::json(request, response);
+                return true;
+            }
+            if (request.path == "/api/v2/missions/preview") {
+                ++previews;
+                if (preset) {
+                    Source::json(request, {{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
+                        {"source_head", QString(40, 'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{}},
+                        {"patch", ""}, {"build", QJsonObject{{"source", "preset"}, {"configure_preset", "release"}}}});
+                    return true;
+                }
+            }
+            if (request.method == "DELETE" && request.path.startsWith("/api/v2/missions/previews/")) ++discards;
+            return false;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        const QString description = "保存成功但列表仍显示旧值";
+        auto *prompt = ui.find("missionRequestInput");
+        QVERIFY(prompt);
+        prompt->setProperty("text", "保存");
+        prompt->setProperty("text", description);
+        ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/Qt");
+        ui.find("missionTaskType")->setProperty("currentIndex", 1);
+        QTRY_VERIFY(ui.find("missionSkillChoice"));
+        auto *choice = ui.find("missionSkillChoice");
+        QVERIFY(choice->isVisible());
+        QVERIFY(!choice->property("checked").toBool());
+        QVERIFY(choice->property("text").toString().contains(candidate.value("name").toString()));
+        QVERIFY(choice->property("text").toString().contains("1"));
+        QVERIFY(ui.find("missionSkillReasons")->property("text").toString()
+                    .contains(candidate.value("reasons").toArray().first().toString()));
+        auto *summary = ui.find("missionSkillSummary");
+        QVERIFY(summary && !summary->isVisible());
+        QVERIFY(ui.click("missionSkillSummaryToggle"));
+        QTRY_VERIFY(summary->isVisible());
+        QCOMPARE(summary->property("text").toString(), candidate.value("summary").toString());
+        QCOMPARE(recommendations.size(), 1);
+        const auto body = recommendations.first();
+        QCOMPARE(body.value("description").toString(), description);
+        QCOMPARE(body.value("task_type").toString(), QString("bug_fix"));
+        QVERIFY(!body.contains("repository_path"));
+        QVERIFY(body.value("project_tags").toArray().isEmpty());
+        QCOMPARE(previews, 0);
+        if (preset) {
+            QVERIFY(ui.click(choice));
+            QVERIFY(choice->property("checked").toBool());
+        }
+        QVERIFY(ui.click("missionPreviewButton"));
+        QTRY_VERIFY(ui.missions.creationReady());
+        if (preset) {
+            QTRY_COMPARE(recommendations.size(), 2);
+            QCOMPARE(recommendations.last().value("project_tags").toArray(), QJsonArray{"cmake"});
+            QTRY_VERIFY(ui.find("missionSkillChoice"));
+            choice = ui.find("missionSkillChoice");
+            QVERIFY(!choice->property("checked").toBool());
+        }
+        const auto token = ui.missions.creationPreview().value("preview_token").toString();
+        if (selectSkill) {
+            QVERIFY(ui.click(choice));
+            QTRY_VERIFY(ui.find("missionSkillChoice")->property("checked").toBool());
+            if (!preset) QVERIFY(ui.find("missionSkillSummary")->isVisible());
+        }
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        const auto posted = fixture.creates.first();
+        QCOMPARE(posted.value("request").toString(), description);
+        QCOMPARE(posted.value("preview_token").toString(), token);
+        if (selectSkill) QCOMPARE(posted.value("selected_skills").toArray(), QJsonArray{identity});
+        else QVERIFY(!posted.contains("selected_skills"));
+        QCOMPARE(previews, 1);
+        QCOMPARE(discards, 0);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void rejectedSkillSelectionPreservesDraft_data()
+    {
+        QTest::addColumn<bool>("legacy");
+        QTest::newRow("version-conflict") << false;
+        QTest::newRow("backend-rejects-selected-field") << true;
+    }
+    void rejectedSkillSelectionPreservesDraft()
+    {
+        QFETCH(bool, legacy);
+        Fixture fixture;
+        const auto examples = fixtureJson("protocol/examples.json");
+        const auto offered = examples.value("skill_recommendations_response").toObject();
+        auto candidate = offered.value("recommendations").toArray().first().toObject();
+        QList<QJsonObject> attempts;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path == "/api/v2/skills/recommendations") {
+                if (attempts.isEmpty()) Source::json(request, offered);
+                else if (legacy) Source::json(request, {{"error", QJsonObject{{"code", "route_not_found"},
+                    {"message", "Route not found"}, {"details", QJsonArray{}}, {"task_id", QJsonValue::Null}}}}, 404);
+                else {
+                    candidate["version"] = 2;
+                    candidate["content_sha256"] = QString(64, 'd');
+                    Source::json(request, {{"recommendations", QJsonArray{candidate}}});
+                }
+                return true;
+            }
+            if (request.path == "/api/v2/missions" && request.method == "POST") {
+                attempts.append(request.body);
+                if (attempts.size() > 1) return false;
+                auto error = examples.value("mission_skill_selection_changed_error").toObject();
+                if (legacy) {
+                    auto detail = error.value("error").toObject();
+                    detail["code"] = "invalid_request";
+                    detail["message"] = "Request does not match the v2 schema";
+                    error["error"] = detail;
+                }
+                Source::json(request, error, legacy ? 422 : 409);
+                return true;
+            }
+            return false;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        const QString description = "保存成功但列表仍显示旧值";
+        const QString repository = "D:/fixture/repository";
+        auto *prompt = ui.find("missionRequestInput");
+        auto *repo = ui.find("missionRepositoryInput");
+        prompt->setProperty("text", description);
+        repo->setProperty("text", repository);
+        QTRY_VERIFY(ui.find("missionSkillChoice"));
+        QVERIFY(ui.click("missionPreviewButton"));
+        QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionSkillChoice"));
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_VERIFY(!ui.missions.creationError().isEmpty());
+        QVERIFY(ui.find("missionCreationError")->isVisible());
+        QVERIFY(prompt->isVisible());
+        QCOMPARE(prompt->property("text").toString(), description);
+        QCOMPARE(repo->property("text").toString(), repository);
+        if (legacy) {
+            QTRY_VERIFY(!ui.missions.recommendationError().isEmpty());
+            QVERIFY(!ui.find("missionSkillChoice"));
+        } else {
+            QTRY_VERIFY(ui.find("missionSkillChoice") && ui.find("missionSkillChoice")->property("text").toString().contains("v2"));
+            QVERIFY(!ui.find("missionSkillChoice")->property("checked").toBool());
+            QVERIFY(ui.click("missionSkillChoice"));
+        }
+        QCOMPARE(attempts.size(), 1);
+        if (!ui.missions.creationReady()) {
+            QVERIFY(ui.click("missionPreviewButton"));
+            QTRY_VERIFY(ui.missions.creationReady());
+        }
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        QCOMPARE(attempts.size(), 2);
+        QCOMPARE(attempts.first().value("selected_skills").toArray().first().toObject().value("version").toInt(), 1);
+        if (legacy) QVERIFY(!attempts.last().contains("selected_skills"));
+        else {
+            const QJsonObject updated{{"skill_id", candidate.value("skill_id")}, {"version", 2},
+                                      {"content_sha256", candidate.value("content_sha256")}};
+            QCOMPARE(attempts.last().value("selected_skills").toArray(), QJsonArray{updated});
+        }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void skillHistoryFromMainLoadsFrozenUsageOnDemand_data()
+    {
+        QTest::addColumn<QString>("status");
+        QTest::newRow("active") << QString("running");
+        QTest::newRow("history") << QString("succeeded");
+    }
+    void skillHistoryFromMainLoadsFrozenUsageOnDemand()
+    {
+        QFETCH(QString, status);
+        Fixture fixture;
+        fixture.setPhase(status, status == "running" ? "implementer" : "");
+        auto usage = fixtureJson("protocol/examples.json").value("mission_skills_response").toObject();
+        usage["task_id"] = MissionId;
+        int usageReads = 0;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path.startsWith("/api/v2/missions?")) {
+                Source::json(request, {{"items", QJsonArray{fixture.mission}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+                return true;
+            }
+            if (request.method == "GET" && request.path == "/api/v2/missions/" + MissionId.toUtf8() + "/skills") {
+                ++usageReads;
+                Source::json(request, usage);
+                return true;
+            }
+            return false;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        QTRY_VERIFY(ui.find("missionTaskRow", "taskId", MissionId));
+        QVERIFY(ui.click(ui.find("missionTaskRow", "taskId", MissionId)));
+        QTRY_VERIFY(ui.missions.synchronized());
+        QCOMPARE(usageReads, 0);
+        QVERIFY(ui.click("workflowSkillHistoryButton"));
+        QTRY_COMPARE(usageReads, 1);
+        QTRY_VERIFY(ui.find("missionSkillHistoryText") && ui.find("missionSkillHistoryText")->isVisible());
+        auto *history = ui.find("missionSkillHistoryText");
+        for (const auto &selected : usage.value("selected_skills").toArray()) {
+            const auto skill = selected.toObject();
+            QTRY_VERIFY(history->property("text").toString().contains(
+                skill.value("skill_id").toString() + " · v" + QString::number(skill.value("version").toInt())));
+            QVERIFY(history->property("text").toString().contains(skill.value("content_sha256").toString()));
+        }
+        const auto text = history->property("text").toString();
+        QVERIFY(text.contains("已提供给模型 · 分析问题根因 · 第 1 次尝试"));
+        QVERIFY(text.contains("尚无提供给模型的记录"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void missionMcpChoicesRequireExplicitReadOnlyAnnotation()
     {
         Fixture fixture; Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("agentWorkbenchModeButton")); QTRY_VERIFY(!ui.mcp.missionLoading());
         QCOMPARE(ui.mcp.missionChoices().size(), 1);
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.find("missionMcpChoice", "serverId", McpId));
         QVERIFY(!ui.find("missionMcpChoice", "serverId", Validation0));
         // compatible=true and effect=read cannot substitute for the tool annotation.
@@ -837,6 +1175,7 @@ print(json.dumps(result))
         Fixture fixture; Ui ui(fixture);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n'))); QVERIFY(ui.click("agentWorkbenchModeButton"));
         QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         auto *choice = ui.find("missionMcpChoice", "serverId", McpId); QVERIFY(choice); QVERIFY(ui.click(choice));
         fixture.intercept = [](const Request &request) {
             if (request.path != "/api/v1/mcp/servers") return false;
@@ -856,6 +1195,7 @@ print(json.dumps(result))
         QVERIFY(fixture.creates.first().value("mcp_server_ids").toArray().isEmpty());
         QVERIFY(!fixture.creates.first().value("use_rag").toBool());
         QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowToolContextToggle"));
         QVERIFY(ui.find("missionToolContext")->property("text").toString().contains("MCP：未选择"));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
@@ -877,6 +1217,7 @@ print(json.dumps(result))
         QTRY_VERIFY_WITH_TIMEOUT(!ui.mcp.missionLoading(), 15000);
         QVERIFY2(ui.mcp.missionError().isEmpty(), qPrintable(ui.mcp.missionError()));
         if (restoredTask.isEmpty()) {
+            QVERIFY(ui.click("missionAdvancedToggle"));
             if (backend.isEmpty()) QCOMPARE(ui.mcp.missionChoices().size(), 1);
             auto *choice = ui.find("missionMcpChoice", "serverId", serverId); QVERIFY(choice);
             QVERIFY(choice->property("text").toString().contains(toolName));
@@ -905,7 +1246,8 @@ print(json.dumps(result))
         const auto snapshot = QJsonObject::fromVariantMap(ui.missions.snapshot());
         QVERIFY(snapshot.value("use_rag").toBool()); QCOMPARE(snapshot.value("mcp_server_ids").toArray(), QJsonArray{serverId});
         QVERIFY(snapshot.value("tool_context").toObject().value("rag").toObject().value("requested").toBool());
-        auto *context = ui.find("missionToolContext"); QVERIFY(context); QVERIFY(context->isVisible());
+        auto *context = ui.find("missionToolContext"); QVERIFY(context); QVERIFY(!context->isVisible());
+        QVERIFY(ui.click("workflowToolContextToggle")); QTRY_VERIFY(context->isVisible());
         QTRY_VERIFY(context->property("text").toString().contains(toolName));
         if (backend.isEmpty()) {
             QVERIFY(context->property("text").toString().contains("vector_unavailable"));
@@ -926,13 +1268,22 @@ print(json.dumps(result))
         }
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void legacyWorkModePreviewsBaselineBeforeCreatingMission_data()
+    {
+        QTest::addColumn<bool>("switchChat");
+        QTest::newRow("same-repository") << false;
+        QTest::newRow("other-repository") << true;
+    }
     void legacyWorkModePreviewsBaselineBeforeCreatingMission()
     {
+        QFETCH(bool, switchChat);
+        const QString nextRepository = switchChat ? "D:/fixture/other" : "D:/fixture/repository";
         Fixture fixture;
         fixture.intercept = [](const Request &request) {
-            if(request.path == "/api/v1/conversations/" + A.toUtf8()) {
-                Source::json(request, {{"conversation_id", A}, {"title", "旧工作对话"},
-                    {"repository_path", "D:/fixture/repository"}, {"messages", QJsonArray{}}});
+            const bool other = request.path == "/api/v1/conversations/" + B.toUtf8();
+            if(other || request.path == "/api/v1/conversations/" + A.toUtf8()) {
+                Source::json(request, {{"conversation_id", other ? B : A}, {"title", "旧工作对话"},
+                    {"repository_path", other ? "D:/fixture/other" : "D:/fixture/repository"}, {"messages", QJsonArray{}}});
                 return true;
             }
             return false;
@@ -947,10 +1298,17 @@ print(json.dumps(result))
         QVERIFY(ui.find("missionBaselineSummary")->property("text").toString().contains(QString(40, 'a')));
         QVERIFY(ui.click("missionBaselineFile"));
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionAdvancedToggle"));
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
         QVERIFY(ui.click("freeChatModeButton"));
-        ui.conversations.setMode("task"); ui.conversations.sendMessage("同一仓库的下一项需求");
-        QCOMPARE(ui.find("missionRequestInput")->property("text").toString(), QString("同一仓库的下一项需求"));
-        QCOMPARE(ui.find("missionRepositoryInput")->property("text").toString(), QString("D:/fixture/repository"));
+        if (switchChat) {
+            ui.conversations.selectConversation(B);
+            QTRY_COMPARE(ui.conversations.repositoryPath(), nextRepository);
+        }
+        ui.conversations.setMode("task"); ui.conversations.sendMessage("聊天中的下一项需求");
+        QCOMPARE(ui.find("missionRequestInput")->property("text").toString(), QString("聊天中的下一项需求"));
+        QCOMPARE(ui.find("missionRepositoryInput")->property("text").toString(), nextRepository);
         QVERIFY(ui.missions.creationPreview().isEmpty());
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
@@ -961,10 +1319,13 @@ print(json.dumps(result))
         QTRY_VERIFY(ui.missions.synchronized());
         QVERIFY(ui.window->property("agentMode").toBool());
         QCOMPARE(ui.conversations.mode(), QString("chat"));
-        QCOMPARE(fixture.creates.first().value("repository_path").toString(), QString("D:/fixture/repository"));
-        QCOMPARE(fixture.creates.first().value("request").toString(), QString("同一仓库的下一项需求"));
+        QCOMPARE(fixture.creates.first().value("repository_path").toString(), nextRepository);
+        QCOMPARE(fixture.creates.first().value("request").toString(), QString("聊天中的下一项需求"));
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(fixture.creates.first().value("use_rag"), QJsonValue(ui.rag.useForTasks()));
         for(const auto &request:fixture.source.requests)
-            if(request.method == "POST") QVERIFY(request.path == "/api/v2/missions" || request.path == "/api/v2/missions/preview");
+            if(request.method == "POST") QVERIFY(request.path == "/api/v2/missions" || request.path == "/api/v2/missions/preview"
+                || request.path == "/api/v2/skills/recommendations");
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void convertedChatDraftCreatesMissionWithoutHistory()
@@ -999,11 +1360,17 @@ print(json.dumps(result))
         QVERIFY(ui.missions.creationPreview().isEmpty());
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
 
+        repository->setProperty("text", "D:/fixture/other");
+        QVERIFY(ui.click("missionAdvancedToggle"));
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
         repository->setProperty("text", "D:/fixture/repository");
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
         QVERIFY(ui.click("missionCreateButton"));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QVERIFY(fixture.creates.first().value("baseline_paths").toArray().isEmpty());
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(fixture.creates.first().value("use_rag"), QJsonValue(ui.rag.useForTasks()));
         QCOMPARE(fixture.creates.first().value("request").toString(), QString("选定的任务文本"));
         QVERIFY(!fixture.creates.first().contains("conversation_id"));
         QCOMPARE(ui.conversations.mode(), QString("chat"));
@@ -1039,6 +1406,58 @@ print(json.dumps(result))
         QCOMPARE(fixture.creates.size(), 1);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void draftToolsSurviveFailedCreateAndResetForNextMission()
+    {
+        Fixture fixture;
+        QJsonObject failedRequest;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path != "/api/v2/missions" || request.method != "POST" || !failedRequest.isEmpty())
+                return false;
+            failedRequest = request.body;
+            Source::json(request, {{"error", QJsonObject{{"code", "preview_stale"}, {"message", "Refresh the preview"}}}}, 409);
+            return true;
+        };
+        Ui ui(fixture);
+        ui.rag.setUseForTasks(false);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        auto *prompt = ui.find("missionRequestInput"); QVERIFY(prompt);
+        prompt->setProperty("text", "Task A");
+        ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/repository");
+        QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(ui.click("missionAdvancedToggle"));
+        QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
+        QVERIFY(ui.click("missionUseRag"));
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_VERIFY(!ui.missions.creationError().isEmpty());
+        QCOMPARE(failedRequest.value("mcp_server_ids"), QJsonValue(QJsonArray{McpId}));
+        QCOMPARE(failedRequest.value("use_rag"), QJsonValue(true));
+
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 1);
+        QCOMPARE(fixture.creates.first().value("request"), QJsonValue("Task A"));
+        QCOMPARE(fixture.creates.first().value("mcp_server_ids"), failedRequest.value("mcp_server_ids"));
+        QCOMPARE(fixture.creates.first().value("use_rag"), failedRequest.value("use_rag"));
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowDemandToggle"));
+        prompt->setProperty("text", "Task B");
+        QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_COMPARE(fixture.creates.size(), 2);
+        const auto next = fixture.creates.last();
+        QCOMPARE(next.value("request"), QJsonValue("Task B"));
+        QCOMPARE(next.value("repository_path"), failedRequest.value("repository_path"));
+        QCOMPARE(next.value("mcp_server_ids"), QJsonValue(QJsonArray{}));
+        QCOMPARE(next.value("use_rag"), QJsonValue(false));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void selectedFilesRequirePatchPreviewAndFreshConfirmation()
     {
         Fixture fixture; Ui ui(fixture);
@@ -1055,6 +1474,7 @@ print(json.dumps(result))
         auto *confirmation=ui.find("missionBaselineConfirmation"); QVERIFY(confirmation);
         QVERIFY(!confirmation->property("checked").toBool()); QVERIFY(!ui.find("missionCreateButton")->isEnabled());
         QVERIFY(ui.click(confirmation)); QVERIFY(ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.click(ui.find("missionUsePresets")));
         QVERIFY(!ui.missions.creationReady()); QVERIFY(!confirmation->property("checked").toBool());
         ui.find("missionConfigurePreset")->setProperty("text", "unsupported");
@@ -1339,6 +1759,109 @@ print(json.dumps(result))
         QCOMPARE(fixture.approvals.size(), 1);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void scopeExpansionFromMain()
+    {
+        const auto backend = qEnvironmentVariable("FORGEPILOT_SCOPE_URL");
+        if (backend.isEmpty()) QSKIP("Run client/tests/run_scope_expansion_integration.py for the local backend");
+        const auto mode = qEnvironmentVariable("FORGEPILOT_SCOPE_MODE");
+        const bool repair = mode == "approve";
+        const QString writer = repair ? "repair_1" : "implementer";
+        Ui ui{QUrl(backend)};
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.find("missionRequestInput")->setProperty("text", "Clamp negative inputs via a shared header");
+        ui.find("missionRepositoryInput")->setProperty("text", qEnvironmentVariable("FORGEPILOT_SCOPE_REPOSITORY"));
+        QVERIFY(ui.click("missionPreviewButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(ui.missions.creationReady(), 20000);
+        QVERIFY(ui.click("missionCreateButton"));
+        QTRY_VERIFY_WITH_TIMEOUT(ui.missions.approval()->available(), 30000);
+        const auto task = ui.missions.taskId();
+        QVERIFY(!task.isEmpty());
+        QVERIFY(ui.click("workflowAttentionButton"));
+        QTRY_VERIFY(ui.find("missionApproveButton") && ui.find("missionApproveButton")->isEnabled());
+        QVERIFY(ui.click("missionApproveButton"));
+        auto pausedWriter = [&] {
+            for (int i = 0; i < ui.missions.graph()->count(); ++i) {
+                const auto row = ui.missions.graph()->get(i);
+                if (row.value("nodeId") == writer) return row.value("status") == "awaiting_human";
+            }
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(pausedWriter() && ui.missions.synchronized(), 90000);
+        auto *page = ui.find("workflowPage");
+        QVERIFY(page);
+        if (repair) {
+            QTRY_COMPARE(page->property("attentionNodeId").toString(), writer);
+            QVERIFY(ui.click("workflowAttentionButton"));
+        } else {
+            QVERIFY(ui.expandStage("implementation"));
+            QTRY_VERIFY(ui.find("workflowNode", "nodeId", writer));
+            QVERIFY(ui.chooseNode(writer));
+        }
+        QTRY_COMPARE(page->property("selectedNodeId").toString(), writer);
+        auto findVisible = [&](const QString &id) {
+            auto *item = ui.find(id);
+            return item && item->isVisible();
+        };
+        if (mode == "legacy") {
+            QTRY_VERIFY(ui.find("workflowReadableText", "text", "Please allow clamp.hpp for STEP-1"));
+            QVERIFY(!findVisible("workflowScopeApprove"));
+        } else {
+            QTRY_VERIFY(findVisible("workflowScopeApprove"));
+            auto displayed = [&](const QString &id) {
+                auto *block = ui.find(id);
+                return block && block->isVisible() ? block->property("value").toString() : QString{};
+            };
+            QVERIFY(displayed("workflowScopeOriginal").contains("src/**"));
+            const auto files = displayed("workflowScopeFiles");
+            for (const auto text : {"clamp.hpp", "STEP-1", "AC-1", "Share the clamp implementation"})
+                QVERIFY2(files.contains(text), qPrintable(files));
+            auto *approval = ui.missions.approval();
+            const auto checkpoint = approval->scopeExpansion().value("checkpoint_id").toString();
+            QVERIFY(!checkpoint.isEmpty());
+            QVERIFY(displayed("workflowScopeReplay").contains(checkpoint));
+            QVERIFY(displayed("workflowScopeDiff").contains("// awaiting approval for header"));
+            QVERIFY(ui.capture("writer-request"));
+            ui.reveal(ui.find("workflowScopeDiff"));
+            QVERIFY(ui.capture("writer-replay-and-diff"));
+            if (repair) {
+                const auto revision = ui.missions.revision();
+                QVERIFY(ui.click("workflowScopeApprove"));
+                QTRY_VERIFY_WITH_TIMEOUT(approval->scopeAvailable() && ui.missions.revision() > revision, 15000);
+                QCOMPARE(ui.missions.status(), QString("awaiting_human"));
+                QVERIFY(displayed("workflowScopeReplay").contains(checkpoint));
+            }
+            // Two physical clicks at the same position before the request resolves.
+            auto *action = ui.find(repair ? "workflowScopeApprove" : "workflowScopeReject");
+            QVERIFY(action && action->isVisible() && action->isEnabled());
+            ui.reveal(action);
+            const auto point = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
+            QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);
+            QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);
+            if (repair) {
+                QTRY_VERIFY_WITH_TIMEOUT(!page->property("selectionPinned").toBool(), 15000);
+                QTRY_COMPARE_WITH_TIMEOUT(ui.missions.status(), QString("succeeded"), 90000);
+                QTRY_COMPARE(page->property("selectedNodeId").toString(), QString("delivery_bundle"));
+                QTRY_VERIFY(findVisible("missionDeliveryPreviewButton"));
+                QTRY_VERIFY(ui.find("missionDeliveryPreviewButton")->isEnabled());
+                QVERIFY(ui.click("missionDeliveryPreviewButton"));
+                QTRY_VERIFY_WITH_TIMEOUT(ui.missions.delivery()->canConfirm(), 15000);
+                QVERIFY(ui.capture("delivery"));
+            } else {
+                QTRY_COMPARE_WITH_TIMEOUT(approval->scopeExpansion().value("status").toString(), QString("rejected"), 15000);
+                QVERIFY(!approval->scopeAvailable());
+                QVERIFY(displayed("workflowScopeDiff").contains("// awaiting approval for header"));
+                QVERIFY(ui.capture("rejected"));
+            }
+        }
+        if (!repair) {
+            QVERIFY(ui.click("workflowScopeCancel"));
+            QVERIFY(ui.click("workflowCancelConfirm"));
+            QTRY_COMPARE_WITH_TIMEOUT(ui.missions.status(), QString("cancelled"), 15000);
+        }
+        QCOMPARE(ui.missions.taskId(), task);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void interruptedApprovalCanPreviewAndConfirmRecoveryWithoutResumeAction()
     {
         Fixture fixture; fixture.setPhase("awaiting_human", "execution_approval");
@@ -1432,6 +1955,88 @@ print(json.dumps(result))
         Source::json(fixture.pendingConfirmation, {{"mission", fixture.mission},
             {"delivery", QJsonObject{{"mode", "patch"}, {"patch", QJsonObject{{"path", "D:/fixture/change.patch"}}}}}});
         QTRY_COMPARE(ui.missions.delivery()->result().value("mode").toString(), QString("patch"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void deliveryPanelVerifiesInterruptedSquash_data()
+    {
+        QTest::addColumn<QString>("outcome");
+        QTest::addColumn<QString>("label");
+        QTest::newRow("published") << QString("completed") << QString("合并已完成");
+        QTest::newRow("rolled-back") << QString("restored") << QString("目标已恢复原状");
+        QTest::newRow("different") << QString("manual_inspection") << QString("需要人工检查");
+    }
+    void deliveryPanelVerifiesInterruptedSquash()
+    {
+        QFETCH(QString, outcome);
+        QFETCH(QString, label);
+        const bool manual = outcome == "manual_inspection";
+        const QString branch = "release/fix", reason = "目标工作区有未提交的差异。";
+        const QString parent(40, 'a'), published(40, 'b'), token(64, 'c');
+        const auto target = outcome == "completed" ? published : parent;
+        Fixture fixture;
+        fixture.setPhase("succeeded", "");
+        fixture.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/delivery")) return false;
+            fixture.deliveries.append(r.body);
+            QJsonObject evidence{{"outcome", outcome}, {"target_branch", branch}};
+            if (r.body.contains("token")) {
+                fixture.setPhase("succeeded", "", fixture.revision() + 1);
+                evidence["mode"] = "squash";
+                evidence["status"] = outcome == "completed" ? "delivered" : "active";
+                evidence["target_commit"] = target;
+                if (outcome == "completed") evidence["commit"] = target;
+            } else {
+                evidence["task_id"] = MissionId;
+                evidence["token"] = token;
+                evidence["task_commit"] = QString(40, 'd');
+                evidence["parent_commit"] = parent;
+                evidence["delivery_commit"] = published;
+                evidence["current_target_commit"] = target;
+                evidence["target_clean"] = !manual;
+                evidence["file_hashes"] = QJsonObject{};
+                if (manual) evidence["reason"] = reason;
+            }
+            Source::json(r, {{"mission", fixture.mission}, {"delivery", evidence}});
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.expandStage("delivery"));
+        QVERIFY(ui.chooseNode("delivery_bundle"));
+        auto *mode = ui.find("missionDeliveryMode"); QVERIFY(mode);
+        mode->setProperty("currentIndex", 5);
+        QCOMPARE(mode->property("currentText").toString(), QString("核验中断的合并"));
+        QVERIFY(ui.click("missionDeliveryPreviewButton"));
+        QTRY_COMPARE(fixture.deliveries.size(), 1);
+        QCOMPARE(fixture.deliveries.first(), (QJsonObject{{"expected_revision", 8}, {"mode", "recover"}}));
+        auto *preview = ui.find("missionDeliveryPreviewDetails"); QVERIFY(preview);
+        QTRY_VERIFY(preview->isVisible());
+        QTRY_VERIFY(ui.missions.delivery()->canPreview());
+        const auto details = preview->property("text").toString();
+        QVERIFY(details.contains(label) && details.contains(branch) && details.contains(target));
+        if (manual) {
+            QVERIFY(details.contains(reason));
+            QVERIFY(!ui.missions.delivery()->canConfirm());
+            auto *confirm = ui.find("missionDeliveryConfirmButton"); QVERIFY(confirm);
+            QVERIFY(!confirm->isVisible());
+            QVERIFY(ui.click("missionDeliveryPreviewButton"));
+            QTRY_COMPARE(fixture.deliveries.size(), 2);
+            QVERIFY(!fixture.deliveries.last().contains("token"));
+        } else {
+            QVERIFY(ui.click("missionDeliveryConfirmButton"));
+            auto *accept = ui.find("missionDeliveryDialogConfirmButton"); QVERIFY(accept);
+            QVERIFY(accept->property("text").toString().contains(label));
+            QVERIFY(ui.click(accept));
+            QTRY_COMPARE(fixture.deliveries.size(), 2);
+            QCOMPARE(fixture.deliveries.last(), (QJsonObject{{"expected_revision", 8}, {"mode", "recover"}, {"token", token}}));
+            auto *result = ui.find("missionDeliveryResultDetails"); QVERIFY(result);
+            QTRY_VERIFY(result->isVisible());
+            QVERIFY(result->property("text").toString().contains(label));
+            QVERIFY(!ui.missions.delivery()->canConfirm());
+        }
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void narrowWindowReturnsFromDetailsToTheSameSelectedNode()

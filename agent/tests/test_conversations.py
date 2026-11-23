@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from conftest import ScriptedLLM,reply,call
+from conftest import ScriptedLLM,reply,call,drop_skill_schema
 from forgepilot.api import create_app
 from forgepilot.chat_service import (ChatAnswerEvent,ChatService,ReadOnlyRegistry,READ_TOOLS,
                                      chat_tool_route)
@@ -433,12 +433,92 @@ async def test_conversation_sse_replay_errors_release_and_redaction():
         assert wrong.status_code==404 and wrong.json()['error']['code']=='unknown_request'
 
         host=app.state.conversation_host
-        host._stream_retention_seconds=.01
-        host._schedule_stream_release(rid,host._streams[rid])
-        await asyncio.sleep(.03)
+        async def release_retained_stream():
+            host._stream_retention_seconds=0
+            host._schedule_stream_release(rid,host._streams[rid])
+            await host._stream_releases[rid]
+        await host.runtime.run_request(release_retained_stream())
         released=await client.get(url,headers={'Accept':'text/event-stream'})
         frames=conversation_frames(released.text)
         assert len(frames)==1 and frames[0][1]=='answer_completed' and frames[0][2]['released']
+
+
+@pytest.mark.asyncio
+async def test_live_chat_sse_wakes_on_delta_and_releases_wait_on_disconnect(monkeypatch):
+    from test_api_network import next_block, serving
+
+    monkeypatch.setenv('PYTHONASYNCIODEBUG', '1')  # Both Uvicorn and HostRuntime create new loops.
+    first_wait, next_wait, cancelled = Event(), Event(), Event()
+    release_delta, finish = Event(), Event()
+    broker_wait = ConversationStreamBroker.wait
+
+    async def observed_wait(broker, cursor, timeout):
+        # Run the marker after the original wait has suspended on its notification.
+        loop = asyncio.get_running_loop()
+        assert loop.get_debug()
+        if cursor == 1:
+            loop.call_soon(first_wait.set)
+        elif cursor == 2:
+            loop.call_soon(next_wait.set)
+        try:
+            return await broker_wait(broker, cursor, timeout)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(ConversationStreamBroker, 'wait', observed_wait)
+
+    async def chunks():
+        assert asyncio.get_running_loop().get_debug()
+        assert await asyncio.to_thread(release_delta.wait, 10)
+        yield ContentDelta('first')
+        assert await asyncio.to_thread(finish.wait, 10)
+        yield ContentDelta(' second')
+        yield StreamFinished('stop', None)
+
+    with serving(lambda trace: None, heartbeat=30, conversation_stream_max_subscribers=1,
+                 chat_factory=lambda: ChatService(StreamingModel([chunks]))) as (url, app):
+        try:
+            async with httpx.AsyncClient(base_url=url, timeout=3, trust_env=False) as client:
+                cid = (await client.post('/api/v1/conversations', json={})).json()['conversation_id']
+                rid = str(uuid4())
+                path = f'/api/v1/conversations/{cid}/requests'
+                created = await client.post(path, json={'request_id': rid, 'prompt': 'test', 'tool_mode': 'fast'})
+                assert created.status_code == 202
+                events = f'{path}/{rid}/events'
+                async with client.stream('GET', events) as stream:
+                    assert stream.status_code == 200
+                    lines = stream.aiter_lines()
+                    assert await next_block(lines) == 'retry: 1000\n\n'
+                    seen = conversation_frames(await next_block(lines))
+                    assert seen[0][1] == 'answer_started'
+                    assert await asyncio.to_thread(first_wait.wait, 2)
+                    full = await client.get(events)
+                    assert full.status_code == 409 and full.json()['error']['code'] == 'conversation_stream_capacity'
+                    release_delta.set()
+                    seen.extend(conversation_frames(await next_block(lines)))
+                    assert seen[-1][1] == 'answer_delta' and seen[-1][2]['text'] == 'first'
+                    assert await asyncio.to_thread(next_wait.wait, 2)
+
+                assert await asyncio.to_thread(cancelled.wait, 2)
+                host = app.state.conversation_host
+                async def subscriber_count():
+                    return host._streams[rid].subscriber_count
+                async with asyncio.timeout(2):
+                    while await host.runtime.run_request(subscriber_count()):
+                        await asyncio.sleep(.01)
+                assert (await client.get(f'{path}/{rid}')).json()['status'] == 'running'
+                finish.set()
+                replay = await client.get(events, headers={'Last-Event-ID': seen[-1][0]})
+                assert replay.status_code == 200
+                seen.extend(conversation_frames(replay.text))
+                assert [item[0] for item in seen] == [f'{rid}:{n}' for n in range(1, 6)]
+                assert seen[-1][1] == 'answer_completed' and seen[-1][2]['content'] == 'first second'
+                ack = await client.get(events, headers={'Last-Event-ID': seen[-1][0]})
+                assert ack.status_code == 204
+        finally:
+            release_delta.set()
+            finish.set()
 
 
 @pytest.mark.asyncio
@@ -1542,7 +1622,8 @@ def version_one_database(path):
     value=task(); value.update(state='completed',final_result='旧任务结果',finished_at=value['updated_at'])
     store.create(value['task_id'],value); store.publish(value['task_id'],value,[],closed=True); store.close()
     with sqlite3.connect(path) as db:
-        for table in ['security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
+        drop_skill_schema(db)
+        for table in ['writer_scope_expansions', 'security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
                       'graph_node_results','graph_node_states','graph_run_inputs','graph_events',
                       'model_calls','approvals','artifact_relations','artifacts',
                       'task_node_attempts','task_graph_runs']: db.execute('DROP TABLE '+table)

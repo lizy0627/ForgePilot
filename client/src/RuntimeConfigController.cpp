@@ -128,7 +128,8 @@ void RuntimeConfigController::request(const QString &action, const QVariantMap &
     if (!busy()) { input.fill('\0'); emit secretsConsumed(); return; }
     m_process.write(input); m_process.closeWriteChannel(); input.fill('\0'); input.clear();
     emit secretsConsumed();
-    m_timer.start(action == "check" ? 180000 : action == "restart" ? 45000 : 30000);
+    // A cold start can take 85 seconds, followed by up to 43 seconds of stop cleanup.
+    m_timer.start(action == "check" || action == "restart" ? 180000 : 30000);
 }
 
 void RuntimeConfigController::fail(const QString &message)

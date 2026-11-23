@@ -20,11 +20,14 @@ public:
     quint64 getTrace(const QString &taskId, qint64 after = 0);
     quint64 getTraceDetail(const QString &taskId, qint64 sequence);
     quint64 createMission(const QJsonObject &body);
+    quint64 recommendSkills(const QJsonObject &body);
     quint64 previewMission(const QJsonObject &body);
     quint64 discardMissionPreview(const QString &token);
     quint64 listMissions(const QString &before = {}, const QString &repositoryPath = {}, const QString &status = {});
     quint64 getMission(const QString &taskId);
     quint64 getMissionGraph(const QString &taskId);
+    quint64 getMissionSkills(const QString &taskId);
+    quint64 getMissionScopeExpansion(const QString &taskId);
     quint64 getMissionArtifacts(const QString &taskId);
     quint64 getMissionArtifact(const QString &taskId, const QString &artifactId);
     quint64 getMissionDiff(const QString &taskId);

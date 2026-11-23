@@ -2,6 +2,7 @@
 import asyncio
 from hashlib import sha256
 import json
+import sqlite3
 
 import httpx
 import pytest
@@ -15,9 +16,9 @@ from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRo
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.validation import ValidationService
 from forgepilot.workspace_manager import WorkspaceManager
-from test_mission_service import ControlledWorkflow
+from test_mission_service import ControlledWorkflow, create, decision, settled, setup
 from test_workspace_delivery import artifact_bytes
-from test_workspace_manager import committed_repo
+from test_workspace_manager import approve, checkpoint, committed_repo, edit, git
 
 
 def frames(text):
@@ -292,3 +293,110 @@ async def test_http_recovery_and_delivery_require_fresh_explicit_confirmation(tm
             stream = frames((await client.get(path + "/events")).text)
             assert [event["event_type"] for _, event in stream].count("workspace.delivered") == 1
             assert (await client.get(path + "/events", headers={"Last-Event-ID": stream[-1][0]})).status_code == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,interrupt_receipt", [
+    ("completed", False), ("restored", False), ("manual_inspection", False),
+    pytest.param("restored", True, id="restored-before-receipt"),
+])
+async def test_http_interrupted_squash_after_restart(
+        tmp_path, git_exe, committed_repo, monkeypatch, outcome, interrupt_receipt):
+    from forgepilot.git import SafeGit
+
+    tasks, missions = await setup(tmp_path, git_exe)
+    parent = git(git_exe, committed_repo, "rev-parse", "HEAD").decode().strip()
+    try:
+        task_id = (await create(missions, committed_repo))["task_id"]
+        await missions.approve(task_id, **decision(await settled(missions, task_id)))
+        completed = await settled(missions, task_id)
+        assert completed["status"] == "succeeded"
+        manager = tasks.store.workspace_backend
+        approve(manager, task_id)
+        edit(manager, task_id=task_id)
+        manager.mark_validated(task_id, expected=checkpoint(manager, task_id))
+        revision = completed["current_revision"]
+        preview = await missions.delivery(task_id, mode="squash", expected_revision=revision, target_branch="main")
+        run = SafeGit.run
+
+        def interrupt(git_client, args, **kwargs):
+            if args[:2] == ["update-ref", "refs/heads/main"]:
+                if outcome == "completed":
+                    run(git_client, args, **kwargs)
+                raise RuntimeError("interrupted at squash publication")
+            return run(git_client, args, **kwargs)
+
+        with monkeypatch.context() as crash:
+            crash.setattr(SafeGit, "run", interrupt)
+            with pytest.raises(RuntimeError, match="interrupted at squash publication"):
+                await missions.delivery(task_id, mode="squash", expected_revision=revision,
+                                        token=preview["delivery"]["token"])
+    finally:
+        await missions.close()
+        await tasks.close()
+        tasks.store.close()
+
+    if outcome == "restored":
+        git(git_exe, committed_repo, "reset", "--hard", parent)
+    head = git(git_exe, committed_repo, "rev-parse", "HEAD").decode().strip()
+    monkeypatch.setattr(WorkspaceManager, "_squash", lambda *_: pytest.fail("Recovery attempted another squash"))
+    store = SqliteEventStore(tmp_path / "mission.sqlite3", artifact_root=tmp_path / "artifacts")
+    try:
+        app = create_app(lambda trace: None, store=store)
+        path = f"/api/v2/missions/{task_id}"
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+            async def recover(token=None):
+                revision = (await client.get(path)).json()["current_revision"]
+                body = {"mode": "recover", "expected_revision": revision}
+                if token:
+                    body["token"] = token
+                return await client.post(path + "/delivery", json=body)
+
+            preview = await recover()
+            assert preview.status_code == 200, preview.text
+            evidence = preview.json()["delivery"]
+            assert evidence["outcome"] == outcome and evidence["target_branch"] == "main"
+            assert evidence["parent_commit"] == parent and evidence["current_target_commit"] == head
+            assert (evidence["delivery_commit"] == head) == (outcome == "completed")
+            if outcome == "manual_inspection":
+                assert evidence["reason"] and not evidence["target_clean"]
+                denied = await recover(evidence["token"])
+                assert denied.status_code == 409, denied.text
+            else:
+                (committed_repo / "new-user-file").write_bytes(b"new work")
+                stale = await recover(evidence["token"])
+                assert stale.status_code == 409 and stale.json()["error"]["code"] == "delivery_changed"
+                assert (committed_repo / "new-user-file").read_bytes() == b"new work"
+                (committed_repo / "new-user-file").unlink()
+                fresh = await recover()
+                assert fresh.status_code == 200, fresh.text
+                token = fresh.json()["delivery"]["token"]
+                if interrupt_receipt:
+                    def fail_receipt(*args, **kwargs):
+                        raise sqlite3.OperationalError("simulated lost delivery receipt")
+
+                    with monkeypatch.context() as crash:
+                        crash.setattr(store.missions, "record_delivery_outcome", fail_receipt)
+                        assert (await recover(token)).status_code == 503
+                    # The graph exposes the outstanding request revision without reconciling it.
+                    graph = (await client.get(path + "/graph")).json()
+                    retry = await client.post(path + "/delivery", json={"mode": "recover", "token": token,
+                        "expected_revision": graph["current_revision"]})
+                    assert retry.status_code == 409 and retry.json()["error"]["code"] == "mission_revision_conflict"
+                else:
+                    resolved = await recover(token)
+                    assert resolved.status_code == 200, resolved.text
+                    result = resolved.json()["delivery"]
+                    assert result["outcome"] == outcome
+                    assert result["status"] == ("delivered" if outcome == "completed" else "active")
+                assert (await recover(token)).status_code in {403, 409}
+            events = frames((await client.get(path + "/events")).text)
+            types = [event["event_type"] for _, event in events]
+            assert types.count("workspace.delivered") == (outcome == "completed")
+            assert types.count("workspace.delivery_restored") == (outcome == "restored")
+            assert git(git_exe, committed_repo, "rev-parse", "HEAD").decode().strip() == head
+            assert (committed_repo / "source.txt").read_bytes() == (
+                b"original source\n" if outcome == "restored" else b"agent edit\n")
+    finally:
+        store.close()

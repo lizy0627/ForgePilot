@@ -1,23 +1,36 @@
-"""Bounded HTTP adapter for mission application services and durable SSE."""
-from fastapi import Header, Query, Request
+"""Bounded HTTP adapter for Missions and the local skill library."""
+import logging
+from typing import Annotated
+
+from fastapi import Header, Path, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 
 from .api_v2_models import (
     CreateMission, MissionApproval, MissionArtifacts, MissionControl, MissionDelivery,
     MissionDeliveryResponse, MissionDiff, MissionErrorResponse, MissionGraph,
     MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
-    MissionValidation, PreviewMission, MissionSourcePreview,
+    MissionValidation, PreviewMission, MissionSourcePreview, MissionScopeExpansion,
+    SkillRecommendationRequest, SkillRecommendations, MissionSkills,
+    CancelSkillGeneration, CreateSkillDraft, RegenerateSkillDraft, SaveSkillDraft, PublishLocalSkill,
+    CreateSkillRevisionDraft,
+    DisableSkill, SkillDraftPage, SkillPage,
 )
 from .errors import ForgePilotError
 from .mcp import decode
 from .orchestration.models import NodeStatus
+from .skill_api_contract import SKILL_ERRORS, skill_responses
+from .skill_mission_drafts import create_mission_draft
+from .skill_models import SkillDraft, SkillGenerationAttempt, SkillIdentity, SkillVersion
+from .skill_recommendations import recommend_skills
 
 
 MAX_MISSION_BODY = 65_536
 V2_ERROR_STATUS = {
     "unknown_mission": 404, "unknown_graph": 404, "artifact_not_found": 404,
-    "unknown_artifact": 404, "mission_conflict": 409, "graph_conflict": 409,
+    "unknown_artifact": 404, "scope_expansion_not_found": 404,
+    "mission_conflict": 409, "graph_conflict": 409,
     "revision_conflict": 409, "approval_conflict": 409, "approval_stale": 409,
     "mission_revision_conflict": 409, "mission_approval_conflict": 409,
     "mission_cancel_required": 409,
@@ -26,11 +39,25 @@ V2_ERROR_STATUS = {
     "test_approval_required": 403, "delivery_approval": 403,
     "recovery_conflict": 409, "recovery_required": 409, "recovery_stale": 409,
     "graph_definition": 409, "workspace_conflict": 409, "workspace_busy": 409,
-    "workspace_corrupted": 409, "delivery_changed": 409, "delivery_recovery": 409,
+    "workspace_corrupted": 409, "workspace_changed": 409, "checkpoint_integrity": 409,
+    "delivery_changed": 409, "delivery_recovery": 409,
     "mission_stream_capacity": 429, "graph_storage": 503,
     "artifact_storage": 503, "mission_unavailable": 503,
     "baseline_changed": 409, "baseline_approval": 403, "baseline_capacity": 429,
     "build_selection_changed": 409, "mission_frozen_config_missing": 409,
+    "skill_selection_changed": 409, "skill_snapshot_invalid": 409,
+    "skill_route_denied": 403, "invalid_skill_selection": 422,
+    "skill_stage_unavailable": 422, "skill_budget_exceeded": 422,
+    **{code: status for code, (status, _) in SKILL_ERRORS.items()},
+}
+
+SkillID = Annotated[str, Path(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$")]
+PageSize = Annotated[int, Query(ge=1, le=100)]
+PageOffset = Annotated[int, Query(ge=0, le=2**63 - 2)]
+GENERATION_ACCEPTED = {
+    "model": SkillDraft,
+    "description": "Model generation request persisted. Location identifies the attempt for this request ID.",
+    "headers": {"Location": {"description": "Attempt status URL.", "schema": {"type": "string"}}},
 }
 
 
@@ -80,12 +107,144 @@ class MissionRequestGuard:
         await self.app(scope, replay, send)
 
 
+def register_skill_routes(app, store, draft_jobs):
+    skills = store.skills
+    errors = {status: {"model": MissionErrorResponse} for status in (400, 401, 403, 413, 415, 422, 500, 503)}
+
+    def accepted(response, draft, attempt_id):
+        response.status_code = 202
+        response.headers["Location"] = f"/api/v2/skill-drafts/{draft.draft_id}/attempts/{attempt_id}"
+        return draft
+
+    @app.post("/api/v2/skills/recommendations", response_model=SkillRecommendations, responses=errors)
+    def skill_recommendations(body: SkillRecommendationRequest):
+        """Return up to three enabled, reviewed skills for the task description.
+
+        Exclusion phrases veto a match. A symptom phrase or a complete keyword group
+        qualifies a candidate. Rank by counts of matched symptoms, complete groups and
+        project tags, in that order. Break ties by ascending skill ID.
+        """
+        matches = recommend_skills(skills, **body.model_dump())
+        logging.getLogger(__name__).info("Skill recommendation count=%d", len(matches),
+                                         extra={"recommendation_count": len(matches)})
+        return {"recommendations": matches}
+
+    @app.post("/api/v2/missions/{task_id}/skill-drafts", response_model=SkillDraft, status_code=201,
+              responses={202: GENERATION_ACCEPTED,
+                         **skill_responses("unknown_mission", "mission_not_terminal", "skill_request_conflict",
+                                           "invalid_skill_evidence", write=True)})
+    async def create_mission_skill_draft(task_id: MissionID, body: CreateSkillDraft, response: Response):
+        """Freeze the terminal Mission revision and private evidence in a local draft.
+
+        Succeeded, historical completed, failed and cancelled Missions can supply up to eight
+        evidence items. A skipped Mission accepts a note only. Interrupted and retryable
+        Missions return mission_not_terminal. No model configuration is required.
+
+        Manual creation returns 201. Choose generation_mode=model to create a draft and
+        an attempt atomically (202). Poll the draft by ID for the outcome. When evidence,
+        policy or the configured route cannot support generation, the note is still editable.
+        Reuse request_id on retries. Omitting the ID creates a new draft on each call.
+        """
+        if body.generation_mode == "model":
+            draft, attempt_id = await draft_jobs.create(task_id, developer_note=body.developer_note,
+                                                        request_id=body.request_id)
+            return accepted(response, draft, attempt_id)
+        return await run_in_threadpool(create_mission_draft, store, task_id, developer_note=body.developer_note,
+                                       request_id=body.request_id)
+
+    @app.post("/api/v2/skill-drafts/{draft_id}/regenerate", response_model=SkillDraft, status_code=202,
+              responses={202: GENERATION_ACCEPTED,
+                         **skill_responses("skill_draft_not_found", "skill_revision_conflict", "skill_request_conflict",
+                                           "invalid_skill_evidence", write=True)})
+    async def regenerate_skill_draft(draft_id: MissionID, body: RegenerateSkillDraft, response: Response):
+        """Explicitly request one new suggestion using the draft's frozen evidence.
+
+        Poll GET /api/v2/skill-drafts/{draft_id}. Generation writes to its attempt and preserves
+        editor fields. Repeat the request ID and expected revision to replay the same operation.
+        """
+        draft, attempt_id = await draft_jobs.regenerate(draft_id, **body.model_dump())
+        return accepted(response, draft, attempt_id)
+
+    @app.get("/api/v2/skill-drafts", response_model=SkillDraftPage, responses=skill_responses("invalid_skill_evidence"))
+    def list_skill_drafts(limit: PageSize = 20, offset: PageOffset = 0, source_mission_id: MissionID | None = None):
+        """List local drafts and their review receipts, most recently edited first."""
+        return skills.list_draft_page(source_mission_id=source_mission_id, limit=limit, offset=offset)
+
+    @app.get("/api/v2/skill-drafts/{draft_id}", response_model=SkillDraft,
+             responses=skill_responses("skill_draft_not_found", "invalid_skill_evidence"))
+    def get_skill_draft(draft_id: MissionID):
+        """Reopen the saved draft. An artifact locator is a JSON Pointer relative to the
+        source Mission artifact's content. A verified result describes the recorded validation
+        outcome at that locator. All private references stay with the draft after review.
+        """
+        return skills.get_draft(draft_id)
+
+    @app.get("/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}", response_model=SkillGenerationAttempt,
+             responses=skill_responses("skill_attempt_not_found"))
+    def get_skill_generation_attempt(draft_id: MissionID, attempt_id: MissionID):
+        """Read the outcome for one attempt, even after the developer requests another."""
+        return skills.get_attempt(draft_id, attempt_id)
+
+    @app.post("/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}/cancel", response_model=SkillGenerationAttempt,
+              responses=skill_responses("skill_attempt_not_found", write=True))
+    async def cancel_skill_generation(draft_id: MissionID, attempt_id: MissionID, body: CancelSkillGeneration):
+        """Stop the identified attempt. Repeated cancellation returns its stored outcome."""
+        return await draft_jobs.cancel(draft_id, attempt_id)
+
+    @app.patch("/api/v2/skill-drafts/{draft_id}", response_model=SkillDraft,
+               responses=skill_responses("skill_draft_not_found", "skill_revision_conflict",
+                                         "invalid_skill_evidence", write=True))
+    def save_skill_draft(draft_id: MissionID, body: SaveSkillDraft):
+        """Save editor fields at expected_revision. Saving leaves recommendations unchanged.
+
+        Omitted top-level fields keep their values. Sending content replaces the complete
+        guidance document. Use edited_lesson to keep a private, editable copy of the six
+        suggested fields and the developer's evidence assessment alongside the original
+        attempt. Review reusable guidance in content before publishing. Repeating the
+        last successful save returns the saved revision.
+        On skill_revision_conflict retain local edits and reload the draft before merging.
+        """
+        return skills.patch_draft(draft_id, expected_revision=body.expected_revision,
+                                  changes=body.model_dump(exclude_unset=True, exclude={"expected_revision"}))
+
+    @app.post("/api/v2/skill-drafts/{draft_id}/publish-local", response_model=SkillVersion,
+              responses=skill_responses("skill_draft_not_found", "skill_request_conflict", "skill_revision_conflict",
+                                        "skill_draft_incomplete", "invalid_skill_evidence", write=True))
+    def publish_local_skill(draft_id: MissionID, body: PublishLocalSkill):
+        """Approve the saved revision. Replay the same request_id and revision for the committed version."""
+        return skills.publish_local(draft_id, **body.model_dump())
+
+    @app.get("/api/v2/skills", response_model=SkillPage, responses=skill_responses())
+    def list_skills(limit: PageSize = 20, offset: PageOffset = 0):
+        """List local library identities, including disabled skills and their current revisions."""
+        return skills.list_skill_page(limit=limit, offset=offset)
+
+    @app.get("/api/v2/skills/{skill_id}/versions/{version}", response_model=SkillVersion,
+             responses=skill_responses("skill_not_found"))
+    def get_skill_version(skill_id: SkillID, version: Annotated[int, Path(ge=1, le=2**63 - 2)]):
+        """Read the immutable reviewed content of an exact version."""
+        return skills.get_version(skill_id, version)
+
+    @app.patch("/api/v2/skills/{skill_id}", response_model=SkillIdentity,
+               responses=skill_responses("skill_not_found", "skill_revision_conflict", write=True))
+    def disable_skill(skill_id: SkillID, body: DisableSkill):
+        """Disable the skill at its current revision. Existing version details remain available."""
+        return skills.disable(skill_id, expected_revision=body.expected_revision)
+
+    @app.post("/api/v2/skills/{skill_id}/drafts", response_model=SkillDraft, status_code=201,
+              responses=skill_responses("skill_not_found", "skill_request_conflict", write=True))
+    def create_skill_revision_draft(skill_id: SkillID, body: CreateSkillRevisionDraft):
+        """Open a revision draft from the exact base version. Publish checks that the base is still current."""
+        return skills.draft_from_version(skill_id, **body.model_dump())
+
+
 def register_mission_routes(app, host, streams):
     errors = {status: {"model": MissionErrorResponse} for status in (400, 403, 404, 409, 413, 415, 422, 429, 500, 503)}
     prefix = "/api/v2/missions"
 
     @app.post(prefix, response_model=MissionResponse, status_code=202, responses=errors)
     async def create_mission(body: CreateMission):
+        """Freeze the selected reviewed versions at admission. Refresh choices after a 409 skill_selection_changed."""
         return await host.create(**body.model_dump())
 
     @app.post(prefix + "/preview", response_model=MissionSourcePreview, responses=errors)
@@ -113,6 +272,11 @@ def register_mission_routes(app, host, streams):
     def get_mission(task_id: MissionID):
         return host.get(task_id)
 
+    @app.get(prefix + "/{task_id}/skills", response_model=MissionSkills, responses=errors)
+    def mission_skills(task_id: MissionID):
+        """Show admitted selections and actual model input by analysis node and attempt."""
+        return host.mission_skills(task_id)
+
     @app.get(prefix + "/{task_id}/graph", response_model=MissionGraph, responses=errors)
     def mission_graph(task_id: MissionID):
         return host.graph(task_id)
@@ -132,6 +296,10 @@ def register_mission_routes(app, host, streams):
     @app.get(prefix + "/{task_id}/diff", response_model=MissionDiff, responses=errors)
     def mission_diff(task_id: MissionID):
         return host.diff(task_id)
+
+    @app.get(prefix + "/{task_id}/scope-expansion", response_model=MissionScopeExpansion, responses=errors)
+    def mission_scope_expansion(task_id: MissionID):
+        return host.scope_expansion(task_id)
 
     @app.get(prefix + "/{task_id}/validation", response_model=MissionValidation, responses=errors)
     def mission_validation(task_id: MissionID):

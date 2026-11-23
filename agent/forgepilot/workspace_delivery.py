@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+from tempfile import TemporaryDirectory
 
 from .artifacts.models import (ChangedFile, ChangeSet, DeliveryBundle, ExecutionPlanArtifact,
                                ReviewReport, TaskSpecArtifact, ValidationReport)
@@ -128,7 +129,7 @@ class DeliveryMixin:
                     _fail("workspace_recovery", "Observed production change has no exact text diff")
                 files.append(ChangedFile(path=path, change_type="modified", unified_diff=diff,
                     before_sha256=baseline_files[path], after_sha256=current.file_hashes[path],
-                    plan_step_ids=(steps[0].step_id,), acceptance_criteria_ids=steps[0].acceptance_criteria_ids,
+                    plan_step_ids=(steps[0].step_id,), acceptance_criteria_ids=steps[0].criteria_for_path(path),
                     test_change="none"))
             if self._snapshot(state) != current or self._index_hash(state) != index_hash:
                 _fail("workspace_changed", "Workspace changed before observed recovery returned")
@@ -144,15 +145,34 @@ class DeliveryMixin:
         else:
             state.pop("delivery_operation_id", None)
 
-    def final_change_set(self, task_id, changes):
+    def final_change_set(self, task_id, changes, *, plan_artifact_id=None):
         """Derive the cumulative base-to-checkpoint diff from Git and verified bytes.
 
         Incremental ChangeSets supply only plan/AC provenance, never final bytes.
         This keeps repairs that touch the same file from hiding earlier changes.
         """
         changes = tuple(ChangeSet.model_validate(item) for item in changes)
-        if not changes or len({item.execution_plan_artifact_id for item in changes}) != 1:
-            _fail("delivery_changes", "Expected changes from one frozen execution plan")
+        if not changes:
+            _fail("delivery_changes", "Expected at least one successful writer ChangeSet")
+        final_plan_id = plan_artifact_id or changes[-1].execution_plan_artifact_id
+        earlier_plans = {item.execution_plan_artifact_id for item in changes} - {final_plan_id}
+        # Successful writer checkpoints bind each incremental diff to its grant.
+        # Only their original plan or a same-task descendant can carry them forward.
+        cursor = final_plan_id
+        visited = set()
+        while earlier_plans:
+            if self.artifacts is None or cursor in visited:
+                _fail("delivery_changes", "Final changes require one plan revision history")
+            visited.add(cursor)
+            plan = self.artifacts.get(cursor)
+            if not isinstance(plan, ExecutionPlanArtifact) or plan.task_id != task_id:
+                _fail("delivery_changes", "Final plan revision belongs to a different task")
+            parents = [self.artifacts.get(parent_id) for parent_id in plan.parent_artifact_ids]
+            prior = [item for item in parents if isinstance(item, ExecutionPlanArtifact) and item.task_id == task_id]
+            if len(prior) != 1:
+                _fail("delivery_changes", "Writer plan is outside the final plan revision history")
+            cursor = prior[0].artifact_id
+            earlier_plans.discard(cursor)
         with self._operation(task_id) as state:
             current = self._snapshot(state)
             self._assert_expected(state, current)
@@ -178,7 +198,7 @@ class DeliveryMixin:
             self._assert_expected(state, current)
             if not files:
                 _fail("delivery_changes", "A delivery requires a nonempty final diff")
-            return ChangeSet(execution_plan_artifact_id=changes[0].execution_plan_artifact_id,
+            return ChangeSet(execution_plan_artifact_id=final_plan_id,
                 files=tuple(files), summary="Cumulative approved implementation and repair diff")
 
     def export_validated_patch(self, task_id):
@@ -212,14 +232,20 @@ class DeliveryMixin:
             _fail("delivery_changed", "Task changed after interrupted delivery")
         target = self._delivery_target(state, intent["target_branch"])
         outcome = "manual_inspection"
-        if target["checked_out_branch"] == target["branch"] and not target["dirty"]:
-            if target["commit"] == target["main_head"] == intent["head"]:
-                outcome = "completed"
-            elif (target["commit"] == target["main_head"] == intent["parent"]
-                  and target["files"] == intent["main_files"]):
-                outcome = "restored"
+        reason = None
+        if target["checked_out_branch"] != target["branch"]:
+            reason = "源仓库当前检出的分支与交付目标分支不同。"
+        elif target["dirty"]:
+            reason = "源仓库的索引或工作区仍有差异，请检查后重新核验。"
+        elif target["commit"] == target["main_head"] == intent["head"]:
+            outcome = "completed"
+        elif (target["commit"] == target["main_head"] == intent["parent"]
+              and target["files"] == intent["main_files"]):
+            outcome = "restored"
+        else:
+            reason = "目标提交或文件内容与记载的交付结果和原始状态均不匹配。"
         return {"head": current.head_commit, "files": dict(current.file_hashes),
-                "target": target, "outcome": outcome}
+                "target": target, "outcome": outcome}, reason
 
     def delivery_recovery_preview(self, task_id, *, approved=False):
         """Observe an uncertain delivery; approval permits reclaiming a stale lease.
@@ -228,7 +254,7 @@ class DeliveryMixin:
         requires the user to inspect/restore the main workspace themselves.
         """
         with self._operation(task_id, recover=approved is True) as state:
-            observed = self._delivery_recovery_observation(state)
+            observed, reason = self._delivery_recovery_observation(state)
             token = secrets.token_hex(32)
             state["delivery_recovery_preview"] = {
                 **observed, "token_sha256": sha256(token.encode()).hexdigest()}
@@ -236,12 +262,12 @@ class DeliveryMixin:
             intent = state["intent"]
             return {"token": token, "task_id": task_id, "outcome": observed["outcome"],
                     "task_commit": observed["head"], "target_branch": intent["target_branch"],
-                    "parent_commit": intent["parent"], "delivery_commit": intent["head"],
+                    "reason": reason, "parent_commit": intent["parent"], "delivery_commit": intent["head"],
                     "current_target_commit": observed["target"]["commit"],
                     "target_clean": not observed["target"]["dirty"],
                     "file_hashes": observed["target"]["files"]}
 
-    def resolve_delivery(self, task_id, *, approved, token):
+    def resolve_delivery(self, task_id, *, approved, token, operation_id=None):
         """Confirm an already completed merge or a user-restored baseline only."""
         if approved is not True:
             _fail("delivery_approval", "Confirming a delivery outcome requires explicit user approval")
@@ -250,22 +276,22 @@ class DeliveryMixin:
             if (not isinstance(token, str) or len(token) != 64 or not preview
                     or not hmac.compare_digest(sha256(token.encode()).hexdigest(), preview["token_sha256"])):
                 _fail("delivery_approval", "Inspect the current delivery recovery evidence first")
-            observed = self._delivery_recovery_observation(state)
+            observed, _ = self._delivery_recovery_observation(state)
             if observed != {key: value for key, value in preview.items() if key != "token_sha256"}:
                 _fail("delivery_changed", "Delivery recovery evidence changed; inspect it again")
             if observed["outcome"] == "manual_inspection":
                 _fail("delivery_recovery", "The main workspace requires manual user inspection or restoration")
             intent = state["intent"]
-            if observed["outcome"] == "completed":
-                state["status"] = "delivered"
-                state["delivery_result"] = {"mode": "squash", "commit": intent["head"],
-                                            "target_branch": intent["target_branch"]}
-                self._complete_delivery_operation(state)
-            else:
-                state["status"] = "active"
-            result = {"status": state["status"], "outcome": observed["outcome"],
+            state["status"] = "delivered" if observed["outcome"] == "completed" else "active"
+            result = {"mode": "squash", "status": state["status"], "outcome": observed["outcome"],
                       "target_branch": intent["target_branch"],
                       "target_commit": observed["target"]["commit"]}
+            if observed["outcome"] == "completed":
+                result["commit"] = intent["head"]
+            state["delivery_result"] = result
+            if operation_id is not None:
+                state["pending_delivery_operation_id"] = operation_id
+            self._complete_delivery_operation(state)
             state.pop("intent")
             state.pop("delivery_recovery_preview", None)
             state.pop("delivery_preview", None)
@@ -285,6 +311,22 @@ class DeliveryMixin:
         git.run(["check-ref-format", "refs/heads/" + branch])
         return branch
 
+    def _checkout_manifest(self, git, tree):
+        """Hash a clean target checkout, including the attributes in this tree."""
+        # Validate the paths, modes and blob limits before letting Git materialize them.
+        names = set(self._tree_bytes(git, tree))
+        with self.guard.protect(), TemporaryDirectory(dir=self.root) as temporary:
+            scratch = Guard(temporary)
+            checkout = Guard(scratch.mkdir("checkout"))
+            for parent in {Path(name).parent.as_posix() for name in names} - {"."}:
+                checkout.mkdir(parent)
+            git.run(["read-tree", "--reset", "-u", tree], checkout_eol=True, checkout_root=checkout.root,
+                    env={"GIT_INDEX_FILE": str(scratch.root / "index")})
+            files = manifest(checkout.root)
+            if files.keys() != names:
+                _fail("delivery_target", "Target checkout does not contain the complete Git tree")
+            return files
+
     def _delivery_target(self, state, target_branch):
         """Capture complete main bytes even when the user plans an export."""
         git = self._git(state, main=True)
@@ -296,12 +338,11 @@ class DeliveryMixin:
             head = git.run(["rev-parse", "--verify", "--end-of-options", "refs/heads/" + branch + "^{commit}"]).stdout.decode().strip()
         checked_out = git.run(["symbolic-ref", "-q", "--short", "HEAD"], allowed=(0, 1)).stdout.decode().strip() or None
         files = manifest(Path(state["repository_path"]))
-        dirty = bool(git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout)
+        dirty = bool(git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                             checkout_eol=True).stdout)
         # Index flags such as assume-unchanged/skip-worktree can hide real user
-        # edits from status. Clean means the actual bytes equal committed blobs.
-        committed_files = {name: sha256(data).hexdigest()
-                           for name, data in self._tree_bytes(git, main_head).items()}
-        dirty = dirty or files != committed_files
+        # edits. Keep the actual bytes in the preview even when Git reports clean.
+        dirty = dirty or files != self._checkout_manifest(git, main_head)
         if self._head(git) != main_head:
             _fail("delivery_changed", "Target HEAD moved while preparing delivery")
         if not _HASH.fullmatch(head):
@@ -470,8 +511,7 @@ class DeliveryMixin:
         tree = result.stdout.splitlines()[0].decode("ascii") if result.stdout.splitlines() else ""
         if not _HASH.fullmatch(tree):
             _fail("delivery_merge", "Git did not return a verifiable merge tree")
-        merged_files = {name: sha256(data).hexdigest()
-                        for name, data in self._tree_bytes(main, tree).items()}
+        merged_files = self._checkout_manifest(main, tree)
         directories = set()
         for name in merged_files:
             name = validate_relative(name)
@@ -513,28 +553,52 @@ class DeliveryMixin:
     def _publish_squash(self, state, main, target, current, tree, commit, merged_files):
         # read-tree refuses to overwrite files changed since the clean preflight.
         # update-ref publishes only if the selected branch still has its old HEAD.
-        main.run(["read-tree", "-u", "-m", target["commit"], tree])
+        main.run(["read-tree", "-u", "-m", target["commit"], tree], checkout_eol=True)
         checked_out = main.run(["symbolic-ref", "-q", "--short", "HEAD"], allowed=(0, 1)).stdout.decode().strip()
         if checked_out != target["branch"] or self._head(main) != target["commit"]:
             _fail("delivery_changed", "Target changed during delivery; user inspection is required")
         if main.run(["write-tree"]).stdout.decode().strip() != tree:
             _fail("delivery_changed", "Main index changed during delivery; user inspection is required")
+        published_files = manifest(main.root)
+        if published_files != merged_files:
+            self._recheckout_unchanged_blobs(main, target, tree, published_files, merged_files)
+            published_files = manifest(main.root)
+            if published_files != merged_files or main.run(["write-tree"]).stdout.decode().strip() != tree:
+                _fail("delivery_changed", "Main files or index changed during checkout; user inspection is required")
         # Detect non-index external file changes before publishing the commit.
-        if main.run(["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"], allowed=(0, 1)).returncode:
+        if main.run(["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"],
+                    allowed=(0, 1), checkout_eol=True).returncode:
             _fail("delivery_changed", "Main files changed during delivery; user inspection is required")
-        status = main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout
+        status = main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                          checkout_eol=True).stdout
         if any(row[:2] in {b"??", b"!!"} for row in status.split(b"\0") if row):
             _fail("delivery_changed", "Main workspace gained user files during delivery; user inspection is required")
-        published_files = manifest(Path(state["repository_path"]))
-        if published_files != merged_files:
-            _fail("delivery_changed", "Main bytes do not match the merged commit; user inspection is required")
         self._assert_expected(state, current)
         if manifest(Path(state["repository_path"])) != published_files:
             _fail("delivery_changed", "Main files changed before publication; user inspection is required")
         main.run(["update-ref", "refs/heads/" + target["branch"], commit, target["commit"]])
         if (self._head(main) != commit
-                or main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"]).stdout):
+                or main.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                            checkout_eol=True).stdout):
             _fail("delivery_changed", "Delivery outcome requires user inspection")
+
+    @staticmethod
+    def _recheckout_unchanged_blobs(main, target, tree, files, merged_files):
+        # A two-tree checkout skips unchanged blobs, even when new attributes
+        # require different working bytes. Only refresh their exact previewed bytes.
+        if files.keys() != merged_files.keys():
+            _fail("delivery_changed", "Main file inventory changed during delivery")
+        paths = [name for name in files if files[name] != merged_files[name]]
+        changed = set(main.run(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+                                target["commit"], tree, "--"]).stdout.split(b"\0"))
+        if any(files[name] != target["files"].get(name) or name.encode() in changed for name in paths):
+            _fail("delivery_changed", "Main bytes changed during delivery; user inspection is required")
+        for name in paths:
+            if not main.guard.unlink(name, target["files"][name]):
+                _fail("delivery_changed", "Main file disappeared before checkout")
+            # Without --force Git also preserves a file recreated after the checked unlink.
+            main.run(["checkout-index", "--index", "--ignore-skip-worktree-bits", "-z", "--stdin"],
+                     data=name.encode() + b"\0", checkout_eol=True)
 
     def deliver(self, task_id, mode, *, approved, token, bundle=None, operation_id=None):
         from .policy import Capability

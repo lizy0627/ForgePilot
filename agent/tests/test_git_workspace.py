@@ -61,6 +61,7 @@ def test_filters_hooks_signing_and_inherited_environment_are_disabled(committed_
     git(git_exe, root, "config", "filter.evil.clean", command)
     git(git_exe, root, "config", "filter.evil.smudge", command)
     git(git_exe, root, "config", "filter.evil.required", "true")
+    git(git_exe, root, "config", "filter.formatter.required", "true")
     git(git_exe, root, "config", "merge.evil.driver", command)
     git(git_exe, root, "config", "commit.gpgSign", "true")
     git(git_exe, root, "config", "gpg.program", command)
@@ -71,6 +72,7 @@ def test_filters_hooks_signing_and_inherited_environment_are_disabled(committed_
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(root / ".git/hooks"))
     safe = SafeGit(root, git_exe)
+    assert safe.run(["config", "--get", "filter.formatter.required"], checkout_eol=True).stdout.strip() == b"false"
     safe.run(["add", "--", "source.txt", ".gitattributes"])
     tree = safe.run(["write-tree"]).stdout.strip().decode()
     parent = safe.run(["rev-parse", "HEAD"]).stdout.strip().decode()

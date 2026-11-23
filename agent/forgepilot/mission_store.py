@@ -19,6 +19,7 @@ from .errors import ForgePilotError
 from .history_cursor import decode_cursor, encode_cursor
 from .mission_events import append_mission_event
 from .path_identity import path_key
+from .skill_selection import admit_selection
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -306,6 +307,23 @@ def create_graph_checkpoint_schema(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def create_scope_expansion_schema(db: sqlite3.Connection) -> None:
+    db.execute("""CREATE TABLE writer_scope_expansions(
+        task_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        base_spec_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        base_plan_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        spec_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        plan_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(checkpoint_id),
+        partial_change_set_id TEXT REFERENCES artifacts(artifact_id),
+        budget_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+        PRIMARY KEY(task_id,node_id,attempt),
+        FOREIGN KEY(task_id,node_id,attempt) REFERENCES task_node_attempts(task_id,node_id,attempt))""")
+
+
 def recover_graph_runs(db: sqlite3.Connection, *, stamp: str | None = None) -> None:
     """Make abandoned running nodes explicit; execution is never silently resumed."""
     stamp = stamp or _now()
@@ -535,11 +553,11 @@ class MissionRepository:
         with self.events._lock:
             row = self.events._db.execute("""SELECT sequence,event_type,payload_json FROM graph_events
                 WHERE task_id=? AND event_type IN ('workspace.delivery_requested','workspace.delivered',
-                'workspace.delivery_failed') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
+                'workspace.delivery_failed','workspace.delivery_restored') ORDER BY sequence DESC LIMIT 1""", (task_id,)).fetchone()
             yield dict(row) if row is not None else None
 
-    def admit_mission(self, task_id, workspace_record, fields):
-        """Commit workspace binding and both admission events as one unit."""
+    def admit_mission(self, task_id, workspace_record, fields, *, selected_skills=()):
+        """Commit skill snapshots, workspace binding and both admission events together."""
         record = workspace_record
         with self.events._transaction():
             stamp = _now()
@@ -549,6 +567,8 @@ class MissionRepository:
                 "workspace_id", "task_id", "repository_path", "worktree_path", "base_ref", "head_commit", "status")) + (stamp, stamp))
             self.events._db.execute("UPDATE task_graph_runs SET workspace_id=? WHERE task_id=?",
                                    (record["workspace_id"], task_id))
+            if selected_skills:
+                fields = {**fields, **admit_selection(self.events._db, task_id, selected_skills, stamp)}
             append_mission_event(self.events, task_id, "task.created", fields, actor="user")
             append_mission_event(self.events, task_id, "workspace.created", {
                 "workspace_id": record["workspace_id"], "base_ref": record["base_ref"],
@@ -583,13 +603,13 @@ class MissionRepository:
             append_mission_event(self.events, task_id, "workspace.delivery_requested", {
                 "mode": mode, "operation_id": operation_id}, actor="user")
 
-    def record_delivery_outcome(self, task_id, event_type, mode, *, result=None, error_code=None, recovered=False):
-        if event_type not in {"workspace.delivered", "workspace.delivery_failed"}:
-            raise ValueError("Unknown delivery outcome")
+    def record_delivery_outcome(self, task_id, mode, *, result=None, error_code=None, recovered=False):
         data = {"mode": mode}
-        if event_type == "workspace.delivery_failed":
+        if error_code is not None:
+            event_type = "workspace.delivery_failed"
             data["error_code"] = error_code
         else:
+            event_type = "workspace.delivery_restored" if result.get("outcome") == "restored" else "workspace.delivered"
             data["result"] = result
         if recovered:
             data["recovered"] = True

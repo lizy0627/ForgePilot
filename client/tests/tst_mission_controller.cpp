@@ -8,22 +8,27 @@
 #define EXPECT_EQ(actual, expected) do { QTest::qCompare(actual, expected, #actual, #expected, __FILE__, __LINE__); } while (false)
 
 namespace {
-QJsonObject mission(const QString &task = A, qint64 revision = 8, const QString &status = "awaiting_human")
+QJsonObject protocolExample(const char *name)
 {
     QFile file(QString(FORGEPILOT_SOURCE_DIR) + "/protocol/examples.json");
     if (!file.open(QIODevice::ReadOnly)) qFatal("Cannot open canonical protocol examples");
-    auto body = QJsonDocument::fromJson(file.readAll()).object().value("mission_query_response").toObject();
+    return QJsonDocument::fromJson(file.readAll()).object().value(name).toObject();
+}
+QJsonObject mission(const QString &task = A, qint64 revision = 8, const QString &status = "awaiting_human")
+{
+    auto body = protocolExample("mission_query_response");
     body.insert("task_id", task); body.insert("current_revision", revision); body.insert("status", status);
     body.insert("last_event_id", task + ':' + QString::number(revision));
     auto review = body.value("review").toObject(); review.insert("task_id", task); review.insert("revision", revision);
     body.insert("review", review); return body;
 }
-QJsonObject graph(const QJsonObject &m)
+QJsonObject graph(const QJsonObject &m, const QString &nodeId = "execution_approval")
 {
-    QJsonObject node{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
+    const QString type = nodeId == "execution_approval" ? "human_gate" : "agent";
+    QJsonObject node{{"node_id", nodeId}, {"node_type", type},
         {"status", m.value("status")}, {"attempt", 1}, {"result", QJsonValue::Null}};
-    QJsonObject definition{{"node_id", "execution_approval"}, {"node_type", "human_gate"},
-        {"handler", "execution_approval"}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
+    QJsonObject definition{{"node_id", nodeId}, {"node_type", type},
+        {"handler", nodeId}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
         {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
     return {{"task_id", m.value("task_id")}, {"graph_id", m.value("graph_id")}, {"graph_version", 1},
         {"definition_hash", QString(64, 'a')}, {"status", m.value("status")}, {"current_revision", m.value("current_revision")},
@@ -70,6 +75,190 @@ class MissionControllerTests : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(MissionProtocol::validMission(mission())); QVERIFY(MissionProtocol::validGraph(graph(mission()))); }
+    void skillRecommendationsDebounceAndIgnoreSupersededReplies()
+    {
+        Fixture f;
+        QList<Request> held;
+        f.intercept = [&](const Request &r) {
+            if (r.path != "/api/v2/skills/recommendations") return false;
+            held.append(r);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        for (const auto &text : {"a", "ab", "abc"})
+            c.updateSkillContext(text, "auto", "D:/repo", {});
+        QTRY_COMPARE(held.size(), 1);
+        QCOMPARE(held[0].body, (QJsonObject{{"description", "abc"}, {"task_type", "auto"}}));
+        c.updateSkillContext("new", "bug_fix", "D:/repo", {"Qt"});
+        QTRY_COMPARE(held.size(), 2);
+        QCOMPARE(held[1].body, (QJsonObject{{"description", "new"}, {"task_type", "bug_fix"}, {"project_tags", QJsonArray{"Qt"}}}));
+        const auto latest = protocolExample("skill_recommendations_response");
+        auto stale = latest.value("recommendations").toArray().first().toObject();
+        stale.insert("name", "stale result");
+        QSignalSpy changes(&c, &MissionController::skillRecommendationsChanged);
+        Source::json(held[1], latest);
+        Source::json(held[0], {{"recommendations", QJsonArray{stale}}});
+        QTRY_VERIFY(!c.recommendationsLoading());
+        QTest::qWait(80);
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(c.skillRecommendations(), latest.value("recommendations").toArray().toVariantList());
+        QVERIFY(c.selectedSkillIds().isEmpty());
+        const auto id = stale.value("skill_id").toString();
+        c.setSkillSelected(id, true);
+        QCOMPARE(c.selectedSkillIds(), QStringList{id});
+        QCOMPARE(changes.size(), 1);
+        c.updateSkillContext("new", "bug_fix", "D:/other", {"Qt"});
+        QVERIFY(c.selectedSkillIds().isEmpty());
+        QVERIFY(c.skillRecommendations().isEmpty());
+        QTRY_COMPARE(held.size(), 3);
+        QCOMPARE(held[2].body, held[1].body); // Repository identity stays local.
+
+        Fixture other;
+        c.setBaseUrl(other.source.url());
+        Source::json(held[2], latest);
+        QTRY_VERIFY(c.historyLoaded());
+        QVERIFY(c.skillRecommendations().isEmpty());
+        QVERIFY(!c.recommendationsLoading());
+        QCOMPARE(other.posts("/skills/recommendations"), 0);
+    }
+    void checkedSkillsUseExactIdentitiesAndRejectionRequiresExplicitResubmission_data()
+    {
+        QTest::addColumn<QString>("code");
+        QTest::addColumn<int>("status");
+        QTest::addColumn<bool>("refreshChoices");
+        QTest::newRow("superseded-version") << QString("skill_selection_changed") << 409 << true;
+        QTest::newRow("older-create-schema") << QString("invalid_request") << 422 << true;
+        QTest::newRow("local-route-required") << QString("skill_route_denied") << 403 << false;
+        QTest::newRow("input-budget") << QString("skill_budget_exceeded") << 422 << false;
+    }
+    void checkedSkillsUseExactIdentitiesAndRejectionRequiresExplicitResubmission()
+    {
+        QFETCH(QString, code);
+        QFETCH(int, status);
+        QFETCH(bool, refreshChoices);
+        Fixture f;
+        const auto exact = protocolExample("mission_skills_response").value("selected_skills").toArray();
+        auto first = protocolExample("skill_recommendations_response").value("recommendations").toArray().first().toObject();
+        auto second = first;
+        const auto secondIdentity = exact[1].toObject();
+        for (auto it = secondIdentity.begin(); it != secondIdentity.end(); ++it)
+            second.insert(it.key(), it.value());
+        auto third = first;
+        third.insert("skill_id", "third");
+        const QJsonObject offered{{"recommendations", QJsonArray{first, second, third}}};
+        const QString token(64, 'a');
+        const QJsonObject preview{{"preview_token", token}, {"base_commit", QString(40,'a')},
+            {"source_head", QString(40,'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{}},
+            {"patch", ""}, {"build", QJsonObject{{"source", "preset"}}}};
+        QList<QJsonObject> creations;
+        f.intercept = [&](const Request &r) {
+            if (r.path == "/api/v2/missions/preview") Source::json(r, preview);
+            else if (r.path == "/api/v2/skills/recommendations") Source::json(r, offered);
+            else if (r.method == "POST" && r.path == "/api/v2/missions") {
+                creations.append(r.body);
+                if (creations.size() == 1) Source::json(r, conflict(code), status);
+                else Source::json(r, f.current, 202);
+            } else return false;
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.previewCreation({{"repository_path", "D:/repo"}});
+        c.updateSkillContext("worker", "bug_fix", "D:/repo", {});
+        QTRY_VERIFY(c.creationReady());
+        QTRY_COMPARE(c.skillRecommendations().size(), 3);
+        c.setSkillSelected(first.value("skill_id").toString(), true);
+        c.setSkillSelected(second.value("skill_id").toString(), true);
+        c.setSkillSelected("third", true);
+        QCOMPARE(c.selectedSkillIds().size(), 2);
+        QCOMPARE(c.creationPreview(), preview.toVariantMap());
+        QVERIFY(c.creationReady());
+        QCOMPARE(f.posts("/missions/preview"), 1);
+        const QVariantMap draft{{"request", "worker"}, {"repository_path", "D:/repo"},
+            {"task_type", "bug_fix"}, {"preview_token", token}};
+        c.createMission(draft);
+        QTRY_VERIFY(!c.creationError().isEmpty());
+        QCOMPARE(creations.size(), 1);
+        auto expected = QJsonObject::fromVariantMap(draft);
+        expected.insert("selected_skills", exact);
+        QCOMPARE(creations[0], expected);
+        if (refreshChoices) {
+            QVERIFY(c.selectedSkillIds().isEmpty());
+            QTRY_COMPARE(f.posts("/skills/recommendations"), 2);
+        } else {
+            QCOMPARE(c.selectedSkillIds().size(), 2);
+            QCOMPARE(f.posts("/skills/recommendations"), 1);
+            c.setSkillSelected(second.value("skill_id").toString(), false);
+        }
+        QTRY_VERIFY(!c.recommendationsLoading());
+        QCOMPARE(creations.size(), 1);
+        QVERIFY(c.creationReady());
+        QCOMPARE(c.creationPreview(), preview.toVariantMap());
+        c.createMission(draft);
+        QTRY_COMPARE(creations.size(), 2);
+        auto retry = QJsonObject::fromVariantMap(draft);
+        if (!refreshChoices) retry.insert("selected_skills", QJsonArray{exact.first()});
+        QCOMPARE(creations[1], retry);
+        QCOMPARE(f.posts("/missions/preview"), 1);
+    }
+    void unavailableRecommendationRouteAllowsPlainCreation()
+    {
+        Fixture f;
+        f.intercept = [&](const Request &r) {
+            if (r.path != "/api/v2/skills/recommendations") return false;
+            Source::json(r, {{"detail", "Not Found"}}, 404);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.updateSkillContext("worker", "auto", "D:/repo", {});
+        QTRY_VERIFY(!c.recommendationError().isEmpty());
+        QVERIFY(c.creationError().isEmpty());
+        QVERIFY(c.error().isEmpty());
+        const QVariantMap draft{{"request", "worker"}, {"repository_path", "D:/repo"}};
+        c.createMission(draft);
+        QTRY_COMPARE(c.taskId(), A);
+        QCOMPARE(f.posts("/missions"), 1);
+        for (const auto &r : f.source.requests)
+            if (r.method == "POST" && r.path == "/api/v2/missions") QCOMPARE(r.body, QJsonObject::fromVariantMap(draft));
+    }
+    void frozenSkillUsageLoadsOnlyOnDemandAndFollowsTaskIdentity()
+    {
+        Fixture f;
+        QList<Request> held;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/skills")) return false;
+            held.append(r);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.selectMission(A);
+        QTRY_VERIFY(c.synchronized());
+        QCOMPARE(held.size(), 0);
+        c.loadMissionSkills();
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 1);
+        f.current = mission(B, 12, "succeeded");
+        c.selectMission(B);
+        QVERIFY(c.missionSkills().isEmpty());
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 2);
+        auto latest = protocolExample("mission_skills_response");
+        latest.insert("task_id", B);
+        Source::json(held[1], latest);
+        Source::json(held[0], protocolExample("mission_skills_empty_response"));
+        QTRY_COMPARE(c.missionSkills(), latest.toVariantMap());
+        c.refresh();
+        QTRY_VERIFY(c.synchronized());
+        QCOMPARE(held.size(), 2);
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 3);
+        Source::json(held[2], conflict("skill_snapshot_invalid"), 409);
+        QTRY_VERIFY(!c.missionSkillsError().isEmpty());
+        QVERIFY(c.error().isEmpty());
+    }
     void creationPreviewInvalidationDisposesLateResultsAndRequiresReconfirmation_data()
     {
         QTest::addColumn<QString>("conflictCode");
@@ -152,7 +341,7 @@ private slots:
         QCOMPARE(c.missions()->count(), 1); QCOMPARE(c.missions()->get(0).value("taskId").toString(), B);
         c.setRepositoryFilter("D:/Projects/Example"); QTRY_VERIFY(!c.historyLoading());
         const QUrlQuery query(QUrl::fromEncoded(f.source.requests.last().path));
-        QCOMPARE(query.queryItemValue("repository_path"), "D:/Projects/Example"); QCOMPARE(query.queryItemValue("status"), "failed");
+        QCOMPARE(query.queryItemValue("repository_path", QUrl::FullyDecoded), "D:/Projects/Example"); QCOMPARE(query.queryItemValue("status"), "failed");
     }
     void historyErrorsAreIndependentFromSelectedMission()
     {
@@ -210,6 +399,82 @@ private slots:
     {
         QTest::addColumn<QString>("code");
         for (const char *code : {"mission_revision_conflict", "mission_approval_conflict", "approval_stale"}) QTest::newRow(code) << QString(code);
+    }
+    void scopeDecisionsBindDisplayedProposal_data()
+    {
+        QTest::addColumn<bool>("approved");
+        QTest::newRow("approve") << true;
+        QTest::newRow("reject") << false;
+    }
+    void scopeDecisionsBindDisplayedProposal()
+    {
+        QFETCH(bool, approved);
+        Fixture f; auto scope = protocolExample("mission_scope_expansion_preview");
+        f.current = mission(A, 42);
+        QList<Request> decisions;
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/graph")) Source::json(r, graph(f.current, "repair_1"));
+            else if (r.path.endsWith("/scope-expansion")) Source::json(r, scope);
+            else if (r.path.endsWith("/approvals")) decisions.append(r);
+            else return false;
+            return true;
+        };
+        MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A);
+        auto *approval = c.approval();
+        QSignalSpy resumed(approval, &ApprovalController::scopeExpansionApproved);
+        QTRY_VERIFY(approval->scopeAvailable()); QVERIFY(!approval->available());
+        const auto old = approval->scopeExpansion();
+        approval->decideScopeExpansion(old, approved); approval->decideScopeExpansion(old, !approved);
+        QTRY_COMPARE(decisions.size(), 1); QVERIFY(c.busy());
+        QCOMPARE(decisions[0].body.value("approval_type").toString(), "scope_expansion");
+        QCOMPARE(decisions[0].body.value("expected_revision").toInt(), 42);
+        QCOMPARE(decisions[0].path, "/api/v2/missions/" + A.toUtf8() + "/approvals");
+        for (const auto *key : {"plan_hash", "task_spec_hash", "scope_hash"})
+            QCOMPARE(decisions[0].body.value(key), scope.value(key));
+
+        f.current = mission(A, 43); scope.insert("revision", 43);
+        Source::json(decisions.first(), conflict(), 409);
+        QTRY_COMPARE(c.revision(), 43); QTRY_VERIFY(approval->scopeAvailable());
+        QVERIFY(!approval->error().isEmpty()); QCOMPARE(resumed.count(), 0);
+        approval->decideScopeExpansion(old, approved); // stale dialog after refresh
+        QTRY_VERIFY(approval->scopeAvailable()); QCOMPARE(decisions.size(), 1);
+        approval->decideScopeExpansion(approval->scopeExpansion(), approved);
+        QTRY_COMPARE(decisions.size(), 2);
+        QCOMPARE(decisions[1].body.value("decision").toString(), approved ? "approved" : "rejected");
+        QCOMPARE(decisions[1].body.value("expected_revision").toInt(), 43);
+        f.current = mission(A, 44, approved ? "running" : "awaiting_human");
+        scope.insert("revision", 44); scope.insert("status", approved ? "approved" : "rejected");
+        Source::json(decisions.last(), f.current, 202);
+        QTRY_COMPARE(c.revision(), 44); QTRY_VERIFY(c.synchronized()); QCOMPARE(c.taskId(), A);
+        QCOMPARE(resumed.count(), approved ? 1 : 0); QVERIFY(!approval->scopeAvailable());
+        if (!approved) QCOMPARE(approval->scopeExpansion().value("status").toString(), "rejected");
+        QVERIFY(!approval->available()); QCOMPARE(f.posts("/approvals"), 2);
+    }
+    void olderProposalCannotAuthorizePausedWriter_data()
+    {
+        QTest::addColumn<QString>("nodeId"); QTest::addColumn<int>("attempt");
+        QTest::newRow("another-writer") << QString("implementer") << 1;
+        QTest::newRow("another-attempt") << QString("repair_1") << 2;
+    }
+    void olderProposalCannotAuthorizePausedWriter()
+    {
+        QFETCH(QString, nodeId); QFETCH(int, attempt);
+        Fixture f; f.current = mission(A, 42);
+        auto scope = protocolExample("mission_scope_expansion_preview");
+        scope.insert("status", "approved");
+        f.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/scope-expansion")) Source::json(r, scope);
+            else if (r.path.endsWith("/graph")) {
+                auto body = graph(f.current, nodeId);
+                auto node = body.value("nodes").toArray().first().toObject();
+                node.insert("attempt", attempt); body.insert("nodes", QJsonArray{node});
+                Source::json(r, body);
+            } else return false;
+            return true;
+        };
+        MissionController c; c.setBaseUrl(f.source.url()); c.selectMission(A); QTRY_VERIFY(c.synchronized());
+        QVERIFY(c.approval()->scopeExpansion().isEmpty());
+        QVERIFY(!c.approval()->scopeAvailable()); QVERIFY(!c.approval()->available());
     }
     void staleApprovalRefreshesWithoutResubmitting()
     {

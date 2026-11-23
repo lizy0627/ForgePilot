@@ -362,16 +362,24 @@ class WorkspaceManager(DeliveryMixin):
                 state.pop("writer_before", None)
                 self._save(state)
             except BaseException:
-                state["status"] = "interrupted_writer"
-                try:
-                    interrupted = self._snapshot(state)
-                    state["writer_observed"] = {"head": interrupted.head_commit, "files": dict(interrupted.file_hashes)}
-                except (ForgePilotError, OSError, ValueError):
-                    state["writer_observed"] = None
-                self._save(state)
+                if state["status"] != "interrupted_writer":
+                    self.record_writer_pause(task_id)
                 raise
             finally:
                 self._local.active = None
+
+    def record_writer_pause(self, task_id):
+        """Publish the lease observation before a paused writer becomes visible in SQLite."""
+        state, _ = self._local.active
+        if task_id != state["task_id"]:
+            raise ForgePilotError("workspace_boundary", "Writer lease belongs to another task")
+        state["status"] = "interrupted_writer"
+        try:
+            interrupted = self._snapshot(state)
+            state["writer_observed"] = {"head": interrupted.head_commit, "files": dict(interrupted.file_hashes)}
+        except (ForgePilotError, OSError, ValueError):
+            state["writer_observed"] = None
+        self._save(state)
 
     def _artifact(self, state, name, data):
         name = validate_relative(name)
@@ -799,6 +807,21 @@ class WorkspaceManager(DeliveryMixin):
             previous = state.get("restore_intent") or state.get("last_restore")
             valid_identity = (isinstance(expected, WorkspaceSnapshot) and expected.known
                               and expected.workspace_id == current.workspace_id and expected.task_id == current.task_id)
+            # reset --hard restores tracked bytes first. A crash can leave
+            # some reviewed additions waiting for the hash-checked unlink.
+            if (state.get("restore_intent") and valid_identity and expected.head_commit == saved["head"]
+                    and previous["checkpoint_id"] == checkpoint_id and previous["result_files"] == saved["files"]
+                    and dict(expected.file_hashes) == previous["input_files"]
+                    and all(current.file_hashes.get(name) == digest for name, digest in saved["files"].items())):
+                remaining = set(current.file_hashes) - set(saved["files"])
+                if any(current.file_hashes[name] != expected.file_hashes.get(name) for name in remaining):
+                    raise ForgePilotError("workspace_changed", "Unexpected files appeared during checkpoint restore")
+                tree = self._git(state).run(["write-tree"]).stdout.decode().strip()
+                self._verify_commit(state, tree, saved["files"])
+                guard = Guard(state["worktree_path"])
+                for name in sorted(remaining):
+                    guard.unlink(name, expected.file_hashes[name])
+                current = self._snapshot(state)
             if (previous and previous["checkpoint_id"] == checkpoint_id and valid_identity
                     and expected.head_commit == saved["head"]
                     and dict(expected.file_hashes) in (previous["input_files"], saved["files"])

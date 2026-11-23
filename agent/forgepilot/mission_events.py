@@ -20,7 +20,7 @@ from .errors import ForgePilotError
 
 EVENT_PATTERN = r"^(task|node|artifact|approval|tool|model|validation|workspace|security)\.[a-z][a-z0-9_.]{0,95}$"
 _EVENT_RE = re.compile(EVENT_PATTERN)
-_TERMINAL = frozenset({"succeeded", "completed", "failed", "cancelled", "skipped"})
+TERMINAL_MISSION_STATUSES = frozenset({"succeeded", "completed", "failed", "cancelled", "skipped"})
 _PRIVATE_FIELDS = frozenset({
     "reasoning", "reasoning_content", "chain_of_thought", "hidden_thoughts", "thoughts",
     "hidden_test_source", "hidden_test_sources", "oracle_source", "environment", "env",
@@ -216,7 +216,7 @@ class MissionSubscription:
                 event_type=_wire_kind(row["event_type"], row["state"]), node_id=row["node_id"],
                 actor=store.redactor.text(actor), data=payload))
         end = rows[-1]["sequence"] if rows else self.after
-        return tuple(events), run["status"] in _TERMINAL and end >= maximum
+        return tuple(events), run["status"] in TERMINAL_MISSION_STATUSES and end >= maximum
 
     async def frames(self, request=None, *, initial=None):
         try:

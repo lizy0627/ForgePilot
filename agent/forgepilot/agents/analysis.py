@@ -9,7 +9,6 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 import json
-from urllib.parse import urlsplit
 
 from pydantic import Field
 
@@ -20,11 +19,13 @@ from ..errors import ForgePilotError
 from ..mission_observability import model_call, tool_call, validate_tool
 from ..models.accounting import ModelBudget
 from ..models.errors import category_of
+from ..models.routing import route_uses_cloud
 from ..orchestration.analysis_review import AnalysisReviewStore
 from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics, NodeResult, NodeStatus, NodeType, FailureKind, _plain_json
 from ..orchestration.node_handlers import HandlerRegistry, NodeExecutionError
 from ..orchestration.runner import GraphRunner
 from ..orchestration.execution import coordinator_for_storage
+from ..skill_selection import skill_manifest_sha256, skill_reference_payload
 from .registry import AgentRegistry
 from .prompts import get_prompt
 from .contracts import output_schema, validate_task_spec, validate_evidence_bundle, validate_execution_plan
@@ -46,6 +47,51 @@ STAGES = {
     "generalist_analysis": ("generalist.v1", EvidenceBundle),
     "generalist_plan": ("generalist.v1", ExecutionPlan),
 }
+
+
+def validate_skill_routes(workflow, skills, data_policy):
+    """Check the actual analyst roles and all provider candidates before admission or use."""
+    for stage in sorted({stage for skill in skills for stage in skill.content.stages}):
+        if getattr(workflow, "single_agent", False) or stage not in {"root_cause_analysis", "impact_test_analysis"}:
+            raise ForgePilotError("skill_stage_unavailable", f"No read-only skill target for {stage}")
+        try:
+            definition = workflow.agents.get(STAGES[stage][0])
+        except (AttributeError, KeyError):
+            raise ForgePilotError("skill_stage_unavailable", f"Missing skill target for {stage}") from None
+        if definition.role != stage.removesuffix("_analysis") + "_analyst":
+            raise ForgePilotError("skill_stage_unavailable", f"Wrong analyst role for {stage}")
+        try:
+            route = workflow.gateway.router.validate_agent(definition)
+        except (AttributeError, ForgePilotError):
+            raise ForgePilotError("skill_route_denied", f"Skill requires a valid model route for {stage}") from None
+        local_only = any(skill.content.usage_scope == "local_only" for skill in skills if stage in skill.content.stages)
+        if (local_only or not data_policy.cloud_model_allowed) and route_uses_cloud(route):
+            raise ForgePilotError("skill_route_denied", f"Skill requires local primary and fallback models for {stage}")
+
+
+def validate_skill_bindings(graph, skills, *, error_code="skill_stage_unavailable"):
+    """Every selected stage must be bound to its designated analyst handler and manifest."""
+    stages = {stage for skill in skills for stage in skill.content.stages}
+    bound = [node for node in graph.nodes if "skill_manifest_sha256" in node.settings]
+    digest = skill_manifest_sha256(skills)
+    if ({node.node_id for node in bound} != stages
+            or any(node.node_type != NodeType.AGENT or node.handler != node.node_id
+                   or node.agent_id != STAGES[node.node_id][0]
+                   or node.settings["skill_manifest_sha256"] != digest for node in bound)):
+        raise ForgePilotError(error_code, "Frozen skill manifest or target analyst differs from the graph")
+
+
+def stored_graph_skills(events, task_id, graph):
+    metadata = events.missions.metadata(task_id) if events.missions.is_admitted(task_id) else {}
+    marked = any("skill_manifest_sha256" in node.settings for node in graph.nodes)
+    if not marked and "skill_manifest_sha256" not in metadata and not metadata.get("selected_skills"):
+        return ()
+    digest = metadata.get("skill_manifest_sha256")
+    if not digest:
+        raise ForgePilotError("skill_snapshot_invalid", "Missing frozen Mission skill manifest")
+    skills = events.skills.load_frozen(task_id, digest)
+    validate_skill_bindings(graph, skills, error_code="skill_snapshot_invalid")
+    return skills
 
 
 class AnalysisService:
@@ -82,7 +128,7 @@ class AnalysisService:
         self._pending = {}
         self._cancel_requests = set()
 
-    def graph(self, request, *, locked_task_spec=None, allow_locked_test_scope=False):
+    def graph(self, request, *, locked_task_spec=None, allow_locked_test_scope=False, skills=()):
         request = AnalysisRequest.model_validate(request)
         if allow_locked_test_scope and locked_task_spec is None:
             raise ForgePilotError("policy_denied", "Editable test scope requires a locked TaskSpec")
@@ -95,6 +141,8 @@ class AnalysisService:
         def agent(stage, dependencies):
             definition = self.agents.get(STAGES[stage][0])
             settings = {"request": request.model_dump(mode="json")} if stage == "draft_task_spec" else {}
+            if any(stage in skill.content.stages for skill in skills):
+                settings["skill_manifest_sha256"] = skill_manifest_sha256(skills)
             return NodeDefinition(stage, NodeType.AGENT, stage, dependencies=dependencies,
                 agent_id=definition.agent_id, agent_definition_hash=definition.definition_hash, settings=settings)
         draft = (agent("draft_task_spec", ()) if locked_task_spec is None else
@@ -293,6 +341,14 @@ class AnalysisService:
                 payload["evidence"] = evidence[0].model_dump(mode="json")
                 schema["properties"]["task_spec_artifact_id"] = {"const": spec_artifact.artifact_id}
         self._check_data_route(definition, data_policy)
+        stage_skills = ()
+        if "skill_manifest_sha256" in context.node.settings:
+            skills = self.events.skills.load_frozen(context.task_id, context.node.settings["skill_manifest_sha256"])
+            stage_skills = tuple(skill for skill in skills if stage in skill.content.stages)
+            if not stage_skills:
+                raise ForgePilotError("skill_snapshot_invalid", f"Missing frozen skill guidance for {stage}")
+            validate_skill_routes(self, stage_skills, data_policy)
+            payload.update(skill_reference_payload(stage_skills, stage))
         key = (context.task_id, stage)
         # Retries spend the same cumulative node budget. Restart recovery is
         # explicit and never resumes an unaccounted model stream.
@@ -331,11 +387,16 @@ class AnalysisService:
                         if stage == "generalist_plan" else definition.capabilities)
         with registry.as_capabilities(capabilities):
             tools = registry.get_specs()
+            dispatch = {}
+            if stage_skills:
+                dispatch["on_dispatch"] = lambda: self.events.skills.record_injection(
+                    context.task_id, stage, context.attempt, stage_skills)
             while True:
                 if context.is_cancelled():
                     return NodeResult(NodeStatus.CANCELLED)
                 response = await model_call(self.events, context, definition, client,
-                                            messages, tools, output_schema=schema)
+                                            messages, tools, output_schema=schema, **dispatch)
+                dispatch.clear()
                 if not response.message.tool_calls:
                     break
                 # Validate the whole batch before dispatch. Even if a provider
@@ -454,9 +515,8 @@ class AnalysisService:
         if policy.cloud_model_allowed:
             return
         route = self.gateway.router.validate_agent(definition)
-        for profile in (route.primary, route.fallback):
-            if profile and urlsplit(profile.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}:
-                raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud model route")
+        if route_uses_cloud(route):
+            raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud model route")
 
     def _retrieval_for(self, policy):
         from ..rag.mission import MissionRetrievalService
@@ -558,10 +618,15 @@ class AnalysisService:
         with self.events.missions.consistent_view():
             if self.reviews.get(review.task_id) != review:
                 raise ForgePilotError("approval_stale", "Review changed during revision")
-            self.events.artifacts.put(revised)
-            self.events.artifacts.put(proposed)
             run = self.events.missions.get_graph_run(review.task_id)
             graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
+            skills = stored_graph_skills(self.events, review.task_id, graph)
+            if skills:
+                if graph.definition_hash != run["definition_hash"]:
+                    raise ForgePilotError("graph_definition", "Frozen graph changed before review revision")
+                validate_skill_routes(self, skills, spec.data_policy)
+            self.events.artifacts.put(revised)
+            self.events.artifacts.put(proposed)
             gate = next(n for n in graph.nodes if n.node_id == "execution_approval")
             return self.reviews.replace(review, revised, proposed, gate, self.runner.policy.definition_hash)
 

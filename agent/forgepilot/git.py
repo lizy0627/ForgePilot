@@ -17,7 +17,7 @@ from .process import ProcessResult, executable as resolve_executable, run_proces
 from .repository import is_link, opened_path
 
 
-def _git_prefix(executable, root, git_dir=None):
+def _git_prefix(executable, root, git_dir=None, *, checkout_eol=False):
     prefix = [executable, "--no-optional-locks", "--no-pager", "-C", str(root),
               "--work-tree=" + str(root)]
     if git_dir is not None:
@@ -28,14 +28,18 @@ def _git_prefix(executable, root, git_dir=None):
                   "gpg.ssh.program=false", "credential.helper=", "credential.interactive=false",
                   "protocol.allow=never", "submodule.recurse=false", "core.sshCommand=false",
                   "gc.auto=0", "maintenance.auto=false", "fetch.writeCommitGraph=false",
-                  "merge.renormalize=false", "core.autocrlf=false", "core.alternateRefsCommand=false",
+                  "merge.renormalize=false", "core.alternateRefsCommand=false",
                   "core.editor=false", "sequence.editor=false", "extensions.worktreeConfig=false",
                   "merge.union.driver=false", "merge.union.recursive=binary", "core.protectNTFS=true"):
         prefix += ["-c", value]
+    if not checkout_eol:
+        prefix += ["-c", "core.autocrlf=false"]
     return prefix
 
 
-_DRIVERS = r"^(filter\.[^\r\n=]+\.(clean|smudge|process|required)|merge\.[^\r\n=]+\.(driver|recursive)|diff\.[^\r\n=]+\.(command|textconv))$"
+# Git's POSIX regex and Python both need literal CR/LF in the character class.
+_DRIVERS = ("^(filter[.][^\r\n=]+[.](clean|smudge|process|required)"
+            "|merge[.][^\r\n=]+[.](driver|recursive)|diff[.][^\r\n=]+[.](command|textconv))$")
 
 
 def _driver_overrides(result):
@@ -60,9 +64,16 @@ def _driver_overrides(result):
     return options
 
 
-def _run_sync(argv, cwd, *, data=b"", env=None, timeout=30, output_limit=16 * 1024 * 1024):
+def _run_sync(argv, cwd, *, data=b"", env=None, timeout=30, output_limit=16 * 1024 * 1024,
+              read_checkout_config=False):
     """Bounded shell-free pipe runner; drain both outputs and kill on overflow."""
     environment = safe_environment()
+    if read_checkout_config:
+        # Only the read-only, no-includes EOL config query sees user/system files.
+        del environment["GIT_CONFIG_NOSYSTEM"], environment["GIT_CONFIG_GLOBAL"]
+        for key in ("HOME", "XDG_CONFIG_HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
     environment.update(env or {})
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=environment, shell=False,
@@ -114,6 +125,24 @@ def _run_sync(argv, cwd, *, data=b"", env=None, timeout=30, output_limit=16 * 10
     if timed_out:
         raise ForgePilotError("tool_timeout", "Git operation timed out")
     return ProcessResult(proc.returncode, bytes(outputs[0]), bytes(outputs[1]), overflow.is_set())
+
+
+def _checkout_eol_options(prefix, root):
+    result = _run_sync(prefix + ["config", "--no-includes", "--null", "--get-regexp",
+                                 r"^core\.(autocrlf|eol)$"], root,
+                       read_checkout_config=True, output_limit=32_768)
+    if result.truncated or result.returncode not in (0, 1):
+        raise ForgePilotError("git_config", "Cannot read target Git checkout settings")
+    options = []
+    for record in result.stdout.split(b"\0"):
+        if record:
+            key, separator, value = record.partition(b"\n")
+            if key not in (b"core.autocrlf", b"core.eol"):
+                raise ForgePilotError("git_config", "Unexpected Git checkout setting")
+            # A boolean key without a value is distinct from an explicitly empty value.
+            option = key + b"=" + value if separator else key
+            options += ["-c", os.fsdecode(option)]
+    return options
 
 
 class SafeGit:
@@ -240,19 +269,22 @@ class SafeGit:
                         pending.append(Path(item.path))
         return directories
 
-    def run(self, args: list[str], *, data=b"", allowed=(0,), env=None) -> ProcessResult:
+    def run(self, args: list[str], *, data=b"", allowed=(0,), env=None,
+            checkout_eol=False, checkout_root=None) -> ProcessResult:
         from .workspace_safety import Guard, _identity, _open_nofollow, _same_path, _windows_directory_handles
         if (not isinstance(args, list) or not args or not all(isinstance(v, str) and "\0" not in v for v in args)
                 or not isinstance(data, bytes)):
             raise ValueError("Expected fixed Git arguments and byte input")
         command = args[0]
         if command not in {"rev-parse", "symbolic-ref", "status", "diff", "config", "show", "ls-files", "ls-tree",
-                           "worktree", "branch", "checkout", "switch", "read-tree", "write-tree", "commit-tree",
+                           "worktree", "branch", "checkout", "checkout-index", "switch", "read-tree", "write-tree", "commit-tree",
                            "update-ref", "add", "apply", "reset", "merge-tree", "merge-base", "cat-file", "log",
                            "format-patch", "check-ref-format", "for-each-ref", "rev-list", "diff-tree", "hash-object"}:
             raise ForgePilotError("git_denied", "Git command is outside manager operations")
         if command == "config" and not any(value in args for value in ("--get", "--get-regexp", "--name-only")):
             raise ForgePilotError("git_denied", "Git configuration mutation is forbidden")
+        if command == "checkout-index" and args != ["checkout-index", "--index", "--ignore-skip-worktree-bits", "-z", "--stdin"]:
+            raise ForgePilotError("git_denied", "Expected checkout of missing index paths")
         environment = {}
         index_guard = None
         for key, value in (env or {}).items():
@@ -269,11 +301,21 @@ class SafeGit:
                 raise ForgePilotError("git_denied", "Invalid Git environment override")
             environment[key] = value
         with ExitStack() as stack:
+            if checkout_root is not None:
+                if (len(args) != 4 or args[:3] != ["read-tree", "--reset", "-u"]
+                        or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", args[3])
+                        or not checkout_eol or index_guard is None):
+                    raise ForgePilotError("git_denied", "Expected a private index and checkout tree")
+                checkout_guard = Guard(checkout_root)
+                if not same_path(checkout_guard.root.parent, index_guard.root) or path_within(checkout_guard.root, self.root):
+                    raise ForgePilotError("git_denied", "Private checkout must use the private index directory")
             stack.enter_context(self.guard.protect())
             stack.enter_context(self.git_guard.protect())
             if self.common_guard is not self.git_guard:
                 stack.enter_context(self.common_guard.protect())
-            if command in {"add", "apply", "reset", "checkout", "switch"} or (command == "read-tree" and "-u" in args):
+            if checkout_root is not None:
+                stack.enter_context(checkout_guard.protect_tree())
+            elif command in {"add", "apply", "reset", "checkout", "checkout-index", "switch"} or (command == "read-tree" and "-u" in args):
                 stack.enter_context(self.guard.protect_tree())
             if index_guard is not None:
                 stack.enter_context(index_guard.protect(path.name, missing=True))
@@ -302,7 +344,7 @@ class SafeGit:
             stack.enter_context(_windows_directory_handles(directories))
             if any(_identity(path) != identity for path, identity in identities):
                 raise ForgePilotError("workspace_boundary", "Git metadata changed before execution")
-            prefix = _git_prefix(self.executable, self.root, self.git_dir)
+            prefix = _git_prefix(self.executable, self.root, self.git_dir, checkout_eol=checkout_eol)
             if self._cached_signature != self._config_signature:
                 signature = self._config_signature
                 config = _run_sync(prefix + ["config", "--name-only", "--get-regexp", _DRIVERS], self.root,
@@ -314,6 +356,10 @@ class SafeGit:
                 self._cached_overrides = overrides
                 self._cached_signature = signature
             prefix += self._cached_overrides
+            if checkout_eol:
+                prefix += _checkout_eol_options(prefix, self.root)
+            if checkout_root is not None:
+                prefix += ["--work-tree=" + str(checkout_guard.root)]
             self._check()
             result = _run_sync(prefix + args, self.root, data=data, env=environment)
             self._check()

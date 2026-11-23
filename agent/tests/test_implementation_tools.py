@@ -24,20 +24,22 @@ def digest(value):
 
 
 def controller(root, *, files=("src/a.py", "src/b.py", "tests/test_new.py", "scratch.txt"),
-               max_files=8, test_policy=None, capabilities=CAPABILITIES, adds_tests=True, **kwargs):
+               max_files=8, test_policy=None, capabilities=CAPABILITIES, adds_tests=True,
+               criteria=("AC-1",), file_criteria=(), **kwargs):
     task_id = str(uuid4())
     spec = create_artifact(task_id=task_id, producer="orchestrator.v1", producer_node="spec",
         content=TaskSpec(task_type="bug_fix", title="Correct result", objective="Return the expected value.",
             repository=RepositorySpec(base_ref="HEAD", toolchain_profile="python"),
             problem=TaskProblem(observed_behavior="Wrong result", expected_behavior="Correct result"),
-            acceptance_criteria=(AcceptanceCriterion(id="AC-1", description="Regression test passes", verification="test"),),
+            acceptance_criteria=tuple(AcceptanceCriterion(id=item, description="Regression test passes", verification="test")
+                                      for item in criteria),
             allowed_scope=AllowedScope(path_patterns=("src/**", "tests/**", "scratch.txt"), max_changed_files=max_files),
             forbidden_scope=("src/private/**",), test_policy=test_policy or ArtifactTestPolicy(), risk_level="low"))
     plan = create_artifact(task_id=task_id, producer="orchestrator.v1", producer_node="plan",
         parent_artifact_ids=(spec.artifact_id,), content=ExecutionPlan(task_spec_artifact_id=spec.artifact_id,
             summary="Fix code and add regression coverage", steps=(PlanStep(step_id="STEP-1", owner="implementer.v1",
                 expected_files=files, action="Change result", verification=("test",), risk="Low risk", adds_tests=adds_tests,
-                acceptance_criteria_ids=("AC-1",)),)))
+                acceptance_criteria_ids=criteria, file_criteria=file_criteria),)))
     return ImplementationTools(Repository(root.resolve(), "unused"), spec, plan, capabilities=capabilities, **kwargs)
 
 
@@ -77,6 +79,18 @@ async def test_cross_file_changeset_has_real_diff_hashes_and_mapping(tree):
     assert content.files[0].acceptance_criteria_ids == ("AC-1",)
     assert content.files[2].test_change == "new_test"
     assert not content.requires_additional_approval
+
+
+@pytest.mark.asyncio
+async def test_expansion_only_grants_selected_acceptance_criteria_for_file(tree):
+    tools = controller(tree, criteria=("AC-1", "AC-2"),
+                       file_criteria=({"path": "src/a.py", "reason": "Needed for AC-2",
+                                       "acceptance_criteria_ids": ["AC-2"]},))
+    denied = await tools.registry.execute("repository_apply_patch", patch())
+    assert not denied.success and "mapping_invalid" in denied.error
+    assert (tree / "src/a.py").read_bytes() == b"value = 1\n"
+    assert (await tools.registry.execute("repository_apply_patch", patch(acceptance_criteria_ids=["AC-2"]))).success
+    assert (await tools.registry.execute("repository_apply_patch", patch("src/b.py", "value = 2\n"))).success
 
 
 @pytest.mark.asyncio

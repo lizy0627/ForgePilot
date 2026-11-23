@@ -18,6 +18,7 @@ import pytest
 
 from forgepilot import desktop_configuration as configuration
 from test_build_process import alive
+from test_desktop_launcher import close_fixture_window
 from test_workspace_manager import committed_repo
 
 
@@ -132,6 +133,74 @@ def offline_models():
         server.shutdown()
         server.server_close()
         thread.join(5)
+
+
+def configuration_windows(config):
+    # Limit the check and cleanup to clients opened for this test's unique configuration.
+    script = ("$ErrorActionPreference='Stop'; "
+              "Get-CimInstance Win32_Process -Filter \"Name='ForgePilotClient.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*--configure*' -and "
+              "$_.CommandLine.Contains($env:FIXTURE_CONFIG) } | ForEach-Object { $_.ProcessId }")
+    environment = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                            env={**environment, "FIXTURE_CONFIG": str(config)}, capture_output=True,
+                            check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+    return {int(pid) for pid in result.stdout.splitlines()}
+
+
+@pytest.mark.parametrize("port_occupied", [False, True], ids=["start", "port-in-use"])
+def test_apply_first_save_from_stopped_service(tmp_path, port_occupied):
+    config = tmp_path / "first save" / "config.json"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FORGEPILOT_")}
+    env.update(LOCALAPPDATA=str(tmp_path / "local"), FORGEPILOT_LOCAL_API_TOKEN=secrets.token_urlsafe(32))
+
+    def helper(action, **payload):
+        result = invoke("config-helper", config, env, request={"action": action, **payload}, timeout=180)
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        return json.loads(result.stdout)
+
+    with offline_models() as (base_url, _, release, calls):
+        release.set()
+        port = httpx.URL(base_url).port if port_occupied else free_port()
+        try:
+            if port_occupied:
+                first_launch = invoke("desktop", config, env)
+                assert first_launch.returncode == 0, first_launch.stderr
+                wizard = json.loads(first_launch.stdout)["configuration_client_pid"]
+            loaded = helper("load")
+            assert loaded["ok"] and not loaded["configured"]
+            fields = {**loaded["fields"], "base_url": base_url, "port": port,
+                      "chat_model": "offline", "task_model": "offline", "summary_model": "offline"}
+            saved = helper("save", fields=fields, api_key=OLD_KEY, config_revision=loaded["config_revision"])
+            assert saved["ok"] and saved["configured"] and saved["restart_required"]
+            applied = helper("restart", config_revision=saved["config_revision"])
+            assert not calls
+            if port_occupied:
+                assert not applied["ok"] and applied["restart_required"], applied
+                assert applied["error_code"] == "port_in_use" and "端口" in applied["notice"]
+                assert configuration_windows(config) == {wizard}
+                reloaded = helper("load")
+                assert reloaded["configured"] and reloaded["config_revision"] == saved["config_revision"]
+                with httpx.Client(trust_env=False) as client:
+                    # The original POST-only fixture still answers HTTP GET on the occupied port.
+                    response = client.get(base_url)
+                    assert response.status_code == 501 and response.headers["Server"].startswith("BaseHTTP/")
+            else:
+                assert applied["ok"] and not applied["restart_required"], applied
+                state = runtime(config)
+                assert state["status"] == state["client_status"] == "running"
+                assert state["running_revision"] == saved["config_revision"] and alive(state["client_pid"])
+                with httpx.Client(trust_env=False, headers={"X-ForgePilot-Token": env["FORGEPILOT_LOCAL_API_TOKEN"]}) as client:
+                    assert client.get(f"http://127.0.0.1:{port}/api/v2/runtime/status").json()["active_count"] == 0
+        finally:
+            stopped = invoke("stop", config, env)
+            if port_occupied:
+                for pid in configuration_windows(config):
+                    close_fixture_window(pid)
+            assert stopped.returncode == 0, stopped.stderr
+        if not port_occupied:
+            assert runtime(config)["shutdown"] == "graceful"
+            assert not alive(state["backend_pid"]) and not alive(state["client_pid"])
 
 
 def test_legacy_single_model_desktop_chat_then_eight_route_mission(tmp_path, committed_repo):

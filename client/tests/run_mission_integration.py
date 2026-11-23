@@ -23,6 +23,7 @@ from forgepilot.api import create_app
 from forgepilot.process import executable
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.workspace_manager import WorkspaceManager
+from test_mission_history import seed
 from test_mission_service import ControlledWorkflow
 from test_workspace_manager import git
 
@@ -34,7 +35,7 @@ def run(root, output_root):
     git_exe = executable(os.environ.get("FORGEPILOT_GIT"), "git")
     with tempfile.TemporaryDirectory(prefix="ForgePilot Mission Qt ") as temporary:
         isolated = Path(temporary)
-        repository = isolated / "user source"
+        repository = isolated / "C++ 中文 %20"
         repository.mkdir()
         git(git_exe, repository, "init", "-q", "-b", "main")
         git(git_exe, repository, "config", "user.name", "Mission Fixture")
@@ -55,7 +56,8 @@ def run(root, output_root):
         @app.middleware("http")
         async def capture(request, call_next):
             response = await call_next(request)
-            requests.append(dict(method=request.method, path=request.url.path, status=response.status_code))
+            requests.append(dict(method=request.method, path=request.url.path, query=dict(request.query_params),
+                                 status=response.status_code))
             return response
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
@@ -105,8 +107,20 @@ def run(root, output_root):
             assert (repository / "source.txt").read_bytes() == original
             assert git(git_exe, repository, "rev-parse", "HEAD") == before
             assert not git(git_exe, repository, "status", "--porcelain=v1")
+            for number in range(1, 22):
+                seed(store, number, repository=str(repository), status="failed")
+            seed(store, 22, repository=str(isolated / "other repo"), status="failed")
+            filtered = subprocess.run([str(root / "client/build/Release/ForgePilotMissionBackendTests.exe"),
+                "filteredMissionHistoryPaginates", "-o", str(output / "mission-filter-results.txt") + ",txt"],
+                env=env, timeout=45)
+            if filtered.returncode:
+                return filtered.returncode
+            queries = [entry["query"] for entry in requests if entry["path"] == "/api/v2/missions"
+                       and entry["query"].get("status") == "failed"]
+            assert len(queries) == 2 and all(q["repository_path"] == str(repository) for q in queries), queries
+            assert "before" not in queries[0] and queries[1]["before"]
             (output / "mission-backend-evidence.json").write_text(json.dumps(dict(missions=missions, approvals=approvals), indent=2), encoding="utf-8")
-            print("REAL Qt + v2 HTTP + SSE + SQLite + Graph: create, frozen approval, terminal projections, artifacts, real 409 conflicts and read-only discovery in a restarted client passed", flush=True)
+            print("REAL Qt + v2 HTTP + SSE + SQLite + Graph: create, frozen approval, terminal projections, artifacts, real 409 conflicts, read-only discovery in a restarted client and filtered history pagination passed", flush=True)
         finally:
             server.should_exit = True
             thread.join(20)

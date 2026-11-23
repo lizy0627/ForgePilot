@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+from conftest import drop_skill_schema
 from forgepilot.errors import ForgePilotError
 from forgepilot.orchestration.checkpoint import (
     CheckpointIntegrityError, CheckpointStore, checkpoint_id_for,
@@ -47,6 +48,8 @@ def _v9_database(path):
     )
     store.close()
     with sqlite3.connect(path) as db:
+        drop_skill_schema(db)
+        db.execute("DROP TABLE writer_scope_expansions")
         db.execute("DROP TABLE checkpoint_intents")
         db.execute("ALTER TABLE task_graph_runs DROP COLUMN recovery_required")
         db.execute("ALTER TABLE task_graph_runs DROP COLUMN recovery_plan_json")
@@ -72,8 +75,7 @@ def test_v9_migration_preserves_legacy_records_backups_and_gates_between_nodes(t
     _v9_database(path)
     store = SqliteEventStore(path)
     try:
-        assert int(CURRENT_SCHEMA_VERSION) == int(SchemaVersion.GRAPH_CHECKPOINT_RECOVERY) == 10
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == int(CURRENT_SCHEMA_VERSION)
         legacy = store._db.execute("SELECT * FROM checkpoints WHERE checkpoint_id='legacy'").fetchone()
         assert legacy["commit_hash"] == "c" * 40 and legacy["node_id"] is None
         assert CheckpointStore(store).latest("task-checkpoint") is None

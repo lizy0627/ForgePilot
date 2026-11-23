@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import redirect_stdout
 import ctypes
 from ctypes import wintypes
 from datetime import datetime, timezone
@@ -545,9 +546,7 @@ def show_managed_window(config):
         kernel.api.CloseHandle(event)
 
 
-def start(config):
-    if Kernel(config).running():
-        return show_managed_window(config)
+def _start_managed(config):
     config.parent.mkdir(parents=True, exist_ok=True)
     result = config.parent / ('start-' + uuid4().hex + '.json')
     owner = subprocess.Popen(launcher_command('supervise', '--config', str(config), '--result', str(result)),
@@ -558,11 +557,11 @@ def start(config):
         if owner.poll() is not None and not result.exists():
             print(f'Launcher owner exited before startup completed (supervisor_exit={owner.returncode}). '
                   'Check runtime.json and Windows application control logs.')
-            return 1
+            return {'status': 'failed', 'error': 'owner_exited'}
         if time.monotonic() >= deadline:
             stop(config)
             print('Startup timed out. Inspect logs/desktop.')
-            return 1
+            return {'status': 'failed', 'error': 'start_timeout'}
         time.sleep(0.1)
     data = json.loads(result.read_text(encoding='utf-8'))
     result.unlink()  # Ephemeral handshake only; actual run logs and runtime.json are retained.
@@ -570,9 +569,17 @@ def start(config):
     if data.get('error') in {'client_start_failed', 'client_window_timeout'}:
         print('Client window did not open. See client.log for the Windows error or Qt diagnostic; '
               'also check Windows Code Integrity/App Control events. No security policy was changed.')
-    if data['status'] == 'already_running':
+    if data['status'] != 'already_running':
+        return data
+    if show_managed_window(config) == 0:
+        return {'status': 'running'}
+    return {'status': 'failed', 'error': 'client_window_unavailable'}
+
+
+def start(config):
+    if Kernel(config).running():
         return show_managed_window(config)
-    return 0 if data['status'] == 'running' else 1
+    return 0 if _start_managed(config)['status'] == 'running' else 1
 
 
 def runtime_status(config):
@@ -600,7 +607,17 @@ def request_restart(config):
     # client's job closes. The owner validates and performs the entire restart.
     kernel = Kernel(config)
     if not kernel.running():
-        return {'ok': desktop(config) == 0, 'notice': '正在使用已保存配置启动。', 'restart_required': False}
+        state = _start_managed(config)
+        if state['status'] == 'running':
+            return {'ok': True, 'notice': '后端和主窗口已就绪。', 'restart_required': False}
+        error = state['error']
+        if error == 'port_in_use':
+            notice = '本机端口已被占用，请更改端口并保存，再点击“重启并生效”。'
+        elif error == 'client_not_built':
+            notice = '缺少桌面客户端，请构建客户端或重新解压发布包，再重试。'
+        else:
+            notice = f'启动失败（{error}）。请查看配置目录的 runtime.json 和 logs/desktop 下的启动日志后重试。'
+        return {'ok': False, 'notice': notice, 'error_code': error, 'restart_required': True}
     request_id = uuid4().hex
     write_json(config.with_name('restart-request.json'), {'request_id': request_id})
     event = kernel.restart_event()
@@ -683,8 +700,10 @@ def configuration_helper(config):
         if len(raw) > 65536:
             raise ValueError('request_limit')
         request = json.loads(raw.decode('utf-8'))
-        response = asyncio.run(desktop_configuration.handle_request(config, request,
-            restart=lambda: request_restart(config), status=lambda: runtime_status(config)))
+        # The Qt helper's stdout is a single JSON document, including during startup.
+        with redirect_stdout(sys.stderr):
+            response = asyncio.run(desktop_configuration.handle_request(config, request,
+                restart=lambda: request_restart(config), status=lambda: runtime_status(config)))
     except (ValueError, UnicodeError, OSError):
         response = {'ok': False, 'notice': '配置请求无效，请重新打开配置。', 'errors': []}
     sys.stdout.write(json.dumps(response, ensure_ascii=True) + '\n')

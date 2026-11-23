@@ -3,18 +3,43 @@
 #include "Protocol.h"
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <algorithm>
 
 MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
 {
+    m_recommendationTimer.setSingleShot(true);
+    m_recommendationTimer.setInterval(250);
+    connect(&m_recommendationTimer, &QTimer::timeout, this, [this] {
+        m_recommendationBackend = baseUrl();
+        m_recommendationRequest = m_creationApi.recommendSkills(m_recommendationBody);
+    });
     connect(&m_creationApi, &AgentApiClient::responseReceived, this,
         [this](quint64 id, const QString &operation, const QString &, const QJsonObject &body) {
+            if (operation == "mission.recommendations") {
+                if (!currentRecommendation(id)) return;
+                m_recommendationRequest = 0;
+                m_recommendations = body.value("recommendations").toArray();
+                QPointer<MissionController> guard(this);
+                emit skillRecommendationsChanged();
+                if (guard) emit recommendationsChanged();
+                return;
+            }
             if (operation != "mission.preview") return;
             if (id != m_previewRequest) { m_creationApi.discardMissionPreview(body.value("preview_token").toString()); return; }
             m_previewRequest = 0; m_creationPreview = body; m_creationReady = true; m_creationError.clear();
             emit creationChanged();
         });
     connect(&m_creationApi, &AgentApiClient::requestError, this,
-        [this](quint64 id, const QString &, const QString &, int, const QString &, const QString &message) {
+        [this](quint64 id, const QString &operation, const QString &, int status, const QString &, const QString &message) {
+            if (operation == "mission.recommendations") {
+                if (!currentRecommendation(id)) return;
+                m_recommendationRequest = 0;
+                m_recommendationError = status == 404 || status == 405
+                    ? tr("当前后端未提供技能推荐，可直接创建普通任务。")
+                    : tr("技能推荐读取失败，可直接创建普通任务。");
+                emit recommendationsChanged();
+                return;
+            }
             if (id != m_previewRequest) return;
             m_previewRequest = 0; m_creationReady = false; m_creationError = message;
             emit creationChanged();
@@ -50,20 +75,53 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
         if (current()) updateAvailability();
     });
     connect(&m_api, &AgentApiClient::responseReceived, this,
-        [this](quint64 id, const QString &, const QString &task, const QJsonObject &body) { received(id, task, body); });
-    connect(&m_api, &AgentApiClient::requestError, this,
-        [this](quint64 id, const QString &, const QString &, int status, const QString &code, const QString &message) {
-            QPointer<MissionController> guard(this);
-            if (m_requests.value(id) == RequestKind::Create && m_requests.contains(id)) {
-                invalidateCreationPreview();
-                if (!guard) return;
-                m_creationError = message; emit creationChanged();
+        [this](quint64 id, const QString &, const QString &task, const QJsonObject &body) {
+            if (id == m_missionSkillsRequest && task == m_task) {
+                m_missionSkillsRequest = 0;
+                m_missionSkills = body;
+                emit missionSkillsChanged();
+                return;
             }
-            if (guard) failed(id, status, code);
+            received(id, task, body);
+        });
+    connect(&m_api, &AgentApiClient::requestError, this,
+        [this](quint64 id, const QString &, const QString &task, int status, const QString &code, const QString &message) {
+            if (id == m_missionSkillsRequest && task == m_task) {
+                m_missionSkillsRequest = 0;
+                m_missionSkillsError = (status == 404 && code != "unknown_mission") || status == 405
+                    ? tr("当前后端未提供技能使用记录。") : MissionProtocol::errorMessage(code, status);
+                emit missionSkillsChanged();
+                return;
+            }
+            const auto current = continuation();
+            if (m_requests.value(id) == RequestKind::Create && m_requests.contains(id)) {
+                const bool unsupportedSelection = status == 404 || status == 405
+                    || (status == 422 && code == "invalid_request");
+                if (m_submittedWithSkills && (code == "skill_selection_changed" || code == "invalid_skill_selection"
+                                               || unsupportedSelection)) {
+                    if (m_submittedSkillGeneration == m_skillContextGeneration) refreshRecommendations();
+                    if (!current()) return;
+                    m_creationError = unsupportedSelection
+                        ? tr("后端拒绝了含技能的创建请求。请检查输入，重新选择技能或确认按普通任务创建。")
+                        : MissionProtocol::errorMessage(code, status);
+                } else if (m_submittedWithSkills && (code == "skill_route_denied" || code == "skill_budget_exceeded")) {
+                    // Both checks happen before the backend claims the preview.
+                    m_creationError = MissionProtocol::errorMessage(code, status) + tr(" 请调整勾选后重新创建。");
+                } else {
+                    invalidateCreationPreview();
+                    if (!current()) return;
+                    m_creationError = code.startsWith("skill_") ? MissionProtocol::errorMessage(code, status) : message;
+                }
+                emit creationChanged();
+            }
+            if (current()) failed(id, status, code);
         });
     connect(&m_approval, &ApprovalController::snapshotReceived, this, &MissionController::mutationSnapshot);
     connect(&m_delivery, &DeliveryController::snapshotReceived, this, &MissionController::mutationSnapshot);
-    connect(&m_approval, &ApprovalController::refreshRequired, this, &MissionController::refresh);
+    connect(&m_approval, &ApprovalController::refreshRequired, this, [this] {
+        m_loader.invalidate();
+        refresh();
+    });
     connect(&m_delivery, &DeliveryController::refreshRequired, this, &MissionController::refresh);
     connect(&m_approval, &ApprovalController::changed, this, &MissionController::updateAvailability);
     connect(&m_delivery, &DeliveryController::changed, this, &MissionController::updateAvailability);
@@ -137,6 +195,8 @@ void MissionController::setBaseUrl(const QUrl &url)
     m_missions.clear();
     if (!current()) return;
     m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_creationApi.setBaseUrl(url); m_sse.setBaseUrl(url);
+    resetSkillContext();
+    if (!current()) return;
     invalidateCreationPreview(true);
     if (!current()) return;
     emit baseUrlChanged();
@@ -198,7 +258,10 @@ void MissionController::clearSelection()
     m_synchronized = false; m_streamSelected = false;
     m_updatingAvailability = false;
     m_task.clear(); m_snapshot = {}; m_recovery = {};
+    m_missionSkillsRequest = 0; m_missionSkills = {}; m_missionSkillsError.clear();
     m_api.abortPending(); m_sse.forgetTask();
+    if (!current()) return;
+    emit missionSkillsChanged();
     if (!current()) return;
     m_approval.clear();
     if (!current()) return;
@@ -249,10 +312,98 @@ void MissionController::previewCreation(const QVariantMap &request)
 void MissionController::createMission(const QVariantMap &request)
 {
     if (busy()) return;
+    auto body = QJsonObject::fromVariantMap(request);
+    const auto suppliedSelection = body.take("selected_skills");
+    QJsonArray selected;
+    if (!m_selectedSkillIds.isEmpty()) {
+        if (m_recommendationBody.value("description") != body.value("request")
+            || m_recommendationBody.value("task_type").toString() != body.value("task_type").toString("auto")
+            || m_recommendationRepository != body.value("repository_path").toString()) {
+            m_creationError = tr("任务输入已变化，请重新选择技能。");
+            emit creationChanged();
+            return;
+        }
+        for (const auto &entry : m_recommendations) {
+            const auto skill = entry.toObject();
+            if (m_selectedSkillIds.contains(skill.value("skill_id").toString()))
+                selected.append(QJsonObject{{"skill_id", skill.value("skill_id")}, {"version", skill.value("version")},
+                                            {"content_sha256", skill.value("content_sha256")}});
+        }
+        body.insert("selected_skills", selected);
+    }
+    if (!suppliedSelection.isUndefined() && suppliedSelection != selected) {
+        m_creationError = tr("提交的技能与当前勾选不一致，请重新选择技能。");
+        emit creationChanged();
+        return;
+    }
     QPointer<MissionController> guard(this); const auto nextGeneration = m_generation + 1;
     clearSelection();
     if (!guard || m_generation != nextGeneration) return;
-    track(m_api.createMission(QJsonObject::fromVariantMap(request)), RequestKind::Create);
+    m_submittedWithSkills = !selected.isEmpty();
+    m_submittedSkillGeneration = m_skillContextGeneration;
+    track(m_api.createMission(body), RequestKind::Create);
+}
+
+bool MissionController::currentRecommendation(quint64 request) const
+{
+    return request == m_recommendationRequest && baseUrl() == m_recommendationBackend;
+}
+
+void MissionController::updateSkillContext(const QString &description, const QString &taskType,
+                                          const QString &repository, const QStringList &projectTags)
+{
+    QJsonObject body{{"description", description.trimmed()}, {"task_type", taskType}};
+    if (!projectTags.isEmpty()) body.insert("project_tags", QJsonArray::fromStringList(projectTags));
+    if (m_recommendationBody == body && m_recommendationRepository == repository.trimmed()) return;
+    m_recommendationBody = body;
+    m_recommendationRepository = repository.trimmed();
+    refreshRecommendations();
+}
+
+void MissionController::resetSkillContext()
+{
+    m_recommendationBody = {};
+    m_recommendationRepository.clear();
+    refreshRecommendations();
+}
+
+void MissionController::refreshRecommendations()
+{
+    // Invalidate immediately, including the gap before the next debounced POST.
+    ++m_skillContextGeneration;
+    m_recommendationRequest = 0;
+    m_recommendationTimer.stop();
+    const bool hadRecommendations = !m_recommendations.isEmpty();
+    m_recommendations = {};
+    m_selectedSkillIds.clear();
+    m_recommendationError.clear();
+    if (!m_recommendationBody.value("description").toString().isEmpty())
+        m_recommendationTimer.start();
+    QPointer<MissionController> guard(this);
+    if (hadRecommendations) emit skillRecommendationsChanged();
+    if (guard) emit recommendationsChanged();
+}
+
+void MissionController::setSkillSelected(const QString &skillId, bool selected)
+{
+    if (m_selectedSkillIds.contains(skillId) == selected) return;
+    if (selected) {
+        if (m_selectedSkillIds.size() >= 2) return;
+        const bool offered = std::any_of(m_recommendations.begin(), m_recommendations.end(), [&](const QJsonValue &item) {
+            return item.toObject().value("skill_id").toString() == skillId;
+        });
+        if (!offered) return;
+        m_selectedSkillIds.append(skillId);
+    } else m_selectedSkillIds.removeAll(skillId);
+    emit recommendationsChanged();
+}
+
+void MissionController::loadMissionSkills()
+{
+    if (m_task.isEmpty() || missionSkillsLoading()) return;
+    m_missionSkillsError.clear();
+    m_missionSkillsRequest = m_api.getMissionSkills(m_task);
+    emit missionSkillsChanged();
 }
 void MissionController::track(quint64 request, RequestKind kind)
 {
@@ -281,11 +432,15 @@ void MissionController::received(quint64 request, const QString &task, const QJs
     const auto current = continuation();
     const auto kind = m_requests.take(request);
     if (kind == RequestKind::Create) {
+        resetSkillContext();
+        if (!current()) return;
         m_creationPreview.remove("preview_token"); m_creationReady = false; m_creationError.clear();
         emit creationChanged();
         if (!current()) return;
         m_mutation = 0; m_task = body.value("task_id").toString();
         m_loader.selectTask(m_task);
+        emit missionCreated();
+        if (!current()) return;
         refreshMissions();
         if (!current()) return;
         emit missionChanged();
@@ -324,7 +479,7 @@ void MissionController::commitSnapshot(const MissionSnapshot &snapshot)
     if (!current()) return;
     observeMission(mission);
     if (!current()) return;
-    m_approval.setMission(mission);
+    m_approval.setSnapshot(snapshot);
     if (!current()) return;
     m_delivery.setMission(mission);
     if (!current()) return;

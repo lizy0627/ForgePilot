@@ -135,6 +135,25 @@ class ModelBudget:
             raise ForgePilotError("llm_budget", "Agent time budget exhausted")
         return remaining
 
+    def paused_usage(self) -> dict:
+        with self._lock:
+            return {"model_calls": self.model_calls, "tool_calls": self.tool_calls,
+                    "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                    "remaining_seconds": self.remaining_seconds()}
+
+    @classmethod
+    def resume(cls, limits, usage):
+        budget = cls.from_limits(limits)
+        counts = [usage[name] for name in ("model_calls", "tool_calls", "input_tokens", "output_tokens")]
+        remaining = usage["remaining_seconds"]
+        if (any(type(n) is not int or n < 0 for n in counts)
+                or counts[0] > budget.max_model_calls or counts[1] > budget.max_tool_calls
+                or type(remaining) not in (float, int) or not 0 < remaining <= budget.timeout_seconds):
+            raise ForgePilotError("llm_budget", "Paused writer budget is invalid")
+        budget.model_calls, budget.tool_calls, budget.input_tokens, budget.output_tokens = counts
+        budget.deadline = monotonic() + remaining
+        return budget
+
     def reserve(self, input_tokens: int, output_tokens: int) -> tuple[int, int]:
         if any(type(v) is not int or v < 0 for v in (input_tokens, output_tokens)):
             raise ValueError("Invalid budget reservation")

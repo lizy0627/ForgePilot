@@ -2,13 +2,17 @@
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .skill_models import SelectedSkill, SkillDraft, SkillDraftContent, SkillIdentity, SkillStage
+from .skill_suggestion import EditedLesson
 
 
 MissionID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")]
 MissionHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MissionRevision = Annotated[int, Field(ge=1, le=2**63 - 2)]
 MissionNodeID = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")]
+MissionTaskType = Literal["auto", "bug_fix", "feature"]
 
 
 class MissionRequest(BaseModel):
@@ -63,13 +67,15 @@ class MissionSourcePreview(BaseModel):
 class CreateMission(MissionRequest):
     repository_path: str = Field(min_length=1, max_length=4096)
     request: str = Field(min_length=1, max_length=8192)
-    task_type: Literal["auto", "bug_fix", "feature"] = "auto"
+    task_type: MissionTaskType = "auto"
     orchestration_mode: Literal["multi_agent"] = "multi_agent"
     base_ref: str = Field(default="HEAD", min_length=1, max_length=256)
     toolchain_profile: str = Field(default="auto", pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", max_length=128)
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
     mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
     use_rag: bool = False
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=2,
+        description="Exact reviewed versions to freeze. Omit for a mission without skill guidance.")
     baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
     preview_token: MissionHash | None = None
     baseline_confirmed: bool = False
@@ -87,6 +93,13 @@ class CreateMission(MissionRequest):
     def unique_mcp_servers(cls, value):
         if len(value) != len(set(value)):
             raise ValueError("MCP server selection contains duplicates")
+        return value
+
+    @field_validator("selected_skills")
+    @classmethod
+    def unique_skills(cls, value):
+        if len({skill.skill_id for skill in value}) != len(value):
+            raise ValueError("Select each skill ID at most once")
         return value
 
     @field_validator("repository_path")
@@ -118,12 +131,134 @@ class CreateMission(MissionRequest):
         return value
 
 
+class SkillRecommendationRequest(MissionRequest):
+    description: str = Field(min_length=1, max_length=8192)
+    task_type: MissionTaskType = Field(default="auto", description="Auto leaves the task type unspecified.")
+    project_tags: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
+        default_factory=list, max_length=32, description="Known project tags. Omit when unknown.")
+
+    @field_validator("description")
+    @classmethod
+    def nonblank_description(cls, value):
+        return CreateMission.nonblank_request(value)
+
+    @field_validator("project_tags")
+    @classmethod
+    def valid_tags(cls, tags):
+        for tag in tags:
+            tag.encode("utf-8", errors="strict")
+            if not tag.strip() or "\x00" in tag:
+                raise ValueError("Project tags must be nonblank and contain no NUL")
+        return tags
+
+
+class SkillRecommendation(BaseModel):
+    skill_id: str
+    version: int = Field(ge=1)
+    content_sha256: MissionHash
+    name: str
+    summary: str
+    reasons: list[str] = Field(min_length=1)
+
+
+class SkillRecommendations(BaseModel):
+    recommendations: list[SkillRecommendation] = Field(max_length=3)
+
+
+SkillRequestID = Annotated[str, Field(min_length=1, max_length=256, pattern=r"\S")]
+
+
+class CreateSkillDraft(MissionRequest):
+    generation_mode: Literal["manual", "model"] = Field(
+        default="manual", description="Choose model explicitly to start one asynchronous generation attempt.")
+    developer_note: str = Field(default="", max_length=4096, description="Private developer observation.")
+    request_id: SkillRequestID | None = Field(default=None, description="Reuse this ID when retrying creation.")
+
+
+class RegenerateSkillDraft(MissionRequest):
+    """Start another attempt for an open Mission draft at its current editor revision."""
+
+    expected_revision: MissionRevision
+    request_id: SkillRequestID
+
+
+class CancelSkillGeneration(MissionRequest):
+    """The URL identifies the exact attempt to stop."""
+
+
+class SaveSkillDraft(MissionRequest):
+    """Send one or more edited fields. Omitted fields retain their stored values."""
+
+    model_config = ConfigDict(json_schema_extra={"minProperties": 2})
+    expected_revision: MissionRevision
+    name: str = Field(default="", max_length=128)
+    content: SkillDraftContent = Field(default_factory=SkillDraftContent, description="Complete replacement of the editable guidance.")
+    developer_note: str = Field(default="", max_length=4096)
+    pending_inference: str = Field(default="", max_length=4096)
+    edited_lesson: EditedLesson | None = Field(default=None, description="Private revision of the cited suggestion.")
+
+    @model_validator(mode="after")
+    def require_edit(self):
+        if self.model_fields_set == {"expected_revision"}:
+            raise ValueError("Include at least one editable field")
+        return self
+
+
+class PublishLocalSkill(MissionRequest):
+    """Approve the exact saved draft revision. A retry must reuse the request ID and revision."""
+
+    expected_revision: MissionRevision
+    request_id: SkillRequestID
+
+
+class CreateSkillRevisionDraft(MissionRequest):
+    version: MissionRevision
+    request_id: SkillRequestID
+
+
+class DisableSkill(MissionRequest):
+    expected_revision: MissionRevision
+    enabled: Literal[False]
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def require_boolean_false(cls, value):
+        if value is not False:
+            raise ValueError("Set enabled to false to disable a skill")
+        return value
+
+
+class SkillDraftPage(BaseModel):
+    drafts: list[SkillDraft] = Field(max_length=100)
+    next_offset: int | None = Field(ge=0)
+
+
+class SkillListItem(SkillIdentity):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class SkillPage(BaseModel):
+    skills: list[SkillListItem] = Field(max_length=100)
+    next_offset: int | None = Field(ge=0)
+
+
+class SkillInjection(SelectedSkill):
+    node_id: SkillStage
+    attempt: int = Field(ge=1)
+
+
+class MissionSkills(BaseModel):
+    task_id: MissionID
+    selected_skills: list[SelectedSkill] = Field(max_length=2)
+    injections: list[SkillInjection]
+
+
 class MissionControl(MissionRequest):
     expected_revision: MissionRevision
 
 
 class MissionApproval(MissionControl):
-    approval_type: Literal["execution"] = "execution"
+    approval_type: Literal["execution", "scope_expansion"] = "execution"
     task_spec_hash: MissionHash
     plan_hash: MissionHash
     scope_hash: MissionHash
@@ -139,7 +274,13 @@ class MissionResume(MissionControl):
 
 
 class MissionDelivery(MissionControl):
-    mode: Literal["preview", "squash", "keep_branch", "patch", "bundle", "abandon"] = "preview"
+    """For an interrupted squash, use recover to inspect the recorded target branch.
+
+    Confirm a completed or restored outcome with the returned token and revision.
+    A manual_inspection preview includes the reason for further inspection.
+    """
+
+    mode: Literal["preview", "squash", "keep_branch", "patch", "bundle", "abandon", "recover"] = "preview"
     token: MissionHash | None = None
     target_branch: str | None = Field(default=None, min_length=1, max_length=256)
 
@@ -246,6 +387,38 @@ class MissionDiff(BaseModel):
     task_id: str
     patch: str
     change_sets: list[dict[str, Any]]
+
+
+class MissionScopeFile(BaseModel):
+    path: str
+    reason: str
+    plan_step_id: str
+    acceptance_criteria_ids: list[str]
+
+
+class MissionScopeExpansion(BaseModel):
+    """Latest writer request, including partial work and the terms of a replay.
+
+    Submit its revision and proposed hashes to /approvals with scope_expansion.
+    """
+
+    task_id: str
+    revision: MissionRevision
+    node_id: MissionNodeID
+    attempt: int
+    status: Literal["pending", "approved", "rejected"]
+    files: list[MissionScopeFile]
+    previous_max_changed_files: int
+    max_changed_files: int
+    task_spec_artifact_id: str
+    task_spec_hash: MissionHash
+    plan_artifact_id: str
+    plan_hash: MissionHash
+    scope_hash: MissionHash
+    checkpoint_id: str
+    partial_change_set_artifact_id: str | None
+    partial_patch: str
+    replay_behavior: str
 
 
 class MissionValidation(MissionArtifacts):

@@ -15,15 +15,20 @@ Item {
     property string selectedNodeId: ""
     property var expandedStages: ({})
     signal nodeSelected(string nodeId)
-    readonly property int columns: width >= 1000 ? 4 : width >= 720 ? 3 : width >= 460 ? 2 : 1
-    readonly property real gap: 32
-    readonly property real inset: 20
-    readonly property real tileWidth: Math.max(140, (viewport.width - inset * 2 - gap * (columns - 1)) / columns)
+    readonly property int columns: width >= 872 ? 4 : width >= 658 ? 3 : width >= 420 ? 2 : 1
+    readonly property real gap: columns === 1 ? 18 : 24
+    readonly property real inset: width >= 658 ? 24 : 16
+    readonly property real tileWidth: Math.max(0, Math.min(280, (width - inset * 2 - gap * (columns - 1)) / columns))
+    readonly property real boardLeft: (width - columns * tileWidth - (columns - 1) * gap) / 2
+    readonly property int headerHeight: 54
+    readonly property int toggleHeight: 34
+    readonly property int stepHeight: 48
+    readonly property int collapsedHeight: headerHeight + toggleHeight + 6
     readonly property int rows: Math.ceil(stages.length / columns)
     function rowHeight(row) {
-        var height = 150
+        var height = collapsedHeight
         for (var i = row * columns; i < Math.min(stages.length, (row + 1) * columns); ++i)
-            if (expandedStages[stages[i].id]) height = Math.max(height, 150 + Math.min(300, stages[i].nodes.length * 58) + 12)
+            height = Math.max(height, stageHeight(i))
         return height
     }
     function stageY(index) {
@@ -34,11 +39,11 @@ Item {
     function stageX(index) {
         var col = index % columns
         if (Math.floor(index / columns) % 2) col = columns - 1 - col
-        return inset + col * (tileWidth + gap)
+        return boardLeft + col * (tileWidth + gap)
     }
     function stageHeight(index) {
         var stage = stages[index]
-        return 150 + (expandedStages[stage.id] ? Math.min(300, stage.nodes.length * 58) + 12 : 0)
+        return collapsedHeight + (expandedStages[stage.id] ? Math.min(5, stage.nodes.length) * stepHeight + 8 : 0)
     }
     function boardHeight() {
         var height = inset * 2
@@ -59,7 +64,7 @@ Item {
     }
     function revealStage(stageId) {
         for (var i = 0; i < stages.length; ++i)
-            if (stages[i].id === stageId) { ensureVisible(stageY(i), stageY(i) + 145); return }
+            if (stages[i].id === stageId) { ensureVisible(stageY(i), stageY(i) + collapsedHeight); return }
     }
     function revealNode(nodeId) {
         for (var i = 0; i < stages.length; ++i) {
@@ -67,7 +72,7 @@ Item {
             var card = tiles.itemAt(i)
             var rect = card ? card.revealStep(nodeId) : null
             if (rect) ensureVisible(rect.y, rect.y + rect.height)
-            else ensureVisible(stageY(i), stageY(i) + 145)
+            else ensureVisible(stageY(i), stageY(i) + collapsedHeight)
             return
         }
     }
@@ -80,7 +85,11 @@ Item {
                 return
             }
     }
-    function stageColor(status) { return status === "needs_repair" ? Theme.warning : W.color(status === "ready" ? "pending" : status) }
+    function stageColor(status) {
+        if (status === "needs_repair" || status === "awaiting_human" || status === "interrupted") return Theme.warning
+        if (status === "pending" || status === "ready" || status === "skipped" || status === "cancelled") return Theme.muted
+        return W.color(status)
+    }
     onStagesChanged: connectors.requestPaint()
     onExpandedStagesChanged: connectors.requestPaint()
     onWidthChanged: { connectors.requestPaint(); Qt.callLater(function() { root.revealNode(root.selectedNodeId) }) }
@@ -109,8 +118,8 @@ Item {
                         var x1 = root.stageX(i), y1 = root.stageY(i)
                         var x2 = root.stageX(i + 1), y2 = root.stageY(i + 1)
                         if (sameRow) {
-                            x1 += forward ? root.tileWidth : 0; y1 += 60
-                            x2 += forward ? 0 : root.tileWidth; y2 += 60
+                            x1 += forward ? root.tileWidth : 0; y1 += root.headerHeight / 2
+                            x2 += forward ? 0 : root.tileWidth; y2 += root.headerHeight / 2
                         } else {
                             x1 += root.tileWidth / 2; y1 += root.stageHeight(i)
                             x2 += root.tileWidth / 2
@@ -140,6 +149,8 @@ Item {
                     required property int index
                     readonly property bool expanded: !!root.expandedStages[modelData.id]
                     readonly property bool selected: modelData.nodes.some(function(n) { return n.nodeId === root.selectedNodeId })
+                    readonly property string statusLabel: Flow.statusLabels[modelData.status] || W.label(modelData.status)
+                    readonly property color statusColor: root.stageColor(modelData.status)
                     function revealStep(nodeId) {
                         if (!expanded) return null
                         for (var i = 0; i < modelData.nodes.length; ++i)
@@ -163,9 +174,9 @@ Item {
                     }
                     x: root.stageX(index); y: root.stageY(index)
                     width: root.tileWidth; height: root.stageHeight(index)
-                    radius: Theme.radiusLg
+                    radius: Theme.radiusMd
                     color: selected ? Theme.accentSubtle : Theme.panel
-                    border.width: selected ? 2 : 1
+                    border.width: 1
                     border.color: selected ? Theme.accentBorder : Theme.border
                     Controls.ActionButton {
                         id: stageButton
@@ -174,51 +185,73 @@ Item {
                         property bool expanded: tile.expanded
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                         anchors.margins: 4
-                        height: 108
+                        height: root.headerHeight - 4
                         flat: true
+                        horizontalPadding: 10
                         enabled: tile.modelData.nodes.length > 0
                         Accessible.name: tile.modelData.title + "，" + (tile.modelData.summary || W.label(tile.modelData.status)) + "，查看步骤详情"
                         onActiveFocusChanged: if (activeFocus) root.revealStage(tile.modelData.id)
                         onClicked: root.nodeSelected(tile.modelData.currentNodeId || tile.modelData.nodes[0].nodeId)
-                        contentItem: ColumnLayout {
-                            spacing: Theme.spaceSm
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Label { text: (tile.index < 9 ? "0" : "") + (tile.index + 1); color: Theme.muted; font.pixelSize: Theme.fontSizeSm }
-                                Item { Layout.fillWidth: true }
-                                Label {
-                                    text: Flow.statusLabels[tile.modelData.status] || W.label(tile.modelData.status)
-                                    color: root.stageColor(tile.modelData.status); font.pixelSize: Theme.fontSizeSm
-                                }
-                            }
-                            Label { text: tile.modelData.title; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                        ToolTip.visible: hovered && !!tile.modelData.summary
+                        ToolTip.delay: 650
+                        ToolTip.text: tile.modelData.summary
+                        background: Rectangle {
+                            radius: Theme.radiusSm
+                            color: stageButton.hovered ? Theme.hover : "transparent"
+                            border.width: stageButton.activeFocus ? 2 : 0
+                            border.color: Theme.focusRing
+                        }
+                        contentItem: RowLayout {
+                            spacing: 6
                             Label {
-                                text: tile.modelData.summary || "等待前置步骤"
-                                color: Theme.secondary; font.pixelSize: Theme.fontSizeSm
-                                Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
-                                maximumLineCount: 2; elide: Text.ElideRight; textFormat: Text.PlainText
+                                Layout.fillWidth: true
+                                text: tile.modelData.title
+                                font.pixelSize: Theme.fontSizeLg
+                                font.weight: Font.DemiBold
+                                color: Theme.text
+                                elide: Text.ElideRight
+                            }
+                            Rectangle {
+                                width: 6; height: 6; radius: 3
+                                color: tile.modelData.status === "pending" || tile.modelData.status === "ready" ? "transparent" : tile.statusColor
+                                border.color: tile.statusColor
+                            }
+                            Label {
+                                text: tile.statusLabel
+                                color: tile.statusColor; font.pixelSize: Theme.fontSizeXs
                             }
                         }
                     }
                     Controls.ActionButton {
+                        id: expandButton
                         objectName: "workflowStageExpand"
                         property string stageId: tile.modelData.id
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: stageButton.bottom
-                        anchors.leftMargin: 8; anchors.rightMargin: 8
-                        height: 32; flat: true
-                        text: (tile.expanded ? "收起" : "展开") + " " + tile.modelData.nodes.length + " 个步骤"
-                        Accessible.name: text + "，" + tile.modelData.title
+                        anchors.leftMargin: 4; anchors.rightMargin: 4
+                        height: root.toggleHeight; flat: true; horizontalPadding: 10
+                        enabled: tile.modelData.nodes.length > 0
+                        text: tile.modelData.nodes.length + " 个步骤"
+                        Accessible.name: (tile.expanded ? "收起" : "展开") + text + "，" + tile.modelData.title
                         onActiveFocusChanged: if (activeFocus) root.revealStage(tile.modelData.id)
                         onClicked: root.toggleStage(tile.modelData.id)
+                        background: Rectangle {
+                            radius: Theme.radiusSm
+                            color: expandButton.hovered ? Theme.hover : "transparent"
+                            border.width: expandButton.activeFocus ? 2 : 0
+                            border.color: Theme.focusRing
+                        }
+                        contentItem: RowLayout {
+                            Label { text: expandButton.text; Layout.fillWidth: true; color: Theme.muted; font.pixelSize: Theme.fontSizeSm }
+                            Label { text: "›"; rotation: tile.expanded ? 90 : 0; color: Theme.muted; font.pixelSize: Theme.fontSizeLg }
+                        }
                     }
                     ListView {
                         id: steps
-                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: stageButton.bottom
-                        anchors.topMargin: 36; anchors.bottom: parent.bottom
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: expandButton.bottom
+                        anchors.topMargin: 6; anchors.bottom: parent.bottom
                         anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.bottomMargin: 8
                         visible: tile.expanded; clip: true
                         model: tile.modelData.nodes
-                        spacing: 4
                         boundsBehavior: Flickable.StopAtBounds
                         ScrollBar.vertical: Controls.AppScrollBar {}
                         delegate: Controls.ActionButton {
@@ -227,15 +260,21 @@ Item {
                             property string nodeId: modelData.nodeId
                             readonly property var visual: Flow.visualStatus(modelData, root.artifactModel)
                             objectName: "workflowNode"
-                            width: steps.width; height: 54; flat: true
+                            width: steps.width; height: root.stepHeight; flat: true; horizontalPadding: 8
                             checked: root.selectedNodeId === nodeId
                             Accessible.name: Flow.nodeTitle(modelData) + "，" + visual.label + "，查看详情"
                             onActiveFocusChanged: if (activeFocus) root.revealNode(nodeId)
                             onClicked: root.nodeSelected(nodeId)
-                            contentItem: ColumnLayout {
-                                spacing: 3
-                                Label { text: Flow.nodeTitle(nodeButton.modelData); Layout.fillWidth: true; elide: Text.ElideRight; color: Theme.text; font.pixelSize: Theme.fontSizeSm }
-                                Label { text: nodeButton.visual.label; color: nodeButton.visual.needsRepair ? Theme.warning : W.color(nodeButton.modelData.status); font.pixelSize: Theme.fontSizeXs }
+                            background: Rectangle {
+                                radius: Theme.radiusSm
+                                color: nodeButton.checked ? Theme.accentSubtle : nodeButton.hovered ? Theme.hover : "transparent"
+                                border.width: nodeButton.activeFocus ? 2 : 0
+                                border.color: Theme.focusRing
+                            }
+                            contentItem: Column {
+                                spacing: 2
+                                Label { text: Flow.nodeTitle(nodeButton.modelData); width: parent.width; elide: Text.ElideRight; color: Theme.text; font.pixelSize: Theme.fontSizeSm }
+                                Label { text: nodeButton.visual.label; color: root.stageColor(nodeButton.visual.status); font.pixelSize: Theme.fontSizeXs }
                             }
                         }
                     }

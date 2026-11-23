@@ -8,8 +8,10 @@ from pathlib import Path
 import sys
 
 import uvicorn
+from uvicorn.config import LOGGING_CONFIG
 
 from .api import create_app
+from .artifacts.models import DataPolicy
 from .cli import SafeArgumentParser
 from .errors import ForgePilotError
 from .models.accounting import close_accounting_logging, configure_accounting_logging
@@ -140,8 +142,10 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  summary_factory=summary_factory, mcp_disabled=args.disable_mcp,
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
+                                 skill_gateway=model_clients,
+                                 skill_data_policy=DataPolicy(cloud_model_allowed=args.mission_allow_cloud_model),
                                  rag_coordinator=rag_coordinator, api_token=local_token,
-                                 development_config=resources.development)
+                                 development_config=resources.development, git_executable=args.git)
                 from .mission_factory import build_mission_workflow
                 app.state.mission_host.factory = lambda events, *, mcp_snapshots=(): build_mission_workflow(
                     resources.mission_dependencies(events,
@@ -150,7 +154,12 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                     oracle_source=args.mission_oracle,
                     cloud_model_allowed=args.mission_allow_cloud_model,
                     mcp_snapshots=mcp_snapshots)
-                options = dict(host=args.host, port=args.port, workers=1,
+                # Keep the content-free recommendation count visible with access logging off.
+                log_config = {**LOGGING_CONFIG, "loggers": {
+                    **LOGGING_CONFIG["loggers"],
+                    "forgepilot.api_v2": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                }}
+                options = dict(host=args.host, port=args.port, workers=1, log_config=log_config,
                                access_log=False, log_level="warning", timeout_graceful_shutdown=10)
                 if stop_requested is None:
                     uvicorn.run(app, **options)

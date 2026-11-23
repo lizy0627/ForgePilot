@@ -155,6 +155,28 @@ class EvidenceBundle(ArtifactModel):
         return self
 
 
+class PlanFileCriteria(ArtifactModel):
+    """A reviewed file-specific subset of the step's acceptance criteria."""
+    path: Annotated[str, StringConstraints(strip_whitespace=False), Field(min_length=1, max_length=512)]
+    reason: Annotated[str, Field(min_length=1, max_length=2_048)]
+    acceptance_criteria_ids: tuple[Annotated[str, Field(pattern=CRITERION_ID_PATTERN, max_length=32)], ...] = Field(
+        min_length=1, max_length=64)
+
+    _arrays = field_validator("acceptance_criteria_ids", mode="before")(_tuple)
+
+    @field_validator("reason", "path", mode="before")
+    @classmethod
+    def reviewable_text(cls, value):
+        if isinstance(value, str) and not value.isprintable():
+            raise ValueError("File and reason must contain reviewable text")
+        return value
+
+    @model_validator(mode="after")
+    def unique_criteria(self):
+        _unique(self.acceptance_criteria_ids, "File acceptance criteria")
+        return self
+
+
 class PlanStep(ArtifactModel):
     step_id: Annotated[str, Field(pattern=STEP_ID_PATTERN, max_length=32)]
     owner: Annotated[str, Field(pattern=IDENTIFIER_PATTERN, max_length=128)]
@@ -165,8 +187,17 @@ class PlanStep(ArtifactModel):
     risk: Text
     adds_tests: bool
     acceptance_criteria_ids: tuple[Annotated[str, Field(pattern=CRITERION_ID_PATTERN, max_length=32)], ...] = Field(min_length=1, max_length=64)
+    file_criteria: tuple[PlanFileCriteria, ...] = Field(default=(), max_length=128,
+        exclude_if=lambda value: not value)
 
-    _arrays = field_validator("depends_on", "expected_files", "verification", "acceptance_criteria_ids", mode="before")(_tuple)
+    _arrays = field_validator("depends_on", "expected_files", "verification", "acceptance_criteria_ids",
+                              "file_criteria", mode="before")(_tuple)
+
+    def criteria_for_path(self, path: str) -> tuple[str, ...]:
+        """Criteria for a file already matched against this step's expected files."""
+        key = path_key(path)
+        return next((item.acceptance_criteria_ids for item in self.file_criteria if path_key(item.path) == key),
+                    self.acceptance_criteria_ids)
 
     @model_validator(mode="after")
     def unique_references(self):
@@ -174,6 +205,10 @@ class PlanStep(ArtifactModel):
         _unique(self.expected_files, "Expected files")
         _unique(self.verification, "Verification methods")
         _unique(self.acceptance_criteria_ids, "Acceptance criterion references")
+        _unique(tuple(path_key(item.path) for item in self.file_criteria), "File-specific mappings")
+        for item in self.file_criteria:
+            if item.path not in self.expected_files or not set(item.acceptance_criteria_ids) <= set(self.acceptance_criteria_ids):
+                raise ValueError("File-specific mappings must reference this step's expected files and criteria")
         if self.step_id in self.depends_on:
             raise ValueError("A step cannot depend on itself")
         return self

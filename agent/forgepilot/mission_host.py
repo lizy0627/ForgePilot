@@ -17,13 +17,14 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
-from .agents.analysis import AnalysisRequest
+from .agents.analysis import AnalysisRequest, validate_skill_bindings, validate_skill_routes
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
 from .orchestration.graph import validate_graph
-from .orchestration.models import GraphDefinition, NodeResult, NodeStatus, TERMINAL_NODE_STATUSES
+from .orchestration.models import NodeStatus, TERMINAL_NODE_STATUSES
 from .orchestration.recovery import recovery_role
+from .orchestration.scope_expansion import ScopeExpansionStore
 from .orchestration.store import GraphStore
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ class _SourcePreview:
 class MissionHost:
     def __init__(self, task_host=None, workflow_factory=None, *, runtime=None, capacity=None,
                  store=None, mcp_service=None, mcp_disabled=None, dependencies: MissionDependencies | None = None,
-                 development_config=None, locked_approval_authority=None):
+                 development_config=None, locked_approval_authority=None, git_executable=None):
         # Positional TaskHost remains an in-process compatibility adapter only.
         # Production composition injects these shared components explicitly.
         self.runtime = runtime if runtime is not None else task_host.runtime
@@ -71,9 +72,11 @@ class MissionHost:
         if dependencies is not None and dependencies.events is not self.store:
             raise ValueError("Mission dependencies must use the host event store")
         self.dependencies = dependencies
+        self.git_executable = dependencies.git_executable if dependencies else git_executable
         self._development_config = development_config or (lambda: dependencies)
         self.locked_approval_authority = locked_approval_authority
         self.graphs = GraphStore(self.store)
+        self.scope_expansions = ScopeExpansionStore(self.store)
         self._services = {}
         self._previews: dict[str, _SourcePreview] = {}
         self._source_lock = asyncio.Lock()
@@ -232,28 +235,36 @@ class MissionHost:
         self._metadata(task_id)
         return self.store.missions.observability(task_id)
 
-    def _reconcile_delivery(self, task_id):
+    def mission_skills(self, task_id):
+        return {"task_id": task_id, **self.store.skills.mission_usage(task_id)}
+
+    def _workspace(self, task_id):
+        workflow = self._services.get(task_id)
+        if workflow is not None:
+            return workflow.workspace
+        from .workspace_manager import WorkspaceManager
+        record = self.graphs.workspace_record(task_id)
+        if record is None:
+            raise ForgePilotError("workspace_state", "Mission has no registered workspace")
+        return WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts,
+                                git_executable=self.git_executable)
+
+    def _reconcile_delivery(self, task_id, *, holding_control=False):
         """Complete an outbox intent from WorkspaceManager's durable outcome.
 
         Git and SQLite cannot share a transaction. The intent is committed before
         Git runs; after a crash the manager's verified journal remains authority.
         Reconciliation publishes an outcome and never repeats the Git operation.
         """
-        control = self._controls.get(task_id)
-        if control is not None and control.locked():
-            return
         with self.store.missions.delivery_reconciliation(task_id) as row:
             if row is None or row["event_type"] != "workspace.delivery_requested":
                 return
+            control = self._controls.get(task_id)
+            if not holding_control and control is not None and control.locked():
+                return
             intent = json.loads(row["payload_json"])
             try:
-                workflow = self._services.get(task_id)
-                if workflow is not None:
-                    workspace = workflow.workspace
-                else:
-                    from .workspace_manager import WorkspaceManager
-                    record = self.graphs.workspace_record(task_id)
-                    workspace = WorkspaceManager(Path(record["worktree_path"]).parents[2], artifacts=self.store.artifacts)
+                workspace = self._workspace(task_id)
                 state = workspace._load(task_id)
             except (ForgePilotError, OSError):
                 # Inspection remains available if execution tools/configuration
@@ -264,10 +275,10 @@ class MissionHost:
             result = state.get("delivery_result")
             if state["status"] == "abandoned":
                 result = {"status": "abandoned", "worktree_path": state["worktree_path"], "branch": state["branch"]}
-            if result is None or (state["status"] != "abandoned" and result.get("mode") != intent["mode"]):
+            expected_mode = "squash" if intent["mode"] == "recover" else intent["mode"]
+            if result is None or (state["status"] != "abandoned" and result.get("mode") != expected_mode):
                 return
-            self.store.missions.record_delivery_outcome(task_id, "workspace.delivered",
-                intent["mode"], result=result, recovered=True)
+            self.store.missions.record_delivery_outcome(task_id, intent["mode"], result=result, recovered=True)
 
     def graph(self, task_id):
         snapshot, definition = self.store.missions.graph_view(task_id)
@@ -301,6 +312,16 @@ class MissionHost:
     def validation(self, task_id):
         values = [item for item in self.artifacts(task_id)["items"] if item["artifact_type"] == "ValidationReport"]
         return {"task_id": task_id, "items": values, "latest": values[-1] if values else None}
+
+    def scope_expansion(self, task_id):
+        self._metadata(task_id)
+        proposal = self.scope_expansions.preview(task_id)
+        partial = proposal["partial_change_set_artifact_id"]
+        patch = ""
+        if partial is not None:
+            artifact = self.store.missions.owned_artifact(task_id, partial)
+            patch = "".join(file.unified_diff for file in artifact.content.files)
+        return safe_event_data(self.store.redactor, {**proposal, "partial_patch": patch})
 
     async def _execute_control(self, operation, *args, **kwargs):
         """Join accepted controls during shutdown, including work offloaded to threads."""
@@ -474,6 +495,7 @@ class MissionHost:
                     or fields["task_type"] not in {"auto", locked_task_spec.task_type}
                     or fields["base_ref"] != locked_task_spec.repository.base_ref):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec does not match the mission request or base")
+        selected_skills = self.store.skills.resolve_selection(fields.pop("selected_skills", []))
         token = fields.get("preview_token")
         preview = self._previews.get(token) if token else None
         if token and (preview is None or monotonic() >= preview.expires_at or self._preview_fields(fields) != preview.fields):
@@ -496,6 +518,7 @@ class MissionHost:
         task_id = preview.task_id if preview else str(uuid4())
         workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()),
                                   single_agent=fields["orchestration_mode"] == "single_agent")
+        workspace_claimed = False
         try:
             # Trusted profile selection never accepts executable paths or shell text.
             profile = workflow.validator.profile.profile_id
@@ -503,14 +526,19 @@ class MissionHost:
                     locked_task_spec.repository.toolchain_profile != profile
                     or locked_task_spec.data_policy != getattr(workflow, "mission_data_policy", DataPolicy())):
                 raise ForgePilotError("policy_denied", "Locked TaskSpec changed trusted toolchain or data policy")
+            if selected_skills:
+                validate_skill_routes(workflow, selected_skills, getattr(workflow, "mission_data_policy", DataPolicy()))
+                workflow.mission_skills = selected_skills
             from .presets import Presets
             from .build_process import build_environment
             if preview is None:
+                workspace_claimed = True
                 await self._create_workspace(workflow.workspace, fields, task_id)
             else:
                 if workflow.workspace.root != preview.workspace.root:
                     raise ForgePilotError("workspace_unavailable", "Preview and task must share the same WorkspaceManager root")
                 self._previews.pop(token)
+                workspace_claimed = True
                 if preview.patch_sha256 is not None:
                     prepared = await asyncio.to_thread(workflow.workspace.prepare_baseline, task_id, fields["baseline_paths"])
                     if (prepared["sha256"] != preview.patch_sha256 or prepared["source_head"] != preview.source_head
@@ -560,11 +588,15 @@ class MissionHost:
                 definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request,
                                                      locked_task_spec=locked_task_spec,
                                                      allow_locked_test_scope=allow_locked_test_scope)
+            if selected_skills:
+                validate_skill_bindings(definition, selected_skills)
             self.graphs.create_run(task_id, validate_graph(definition),
                                   policy_hash=workflow.runner.policy.definition_hash)
             record = workflow.workspace.record(task_id)
             self.store.missions.admit_mission(task_id, record,
-                {**fields, "locked_authorization_ref": locked_authorization_ref, "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))})
+                {**fields, "locked_authorization_ref": locked_authorization_ref,
+                 "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))},
+                selected_skills=selected_skills)
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
         except BaseException:
@@ -573,13 +605,6 @@ class MissionHost:
             except ForgePilotError:
                 # Only a newly allocated, app-owned worktree is eligible. The
                 # manager proves identity and refuses unknown user bytes.
-                try:
-                    expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
-                    await asyncio.to_thread(workflow.workspace.cleanup, task_id, approved=True, expected=expected)
-                except (ForgePilotError, OSError) as cleanup_error:
-                    if preview is not None:
-                        raise ForgePilotError("baseline_cleanup",
-                            "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
                 self._services.pop(task_id, None)
                 candidate = getattr(workflow, "mission_candidate_runner", None)
                 if candidate is not None:
@@ -587,7 +612,16 @@ class MissionHost:
                         await asyncio.to_thread(candidate.close)
                     except Exception:
                         pass
-                self.store.missions.discard_unadmitted_graph(task_id)
+                try:
+                    if workspace_claimed:
+                        expected = await asyncio.to_thread(workflow.workspace.inspect_task, task_id)
+                        await asyncio.to_thread(workflow.workspace.cleanup, task_id, approved=True, expected=expected)
+                except (ForgePilotError, OSError) as cleanup_error:
+                    if preview is not None:
+                        raise ForgePilotError("baseline_cleanup",
+                            "The source baseline could not be finalized or safely removed; inspect its controlled workspace before retrying") from cleanup_error
+                finally:
+                    self.store.missions.discard_unadmitted_graph(task_id)
             raise
 
     def _launch(self, task_id, operation, *, admission=None):
@@ -697,6 +731,8 @@ class MissionHost:
     async def _approve(self, task_id, fields):
         async with self._control(task_id):
             self._check_revision(task_id, fields["expected_revision"])
+            if fields.get("approval_type") == "scope_expansion":
+                return await self._decide_scope_expansion(task_id, fields)
             self._idle(task_id)
             workflow = self._workflow(task_id)
             definition = workflow._stored_graph(task_id)
@@ -734,6 +770,23 @@ class MissionHost:
             await admission
             return self.get(task_id)
 
+    async def _decide_scope_expansion(self, task_id, fields):
+        # A paused result becomes visible just before the runner releases its writer lease.
+        proposal = self.scope_expansions.preview(task_id)
+        if proposal["status"] != "pending":
+            raise ForgePilotError("mission_approval_conflict", "This scope expansion has already been decided")
+        running = self._running.get(task_id)
+        if running is not None and not running.done():
+            await asyncio.shield(running)
+        approved = fields["decision"] == "approved"
+        workflow = self._workflow(task_id) if approved else None
+        await asyncio.to_thread(self.scope_expansions.decide, task_id,
+            **{name: fields[name] for name in ("expected_revision", "task_spec_hash", "plan_hash", "scope_hash")},
+            approved=approved, before_approve=workflow.restore_scope_checkpoint if approved else None)
+        if approved:
+            self._launch(task_id, workflow.run(task_id))
+        return self.get(task_id)
+
     async def cancel(self, task_id, *, expected_revision):
         return await self.runtime.submit(self._execute_control(self._cancel, task_id, expected_revision))
 
@@ -762,7 +815,7 @@ class MissionHost:
                 node_id = candidates[0].node_id
             if not any(n.node_id == node_id for n in candidates):
                 raise ForgePilotError("invalid_state", "Select a retryable mission node")
-            workflow.runner._assert_definition(snapshot, validate_graph(definition))
+            workflow.runner.assert_definition(snapshot, validate_graph(definition))
             selected = next(node for node in definition.nodes if node.node_id == node_id)
             if recovery_role(selected) in {"writer", "delivery"}:
                 raise ForgePilotError("recovery_required", "Writer and delivery nodes require recovery confirmation")
@@ -783,6 +836,15 @@ class MissionHost:
         async with self._control(task_id):
             snapshot = self._check_revision(task_id, revision)
             self._idle(task_id)
+            if snapshot.status is NodeStatus.AWAITING_HUMAN:
+                try:
+                    expansion = self.scope_expansions.preview(task_id)
+                except ForgePilotError as exc:
+                    if exc.code != "scope_expansion_not_found":
+                        raise
+                else:
+                    if expansion["status"] in {"pending", "rejected"}:
+                        raise ForgePilotError("invalid_state", "This writer is paused for scope review")
             workflow = self._workflow(task_id)
             graph = workflow._stored_graph(task_id)
             if token is None:
@@ -806,28 +868,37 @@ class MissionHost:
 
     async def _delivery(self, task_id, revision, mode, token, target_branch):
         async with self._control(task_id):
+            # A retry can arrive before a GET has published the previous receipt.
+            self._reconcile_delivery(task_id, holding_control=True)
             snapshot = self._check_revision(task_id, revision)
             if mode == "abandon" and snapshot.status not in TERMINAL_NODE_STATUSES:
                 raise ForgePilotError("mission_cancel_required", "Cancel the mission before abandoning its workspace")
             self._idle(task_id)
             if mode != "abandon" and snapshot.status is not NodeStatus.SUCCEEDED:
                 raise ForgePilotError("invalid_state", "Delivery requires a successfully validated mission")
-            workflow = self._workflow(task_id)
-            if mode == "preview" or token is None:
-                result = await asyncio.to_thread(workflow.workspace.delivery_preview, task_id, target_branch)
+            workspace = self._workspace(task_id)
+            if mode == "recover" and token is None:
+                result = await asyncio.to_thread(workspace.delivery_recovery_preview, task_id, approved=True)
+            elif mode == "preview" or token is None:
+                result = await asyncio.to_thread(workspace.delivery_preview, task_id, target_branch)
             else:
-                bundles = [item for item in self.store.artifacts.list_for_task(task_id) if item.artifact_type == "DeliveryBundle"]
+                bundle = None
+                if mode == "bundle":
+                    bundles = [item for item in self.store.artifacts.list_for_task(task_id) if item.artifact_type == "DeliveryBundle"]
+                    bundle = bundles[-1].content if bundles else None
                 operation_id = uuid4().hex
                 self.store.missions.request_delivery(task_id, revision, mode, operation_id)
                 try:
-                    result = await asyncio.to_thread(workflow.workspace.deliver, task_id, mode,
-                        approved=True, token=token, bundle=bundles[-1].content if bundles else None,
-                        operation_id=operation_id)
+                    if mode == "recover":
+                        result = await asyncio.to_thread(workspace.resolve_delivery, task_id,
+                            approved=True, token=token, operation_id=operation_id)
+                    else:
+                        result = await asyncio.to_thread(workspace.deliver, task_id, mode,
+                            approved=True, token=token, bundle=bundle, operation_id=operation_id)
                 except ForgePilotError as exc:
-                    self.store.missions.record_delivery_outcome(task_id, "workspace.delivery_failed",
-                        mode, error_code=exc.code)
+                    self.store.missions.record_delivery_outcome(task_id, mode, error_code=exc.code)
                     raise
-                self.store.missions.record_delivery_outcome(task_id, "workspace.delivered", mode, result=result)
+                self.store.missions.record_delivery_outcome(task_id, mode, result=result)
             delivery = safe_event_data(self.store.redactor, result)
             if isinstance(result, dict) and "token" in result:
                 # This freshly generated one-time approval capability must reach
@@ -842,25 +913,35 @@ class MissionHost:
 
     async def _close(self):
         self._stopping = True
-        running = [operation for operation in (*self._admissions, *self._running.values()) if not operation.done()]
-        for operation in running:
+        admissions = tuple(self._admissions)
+        for operation in admissions:
             operation.cancel()
-        if running:
-            await asyncio.gather(*running, return_exceptions=True)
+        await asyncio.gather(*admissions, self._drain_running(), return_exceptions=True)
         # A recovery or delivery control may still be completing to_thread work.
         # Join it before closing workflows, then drain any execution it launched.
         await asyncio.gather(*tuple(self._operations), return_exceptions=True)
-        late = [operation for operation in self._running.values() if not operation.done()]
-        for operation in late:
-            if not operation.cancelling():
-                operation.cancel()
-        await asyncio.gather(*late, return_exceptions=True)
+        await self._drain_running()
         for token in tuple(self._previews):
             await self._discard_preview(token)
         for workflow in self._services.values():
             candidate = getattr(workflow, "mission_candidate_runner", None)
             if candidate is not None:
                 await asyncio.to_thread(candidate.close)
+
+    async def _drain_running(self):
+        running = tuple(self._running.items())
+        for task_id, operation in running:
+            if operation.done() or operation.cancelling():
+                continue
+            # A published pause can precede lease release. Cancelling that
+            # worker would also cancel the durable task it just paused.
+            snapshot = self.graphs.snapshot(task_id)
+            if any(node.status is NodeStatus.AWAITING_HUMAN and
+                   (node.node_id == "implementer" or node.node_id.startswith("repair_"))
+                   for node in snapshot.nodes):
+                continue
+            operation.cancel()
+        await asyncio.gather(*(operation for _, operation in running), return_exceptions=True)
 
 
 __all__ = ["MissionHost"]

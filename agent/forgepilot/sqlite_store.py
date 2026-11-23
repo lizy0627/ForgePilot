@@ -22,9 +22,11 @@ from .mcp_store import create_mcp_schema
 from .rag.store import create_rag_schema, create_rag_run_schema, recover_rag_runs
 from .mission_store import (
     MissionRepository, create_graph_checkpoint_schema, create_graph_orchestrator_schema, create_mission_schema,
-    recover_graph_runs,
+    create_scope_expansion_schema, recover_graph_runs,
 )
 from .artifacts.sqlite_store import SqliteArtifactStore
+from .skill_schema import create_generation_schema, create_skill_schema
+from .skill_store import SkillRepository
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
 from uuid import uuid4
@@ -86,6 +88,8 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.artifact_store = self.artifacts
             self.missions = MissionRepository(self)
             self.mission_repository = self.missions
+            self.skills = SkillRepository(self)
+            self.skills.interrupt_generations()
             self._recover()
             self.recover_conversations()
             self._inspect_graph_recovery()
@@ -187,6 +191,15 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.GRAPH_CHECKPOINT_RECOVERY:
                 create_graph_checkpoint_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.GRAPH_CHECKPOINT_RECOVERY)}')
+            if version < SchemaVersion.WRITER_SCOPE_EXPANSION:
+                create_scope_expansion_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.WRITER_SCOPE_EXPANSION)}')
+            if version < SchemaVersion.LOCAL_SKILL_LIBRARY:
+                create_skill_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.LOCAL_SKILL_LIBRARY)}')
+            if version < SchemaVersion.SKILL_GENERATION_ATTEMPTS:
+                create_generation_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.SKILL_GENERATION_ATTEMPTS)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(

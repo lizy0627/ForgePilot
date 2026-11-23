@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from conftest import call, reply
+from conftest import call, drop_skill_schema, reply
 from test_mcp_http import peers, closed as http_closed
 from test_mcp_service import database, candidate, save_new, SECRET, REPLACEMENT, assert_no_plaintext
 from test_mcp_api import serving, saved, eventually, PREFIX
@@ -1160,7 +1160,8 @@ def test_v4_upgrade_records_default_backup_and_record_bounds(tmp_path):
     cid=store.create_conversation()['conversation_id']; rid=str(uuid4())
     store.begin_conversation_request(cid,rid,'chat','old prompt',''); store.finish_conversation_request(rid,'completed','old answer'); store.close()
     with sqlite3.connect(path) as db:
-        for table in ('security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
+        drop_skill_schema(db)
+        for table in ('writer_scope_expansions', 'security_events','validation_runs','workspace_records','checkpoint_intents','checkpoints',
                       'graph_node_results','graph_node_states','graph_run_inputs','graph_events',
                       'model_calls','approvals','artifact_relations','artifacts',
                       'task_node_attempts','task_graph_runs'):

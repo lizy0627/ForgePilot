@@ -118,9 +118,11 @@ class DeliveryWorkflow(ImplementationService):
                                else f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None,
-                        allow_locked_test_scope=False):
+                        allow_locked_test_scope=False, skills=None):
+        if skills is None:
+            skills = getattr(self, "mission_skills", ())
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec,
-            allow_locked_test_scope=allow_locked_test_scope)
+            allow_locked_test_scope=allow_locked_test_scope, skills=skills)
         execution = self.graph()
         gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
                        settings=_plain_json(execution.nodes[0].settings))
@@ -130,7 +132,8 @@ class DeliveryWorkflow(ImplementationService):
             (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
 
     def _stored_graph(self, task_id):
-        graph = GraphDefinition.from_dict(json.loads(self.events.missions.get_graph_run(task_id)["definition_json"]))
+        run = self.events.missions.get_graph_run(task_id)
+        graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
         if graph.graph_id in LEGACY_DELIVERY_GRAPH_IDS:
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
@@ -140,16 +143,18 @@ class DeliveryWorkflow(ImplementationService):
             expected = self.graph()
         elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2",
                                "task-analysis-delivery-single-locked.v2"}:
-            from .analysis import AnalysisRequest
+            from .analysis import AnalysisRequest, stored_graph_skills, validate_skill_routes
             draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None
-            expected = self._analysis_graph(task_id,
-                AnalysisRequest.model_validate(_plain_json(draft.settings["request"])),
-                locked_task_spec=locked,
+            request = AnalysisRequest.model_validate(_plain_json(draft.settings["request"]))
+            skills = stored_graph_skills(self.events, task_id, graph)
+            validate_skill_routes(self, skills, request.data_policy)
+            expected = self._analysis_graph(task_id, request, locked_task_spec=locked, skills=skills,
                 allow_locked_test_scope=bool(draft.settings.get("allow_locked_test_scope", False)))
         else:
             raise ForgePilotError("graph_definition", "Task is not a validated delivery graph")
-        if expected.definition_hash != graph.definition_hash:
+        persisted_hash = run["definition_hash"]
+        if expected.definition_hash != persisted_hash or graph.definition_hash != persisted_hash:
             raise ForgePilotError("graph_definition", "Frozen delivery graph changed")
         return expected
 
@@ -254,6 +259,8 @@ class DeliveryWorkflow(ImplementationService):
                 self.runner.checkpoints.verify(baseline)
                 candidates = [item for item in self.events.artifacts.list_for_task(task_id)
                     if isinstance(item.content, ChangeSet) and item.producer_node == writer.node_id]
+                if any(item.content.requires_additional_approval for item in candidates):
+                    raise ForgePilotError("storage_recovery_blocked", "Partial writer output requires scope review")
                 if len(candidates) > 1:
                     raise ForgePilotError("storage_recovery_blocked", "Writer ChangeSet provenance is ambiguous")
             observed = self.workspace.recover_observed_change_set(task_id, spec, plan, baseline)
@@ -320,11 +327,12 @@ class DeliveryWorkflow(ImplementationService):
             raise ForgePilotError("artifact_scope", "Expected exactly one result from the selected node")
         return matches[0]
 
-    def _changes_for_validation(self, context):
+    def _changes_for_validation(self, context, plan):
         writers = [node for node in self.runner.store.snapshot(context.task_id).nodes
                    if node.status is NodeStatus.SUCCEEDED and (node.node_id == "implementer" or node.node_id.startswith("repair_"))]
         artifacts = [self._node_artifact(context.task_id, node.node_id, ChangeSet) for node in writers]
-        changes = self.workspace.final_change_set(context.task_id, [item.content for item in artifacts])
+        changes = self.workspace.final_change_set(context.task_id, [item.content for item in artifacts],
+                                                   plan_artifact_id=plan.artifact_id)
         return self._save(context, changes, "workspace.v1",
             [changes.execution_plan_artifact_id, *(item.artifact_id for item in artifacts)])
 
@@ -338,13 +346,23 @@ class DeliveryWorkflow(ImplementationService):
     def _validation_handler(self, context):
         spec, plan, _ = self._package(context.task_id, context.input_artifact_ids)
         try:
-            changes = self._changes_for_validation(context)
+            if not self._granted(context.task_id, spec, plan, "execution"):
+                raise ForgePilotError("approval_stale", "Validation requires the current approved execution plan")
+            changes = self._changes_for_validation(context, plan)
             # Separate named-test approval is checked again at the validator
             # boundary; adding it to TaskSpec alone grants nothing.
             if self._granted(context.task_id, spec, plan, "existing_tests"):
                 self.validator.approve_tests(context.task_id, spec.content.test_policy.modifiable_existing_test_patterns)
+            # A scope revision changes the diff policy. Test bytes, inventory and
+            # the integrity manifest still belong to the original capture attempt.
+            capture = next(node for node in self.runner.store.snapshot(context.task_id).nodes
+                           if node.node_id == "baseline_capture")
+            captured = self.runner.store.frozen_inputs(context.task_id, capture.node_id, capture.attempt)
+            if captured is None:
+                raise ForgePilotError("validation_policy", "Baseline capture inputs are missing")
+            baseline_spec, _, _ = self._package(context.task_id, tuple(item[0] for item in captured))
             report = self._await(self.validator.validate(context.task_id, spec.content, changes.content,
-                is_cancelled=lambda: self._cancelled(context)))
+                baseline_spec=baseline_spec.content, is_cancelled=lambda: self._cancelled(context)))
             artifact = self._save(context, report, "validator.v1", (spec.artifact_id, changes.artifact_id))
             # Audit attempts count every validation, including infrastructure
             # retries. Repair rounds remain fixed by the graph, independently.
@@ -409,6 +427,8 @@ class DeliveryWorkflow(ImplementationService):
         if not validation_passed(validation.content, require_oracle=self._requires_oracle(context.task_id, spec, plan)):
             return self._service_error(ForgePilotError("review_validation", "Review requires full validation"))
         changes = self._changes_parent(validation)
+        if changes.content.execution_plan_artifact_id != plan.artifact_id:
+            return self._service_error(ForgePilotError("review_input", "Validated changes reference another plan"))
         try:
             key = context.task_id, context.node.node_id
             if key not in self._budgets:
@@ -419,7 +439,7 @@ class DeliveryWorkflow(ImplementationService):
                 self._budgets[key], require_oracle=self._requires_oracle(context.task_id, spec, plan)))
             validate_review_coverage(spec.content, report)
             artifact = self._save(context, report, self.reviewer.definition.agent_id,
-                                  (spec.artifact_id, changes.artifact_id, validation.artifact_id))
+                                  (spec.artifact_id, plan.artifact_id, changes.artifact_id, validation.artifact_id))
             if self._cancelled(context):
                 return NodeResult(NodeStatus.CANCELLED, output_artifact_ids=(artifact.artifact_id,))
             approved = report.verdict == "approve" and report.recommend_delivery and not report.blocking_issues and all(
@@ -454,6 +474,8 @@ class DeliveryWorkflow(ImplementationService):
         changes = self._changes_parent(validation)
         validate_review_coverage(spec.content, review.content)
         try:
+            if changes.content.execution_plan_artifact_id != plan.artifact_id:
+                raise ForgePilotError("delivery_changes", "Reviewed changes reference another plan")
             if self._cancelled(context):
                 return NodeResult(NodeStatus.CANCELLED)
             current = self.workspace.inspect(self.workspace.record(context.task_id))
@@ -476,7 +498,8 @@ class DeliveryWorkflow(ImplementationService):
                 rollback="Before merging, abandon the isolated task worktree. After squash delivery, revert the recorded delivery commit on the target branch.",
                 patch_path=patch["path"])
             self.workspace.prepare_delivery_bundle(context.task_id, bundle)
-            artifact = self._save(context, bundle, "delivery.v1", (changes.artifact_id, validation.artifact_id, review.artifact_id))
+            artifact = self._save(context, bundle, "delivery.v1",
+                                  (plan.artifact_id, changes.artifact_id, validation.artifact_id, review.artifact_id))
             return NodeResult(NodeStatus.SUCCEEDED, output_artifact_ids=(artifact.artifact_id,),
                               decision_summary="Validated DeliveryBundle and patch ready for final user approval")
         except (FutureCancelledError, asyncio.CancelledError):
