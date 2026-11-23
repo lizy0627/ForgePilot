@@ -1,9 +1,10 @@
 """Keep relocated protocol data available in both supported Windows bundles."""
 
-import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,22 +32,25 @@ def test_release_collects_python_modules_and_protocol_example_resource():
         assert "(Join-Path $PSScriptRoot 'desktop_launcher.py')" in script
 
 
-def test_protocol_examples_use_colocated_data_after_package_relocation(tmp_path, monkeypatch):
+def test_protocol_examples_use_colocated_data_after_package_relocation(tmp_path):
     package = tmp_path / "relocated" / "forgepilot"
-    package.mkdir(parents=True)
-    source = ROOT / "agent/forgepilot"
-    for name in ("protocol_examples.py", EXAMPLE_RESOURCE):
-        shutil.copyfile(source / name, package / name)
+    shutil.copytree(ROOT / "agent/forgepilot", package, ignore=shutil.ignore_patterns("__pycache__"))
+    resource = package / EXAMPLE_RESOURCE
+    legacy = json.loads(resource.read_text(encoding="utf-8"))
+    legacy["relocation_probe"] = "from the relocated resource"
+    resource.write_text(json.dumps(legacy), encoding="utf-8")
     unrelated = tmp_path / "unrelated-working-directory"
     unrelated.mkdir()
-    monkeypatch.chdir(unrelated)
-    specification = importlib.util.spec_from_file_location(
-        "relocated_protocol_examples", package / "protocol_examples.py"
+    probe = (
+        "import json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from forgepilot.protocol_examples import examples\n"
+        "print(json.dumps(examples()))"
     )
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    examples = module.examples()
-    legacy = json.loads((package / EXAMPLE_RESOURCE).read_text(encoding="utf-8"))
+    output = subprocess.check_output(
+        [sys.executable, "-I", "-c", probe, str(package.parent)], cwd=unrelated, timeout=30,
+    )
+    examples = json.loads(output)
     assert all(examples[key] == value for key, value in legacy.items())
     assert examples["mission_create_request"]["task_type"] == "auto"
     assert examples["mission_revision_conflict_error"]["error"]["code"] == "mission_revision_conflict"
