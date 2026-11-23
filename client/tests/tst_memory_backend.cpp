@@ -71,7 +71,13 @@ private slots:
             // describes the pre-summary request. Verify the committed summary below.
             QTRY_COMPARE_WITH_TIMEOUT(c.messages()->count(),34,10000); QTRY_VERIFY(!c.active());
             QVERIFY(click("memoryManagerButton")); QTRY_VERIFY(!memory->loading()); QVERIFY(click("summaryMemoryTab"));
-            QTRY_VERIFY(!memory->summary().value("summary").toMap().isEmpty());
+            // Opening the dialog can fetch its snapshot before the background summary commits.
+            QVERIFY(QTest::qWaitFor([&] {
+                if (!memory->summary().value("summary").toMap().isEmpty())
+                    return true;
+                click("refreshMemoryButton");
+                return false;
+            }, 10000));
             QVERIFY(memory->summary().value("summary").toMap().value("through_message_id").toInt()>0); QVERIFY(capture("summary"));
             find("summaryMemoryContent")->setProperty("text","手工纠正的摘要：旧代码结论须重新读取确认"); QVERIFY(click("saveSummaryButton"));
             QTRY_VERIFY(!memory->busy()); QTRY_VERIFY(!memory->loading());
