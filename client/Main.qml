@@ -6,6 +6,7 @@ import "panels"
 import "panels/Ui.js" as Ui
 import "panels/Theme.js" as Theme
 import "workbench" as Workbench
+import "workbench/WorkflowTheme.js" as WorkflowTheme
 
 ApplicationWindow {
     id: window
@@ -85,9 +86,34 @@ ApplicationWindow {
         id: modeBar; objectName: "mainModeBar"
         visible: !!window.missions
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        height: 62; color: Theme.panel; border.color: Theme.border; z: 2
+        height: window.agentMode ? 52 : 62
+        color: window.agentMode ? WorkflowTheme.sidebar : Theme.panel
+        border.color: window.agentMode ? WorkflowTheme.border : Theme.border
+        z: 2
         RowLayout {
             anchors.fill: parent; anchors.leftMargin: Theme.spaceLg; anchors.rightMargin: Theme.spaceLg; spacing: Theme.spaceSm
+            ActionButton {
+                id: historyToggle
+                objectName: "workflowHistoryToggle"
+                visible: window.agentMode && !!workflowLoader.item && typeof workflowLoader.item.toggleHistory === "function"
+                flat: true
+                Layout.preferredWidth: 34; Layout.preferredHeight: 34
+                horizontalPadding: 0
+                Accessible.name: visible && workflowLoader.item.historyVisible ? "收起任务历史" : "展开任务历史"
+                ToolTip.visible: hovered; ToolTip.text: Accessible.name
+                onClicked: workflowLoader.item.toggleHistory()
+                contentItem: Item {
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 18; height: 15; radius: 3
+                        color: "transparent"; border.color: WorkflowTheme.secondary
+                        Rectangle {
+                            x: 6; y: 1; width: 1; height: parent.height - 2
+                            color: WorkflowTheme.secondary
+                        }
+                    }
+                }
+            }
             Rectangle {
                 Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: Theme.radiusSm
                 color: Theme.accentSubtle; border.color: Theme.accentBorder
@@ -100,7 +126,7 @@ ApplicationWindow {
                 onClicked: { window.agentMode = true; window.conversations.mode = "chat" } }
             Item { Layout.fillWidth: true }
             ActionButton { objectName: "workbenchSettingsButton"; text: "设置"; flat: true; visible: window.agentMode; onClicked: settingsDialog.open() }
-            Label { visible: window.width >= 1080; text: window.agentMode ? "任务总览" : "只读问答 · 不执行代码修改"; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm }
+            Label { visible: !window.agentMode && window.width >= 1080; text: "只读问答 · 不执行代码修改"; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm }
         }
     }
     RowLayout {

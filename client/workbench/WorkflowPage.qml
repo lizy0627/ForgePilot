@@ -13,6 +13,8 @@ Item {
     property var mcp: null
     property var rag: null
     property bool taskCenterExpanded: false
+    property bool historyCollapsed: false
+    property bool toolsExpanded: false
     property string selectedNodeId: ""
     property bool selectionPinned: false
     property bool detailsVisible: false
@@ -24,7 +26,20 @@ Item {
     readonly property bool hasTask: !!mission.taskId
     readonly property bool demandCollapsed: hasTask && !taskCenterExpanded
     readonly property string indexRepositoryPath: demandCollapsed ? (mission.snapshot.repository_path || "") : taskCenter.draftRepositoryPath
-    readonly property bool compactLayout: width < 1100 || (taskCenterExpanded && width < 1420)
+    readonly property bool compactHistory: width < 1080
+    readonly property bool historyVisible: compactHistory ? historyDrawer.visible : !historyCollapsed
+    readonly property bool compactLayout: workspace.width < 960
+    readonly property string repositoryPath: mission.snapshot.repository_path || ""
+    function toggleHistory() {
+        if (compactHistory) {
+            if (historyDrawer.visible) historyDrawer.close()
+            else historyDrawer.open()
+        } else {
+            historyCollapsed = !historyCollapsed
+        }
+    }
+    onCompactHistoryChanged: if (!compactHistory && historyDrawer) historyDrawer.close()
+    onVisibleChanged: if (!visible && historyDrawer) historyDrawer.close()
     readonly property string attentionNodeId: {
         for (var i = 0; i < nodeRecords.length; ++i)
             if (nodeRecords[i].status === "awaiting_human") return nodeRecords[i].nodeId
@@ -58,6 +73,7 @@ Item {
         if (currentTaskId !== mission.taskId) {
             currentTaskId = mission.taskId
             selectionPinned = false; selectedNodeId = ""; detailsVisible = false
+            toolsExpanded = false
             if (hasTask) taskCenterExpanded = false
             graph.expandedStages = ({})
         }
@@ -95,6 +111,7 @@ Item {
         taskCenter.fillDraft(request, repository, source)
         taskCenterExpanded = true
         detailsVisible = false
+        historyDrawer.close()
     }
     Component.onCompleted: refreshView()
     Connections { target: root.mission; function onMissionChanged() { Qt.callLater(root.refreshView) } }
@@ -116,64 +133,130 @@ Item {
         function onCountChanged() { Qt.callLater(root.refreshView) }
     }
     Rectangle { anchors.fill: parent; color: Theme.background }
-    ColumnLayout {
-        anchors.fill: parent; spacing: 0
+    Drawer {
+        id: historyDrawer
+        edge: Qt.LeftEdge
+        width: 268
+        y: root.Window.window ? root.Window.window.height - root.height : 0
+        height: root.height
+        padding: 0
+        interactive: root.visible && root.compactHistory
+        background: Rectangle { color: Theme.sidebar }
+    }
+    Rectangle {
+        id: historyPanel
+        objectName: "workflowHistorySidebar"
+        parent: root.compactHistory ? historyDrawer.contentItem : root
+        anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left
+        width: root.compactHistory ? historyDrawer.width : 244
+        visible: root.historyVisible
+        color: Theme.sidebar
+        MissionHistory {
+            anchors.fill: parent
+            anchors.margins: Theme.spaceMd
+            mission: root.mission
+            navMode: true
+            onTaskOpened: {
+                historyDrawer.close()
+                if (!root.mission.error) root.taskCenterExpanded = false
+            }
+        }
         Rectangle {
+            anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
+            width: 1; color: Theme.border
+        }
+    }
+    ColumnLayout {
+        id: workspace
+        anchors.fill: parent
+        anchors.leftMargin: root.historyVisible && !root.compactHistory ? historyPanel.width : 0
+        spacing: 0
+        RowLayout {
+            visible: root.hasTask
             Layout.fillWidth: true
-            implicitHeight: header.implicitHeight + Theme.spaceLg * 2
-            color: Theme.sidebar
+            Layout.leftMargin: Theme.spaceXl; Layout.rightMargin: Theme.spaceLg
+            Layout.topMargin: Theme.spaceMd; Layout.bottomMargin: Theme.spaceMd
+            spacing: Theme.spaceSm
             ColumnLayout {
-                id: header
-                anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Theme.spaceLg
-                spacing: Theme.spaceSm
+                Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 3
+                visible: root.demandCollapsed
                 RowLayout {
                     Layout.fillWidth: true; spacing: Theme.spaceSm
-                    Label { text: root.hasTask ? "任务工作流" : "创建代码任务"; color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold }
-                    Rectangle {
-                        visible: root.hasTask; radius: Theme.radiusMd
-                        implicitWidth: statusText.implicitWidth + 22; implicitHeight: 26
-                        color: Theme.raised; border.color: W.color(root.mission.status)
-                        Label { id: statusText; anchors.centerIn: parent; text: Flow.statusLabels[root.mission.status] || W.label(root.mission.status); color: W.color(root.mission.status); font.pixelSize: Theme.fontSizeXs }
+                    Label {
+                        text: root.repositoryPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "仓库"
+                        textFormat: Text.PlainText; elide: Text.ElideMiddle
+                        Layout.maximumWidth: Math.max(100, workspace.width * 0.32)
+                        color: Theme.muted; font.pixelSize: Theme.fontSizeSm
+                        ToolTip.visible: repoHover.hovered; ToolTip.text: root.repositoryPath
+                        HoverHandler { id: repoHover }
                     }
-                    Item { Layout.fillWidth: true }
-                    Controls.ActionButton {
-                        objectName: "workflowFollowButton"; visible: root.hasTask && root.selectionPinned
-                        text: root.width < 700 ? "跟随" : "跟随进度"; flat: true
-                        onClicked: root.followProgress()
-                    }
-                    Controls.ActionButton {
-                        objectName: "workflowDemandToggle"; visible: root.hasTask
-                        text: root.width < 700 ? "任务" : "新建 / 切换"; flat: true; checked: root.taskCenterExpanded
-                        onClicked: { root.taskCenterExpanded = !root.taskCenterExpanded; if (root.taskCenterExpanded && root.compactLayout) root.detailsVisible = false }
-                    }
-                    Controls.ActionButton { objectName: "workflowMoreButton"; text: "···"; visible: root.hasTask; flat: true; Accessible.name: "任务操作"; onClicked: taskMenu.open()
-                        Menu { id: taskMenu; y: parent.height
-                            MenuItem { text: "刷新任务"; enabled: !root.mission.busy; onTriggered: root.mission.refresh() }
-                            MenuItem { text: "取消任务"; visible: ["succeeded", "failed", "cancelled"].indexOf(root.mission.status) < 0; enabled: root.mission.synchronized && !root.mission.busy; onTriggered: cancelDialog.open() }
-                        }
+                    Label { text: "·"; color: Theme.muted }
+                    Label {
+                        text: Flow.statusLabels[root.mission.status] || W.label(root.mission.status)
+                        color: W.color(root.mission.status); font.pixelSize: Theme.fontSizeSm
                     }
                 }
                 Label {
-                    visible: root.hasTask; Layout.fillWidth: true
                     text: root.mission.snapshot.request || "正在读取任务…"
-                    textFormat: Text.PlainText; color: Theme.secondary
-                    font.pixelSize: Theme.fontSizeSm; wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
+                    Layout.fillWidth: true; Layout.minimumWidth: 0
+                    textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                    maximumLineCount: 2; elide: Text.ElideRight
+                    color: Theme.text; font.pixelSize: Theme.fontSizeXl; font.weight: Font.DemiBold
+                    ToolTip.visible: truncated && titleHover.hovered; ToolTip.text: text
+                    HoverHandler { id: titleHover }
                 }
-                Label {
-                    id: toolPreview; objectName: "missionToolContext"; visible: root.hasTask; Layout.fillWidth: true
-                    text: root.toolSummary(); textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
-                    maximumLineCount: 6; elide: Text.ElideRight
-                    color: Theme.secondary; font.pixelSize: Theme.fontSizeSm
+            }
+            Item { visible: !root.demandCollapsed; Layout.fillWidth: true }
+            Controls.ActionButton {
+                objectName: "workflowFollowButton"; visible: root.demandCollapsed && root.selectionPinned
+                text: "跟随进度"; flat: true; onClicked: root.followProgress()
+            }
+            Controls.ActionButton {
+                objectName: "workflowToolContextToggle"; visible: root.demandCollapsed
+                text: "工具"; flat: true; checked: root.toolsExpanded
+                Accessible.name: "任务工具详情"
+                onClicked: root.toolsExpanded = !root.toolsExpanded
+            }
+            Controls.ActionButton {
+                objectName: "workflowDemandToggle"
+                text: root.demandCollapsed ? "新建任务" : "返回当前任务"
+                onClicked: {
+                    root.detailsVisible = false
+                    root.taskCenterExpanded = !root.taskCenterExpanded
                 }
-                Controls.LongText {
-                    objectName: "missionToolContextFull"; visible: root.hasTask && toolPreview.truncated
-                    Layout.fillWidth: true; title: "本次检索与 MCP 工具"; text: toolPreview.text
-                    monospace: false; maximumHeight: 150
+            }
+            Controls.ActionButton {
+                objectName: "workflowMoreButton"; visible: root.demandCollapsed
+                text: "···"; flat: true; Layout.preferredWidth: Theme.controlHeight
+                horizontalPadding: 0; Accessible.name: "任务操作"
+                onClicked: taskMenu.open()
+                Menu {
+                    id: taskMenu
+                    y: parent.height
+                    MenuItem { text: "刷新任务"; enabled: !root.mission.busy; onTriggered: root.mission.refresh() }
+                    MenuItem {
+                        text: "取消任务"
+                        visible: ["succeeded", "failed", "cancelled"].indexOf(root.mission.status) < 0
+                        enabled: visible && root.mission.synchronized && !root.mission.busy
+                        onTriggered: cancelDialog.open()
+                    }
                 }
             }
         }
-        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
+        Label {
+            id: toolPreview; objectName: "missionToolContext"
+            visible: root.demandCollapsed && root.toolsExpanded
+            Layout.fillWidth: true; Layout.leftMargin: Theme.spaceXl; Layout.rightMargin: Theme.spaceXl
+            Layout.bottomMargin: Theme.spaceMd
+            text: root.toolSummary(); textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+            maximumLineCount: 5; elide: Text.ElideRight; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm
+        }
+        Controls.LongText {
+            objectName: "missionToolContextFull"; visible: toolPreview.visible && toolPreview.truncated
+            Layout.fillWidth: true; Layout.leftMargin: Theme.spaceXl; Layout.rightMargin: Theme.spaceXl
+            title: "工具详情全文"; text: toolPreview.text; monospace: false; maximumHeight: 120
+        }
+        Rectangle { visible: root.demandCollapsed; Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
         Rectangle {
             visible: !!root.mission.error || (root.hasTask && !root.mission.synchronized)
             Layout.fillWidth: true; implicitHeight: connectionRow.implicitHeight + Theme.spaceSm * 2; color: Theme.dangerFill
@@ -184,47 +267,39 @@ Item {
             }
         }
         Rectangle {
-            objectName: "workflowAttention"; visible: root.needsAttention
+            objectName: "workflowAttention"; visible: root.demandCollapsed && root.needsAttention
             Layout.fillWidth: true; implicitHeight: attentionRow.implicitHeight + Theme.spaceSm * 2; color: Theme.accentSubtle
             RowLayout { id: attentionRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: Theme.spaceLg
                 Label { Layout.fillWidth: true; text: root.mission.status === "awaiting_human" && root.attentionNodeId === "execution_approval" && !root.mission.snapshot.recovery_required ? "方案已准备好，请查看并确认后继续。" : "任务需要处理，请查看对应步骤。"; color: Theme.warning; wrapMode: Text.WrapAnywhere }
                 Controls.ActionButton { objectName: "workflowAttentionButton"; text: "查看"; onClicked: root.selectNode(root.attentionNodeId) }
             }
         }
+        TaskCenter {
+            id: taskCenter
+            visible: !root.demandCollapsed
+            composerMode: true
+            mission: root.mission; mcp: root.mcp; rag: root.rag
+            Layout.fillWidth: true; Layout.fillHeight: true
+            Layout.minimumWidth: 0; Layout.minimumHeight: 0
+        }
         RowLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: 0
-            TaskCenter {
-                id: taskCenter
-                mission: root.mission; mcp: root.mcp; rag: root.rag
-                visible: !root.demandCollapsed
-                Layout.preferredWidth: root.hasTask ? 300 : Math.min(420, root.width * 0.48)
-                Layout.fillWidth: !root.hasTask && root.compactLayout
-                Layout.fillHeight: true; Layout.minimumWidth: 0
-            }
-            ColumnLayout {
-                visible: (!root.compactLayout || !root.detailsVisible) && (root.hasTask || !root.compactLayout)
-                Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 0; spacing: 0
-                Label {
-                    visible: root.hasTask && root.stages.length > 0
-                    Layout.fillWidth: true; Layout.margins: Theme.spaceLg
-                    text: root.selectionPinned ? "正在查看所选步骤 · 可随时返回跟随进度" : "跟随任务进度 · 点击阶段查看详情，展开可查看内部步骤"
-                    color: Theme.muted; font.pixelSize: Theme.fontSizeSm; wrapMode: Text.WrapAnywhere
-                }
+            visible: root.demandCollapsed
+            Layout.fillWidth: true; Layout.fillHeight: true
+            Layout.minimumWidth: 0; Layout.minimumHeight: 0; spacing: 0
+            Item {
+                visible: !root.compactLayout || !root.detailsVisible
+                Layout.fillWidth: true; Layout.fillHeight: true
+                Layout.minimumWidth: 0; Layout.minimumHeight: 0
                 WorkflowGraph {
                     id: graph
-                    visible: root.hasTask && root.stages.length > 0
-                    Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 0; Layout.minimumHeight: 0
+                    visible: root.stages.length > 0; anchors.fill: parent
                     stages: root.stages; selectedNodeId: root.selectedNodeId; artifactModel: root.mission.artifacts
                     onNodeSelected: function(nodeId) { root.selectNode(nodeId) }
                 }
-                Item {
-                    visible: !root.hasTask || !root.stages.length
-                    Layout.fillWidth: true; Layout.fillHeight: true
-                    ColumnLayout {
-                        anchors.centerIn: parent; width: Math.min(440, parent.width - Theme.spaceXl * 2); spacing: Theme.spaceLg
-                        Label { text: root.hasTask ? "正在生成任务流程" : "从一个代码任务开始"; color: Theme.text; font.pixelSize: Theme.fontSizeXl; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                        Label { text: root.hasTask ? "分析开始后，这里会显示每个阶段的实时状态。" : "选择本地仓库并描述需求。提交后可在流程图中查看分析、实现、验证和交付进度。"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                    }
+                Label {
+                    visible: !root.stages.length
+                    anchors.centerIn: parent
+                    text: "正在读取任务流程…"; color: Theme.muted
                 }
             }
             Rectangle {

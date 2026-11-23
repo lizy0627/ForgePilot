@@ -400,14 +400,86 @@ private slots:
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
+    void historyNavigationPreservesTheDraft_data()
+    {
+        QTest::addColumn<int>("width");
+        QTest::addColumn<bool>("docked");
+        QTest::newRow("desktop") << 1320 << true;
+        QTest::newRow("minimum") << 860 << false;
+    }
+    void historyNavigationPreservesTheDraft()
+    {
+        QFETCH(int, width);
+        QFETCH(bool, docked);
+        Fixture fixture;
+        fixture.intercept = [&](const Request &request) {
+            if (request.method != "GET" || !request.path.startsWith("/api/v2/missions?")) return false;
+            Source::json(request, {{"items", QJsonArray{fixture.mission}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            return true;
+        };
+        Ui ui(fixture, width, 640);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        auto *page = ui.find("workflowPage"); QVERIFY(page);
+        QTRY_COMPARE(page->property("historyVisible").toBool(), docked);
+        auto *goal = ui.find("missionRequestInput"); QVERIFY(goal && goal->isVisible());
+        auto *repository = ui.find("missionRepositoryInput"); QVERIFY(repository && repository->isVisible());
+        auto *rag = ui.find("missionUseRag"); QVERIFY(rag && !rag->isVisible());
+        auto *graph = ui.find("workflowGraph"); QVERIFY(graph && !graph->isVisible());
+        if (docked) {
+            auto *sidebar = ui.find("workflowHistorySidebar"); QVERIFY(sidebar && sidebar->isVisible());
+            QVERIFY(sidebar->mapToScene(QPointF(sidebar->width(), 0)).x() <= goal->mapToScene(QPointF()).x());
+        }
+        QVERIFY(ui.capture(docked ? "workflow-compose-wide" : "workflow-compose-narrow"));
+        goal->setProperty("text", "保留尚未提交的任务目标");
+        repository->setProperty("text", "D:/fixture/draft");
+        if (docked) {
+            QVERIFY(ui.click("workflowHistoryToggle"));
+            QTRY_VERIFY(!page->property("historyVisible").toBool());
+        }
+        QVERIFY(ui.click("workflowHistoryToggle"));
+        QTRY_VERIFY(page->property("historyVisible").toBool());
+        QTRY_VERIFY(ui.find("workflowHistorySidebar"));
+        auto *sidebar = ui.find("workflowHistorySidebar");
+        QTRY_VERIFY(sidebar->isVisible() && sidebar->mapToScene(QPointF()).x() >= -1);
+        QTRY_VERIFY(ui.find("missionTaskRow", "taskId", MissionId));
+        QVERIFY(ui.click(ui.find("missionTaskRow", "taskId", MissionId)));
+        QTRY_COMPARE(ui.missions.taskId(), MissionId);
+        QTRY_VERIFY(graph->isVisible());
+        QVERIFY(!goal->isVisible());
+        QTRY_COMPARE(page->property("historyVisible").toBool(), docked);
+        QVERIFY(ui.click("workflowDemandToggle"));
+        QTRY_VERIFY(goal->isVisible());
+        QVERIFY(!graph->isVisible());
+        QCOMPARE(goal->property("text").toString(), QString("保留尚未提交的任务目标"));
+        QCOMPARE(repository->property("text").toString(), QString("D:/fixture/draft"));
+        if (docked) {
+            ui.window->resize(860, 640);
+            QTRY_VERIFY(page->property("compactHistory").toBool());
+            QTRY_VERIFY(!page->property("historyVisible").toBool());
+            QVERIFY(ui.click("workflowHistoryToggle"));
+            QTRY_VERIFY(sidebar->isVisible() && sidebar->mapToScene(QPointF()).x() >= -1);
+            ui.window->resize(width, 640);
+            QTRY_VERIFY(!page->property("compactHistory").toBool());
+            QTRY_VERIFY(sidebar->isVisible());
+            // An orphaned modal overlay would intercept this click after the drawer redocks.
+            QTRY_VERIFY(ui.click(goal) && goal->hasActiveFocus());
+            QTest::keyClick(ui.window, Qt::Key_End, Qt::ControlModifier);
+            QTest::keyClick(ui.window, Qt::Key_X);
+            QCOMPARE(goal->property("text").toString(), QString("保留尚未提交的任务目标x"));
+        }
+        QVERIFY(fixture.creates.isEmpty());
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void openingMissionByIdShowsErrorsInEmptyWorkbench()
     {
         Fixture fixture;
         Ui ui(fixture);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("agentWorkbenchModeButton"));
-        auto *input = ui.find("missionIdInput"); QVERIFY(input);
-        auto *open = ui.find({}, "text", "打开", input->parentItem()); QVERIFY(open);
+        QVERIFY(ui.click("missionHistoryFiltersToggle"));
+        auto *input = ui.find("missionIdInput"); QVERIFY(input && input->isVisible());
+        auto *open = ui.find("missionOpenById"); QVERIFY(open);
         QVERIFY(ui.missions.taskId().isEmpty());
         input->setProperty("text", "invalid-id");
         QVERIFY(ui.click(open));
@@ -856,6 +928,7 @@ print(json.dumps(result))
         Fixture fixture; Ui ui(fixture); QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
         QVERIFY(ui.click("agentWorkbenchModeButton")); QTRY_VERIFY(!ui.mcp.missionLoading());
         QCOMPARE(ui.mcp.missionChoices().size(), 1);
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.find("missionMcpChoice", "serverId", McpId));
         QVERIFY(!ui.find("missionMcpChoice", "serverId", Validation0));
         // compatible=true and effect=read cannot substitute for the tool annotation.
@@ -867,6 +940,7 @@ print(json.dumps(result))
         Fixture fixture; Ui ui(fixture);
         QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n'))); QVERIFY(ui.click("agentWorkbenchModeButton"));
         QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         auto *choice = ui.find("missionMcpChoice", "serverId", McpId); QVERIFY(choice); QVERIFY(ui.click(choice));
         fixture.intercept = [](const Request &request) {
             if (request.path != "/api/v1/mcp/servers") return false;
@@ -886,6 +960,7 @@ print(json.dumps(result))
         QVERIFY(fixture.creates.first().value("mcp_server_ids").toArray().isEmpty());
         QVERIFY(!fixture.creates.first().value("use_rag").toBool());
         QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowToolContextToggle"));
         QVERIFY(ui.find("missionToolContext")->property("text").toString().contains("MCP：未选择"));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
@@ -907,6 +982,7 @@ print(json.dumps(result))
         QTRY_VERIFY_WITH_TIMEOUT(!ui.mcp.missionLoading(), 15000);
         QVERIFY2(ui.mcp.missionError().isEmpty(), qPrintable(ui.mcp.missionError()));
         if (restoredTask.isEmpty()) {
+            QVERIFY(ui.click("missionAdvancedToggle"));
             if (backend.isEmpty()) QCOMPARE(ui.mcp.missionChoices().size(), 1);
             auto *choice = ui.find("missionMcpChoice", "serverId", serverId); QVERIFY(choice);
             QVERIFY(choice->property("text").toString().contains(toolName));
@@ -935,7 +1011,8 @@ print(json.dumps(result))
         const auto snapshot = QJsonObject::fromVariantMap(ui.missions.snapshot());
         QVERIFY(snapshot.value("use_rag").toBool()); QCOMPARE(snapshot.value("mcp_server_ids").toArray(), QJsonArray{serverId});
         QVERIFY(snapshot.value("tool_context").toObject().value("rag").toObject().value("requested").toBool());
-        auto *context = ui.find("missionToolContext"); QVERIFY(context); QVERIFY(context->isVisible());
+        auto *context = ui.find("missionToolContext"); QVERIFY(context); QVERIFY(!context->isVisible());
+        QVERIFY(ui.click("workflowToolContextToggle")); QTRY_VERIFY(context->isVisible());
         QTRY_VERIFY(context->property("text").toString().contains(toolName));
         if (backend.isEmpty()) {
             QVERIFY(context->property("text").toString().contains("vector_unavailable"));
@@ -986,6 +1063,7 @@ print(json.dumps(result))
         QVERIFY(ui.find("missionBaselineSummary")->property("text").toString().contains(QString(40, 'a')));
         QVERIFY(ui.click("missionBaselineFile"));
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
         QVERIFY(ui.click("missionUseRag"));
         QVERIFY(ui.click("freeChatModeButton"));
@@ -1047,6 +1125,7 @@ print(json.dumps(result))
         QVERIFY(!ui.find("missionCreateButton")->isEnabled());
 
         repository->setProperty("text", "D:/fixture/other");
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
         QVERIFY(ui.click("missionUseRag"));
         repository->setProperty("text", "D:/fixture/repository");
@@ -1113,6 +1192,7 @@ print(json.dumps(result))
         prompt->setProperty("text", "Task A");
         ui.find("missionRepositoryInput")->setProperty("text", "D:/fixture/repository");
         QTRY_VERIFY(!ui.mcp.missionLoading());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.click(ui.find("missionMcpChoice", "serverId", McpId)));
         QVERIFY(ui.click("missionUseRag"));
         QVERIFY(ui.click("missionPreviewButton")); QTRY_VERIFY(ui.missions.creationReady());
@@ -1158,6 +1238,7 @@ print(json.dumps(result))
         auto *confirmation=ui.find("missionBaselineConfirmation"); QVERIFY(confirmation);
         QVERIFY(!confirmation->property("checked").toBool()); QVERIFY(!ui.find("missionCreateButton")->isEnabled());
         QVERIFY(ui.click(confirmation)); QVERIFY(ui.find("missionCreateButton")->isEnabled());
+        QVERIFY(ui.click("missionAdvancedToggle"));
         QVERIFY(ui.click(ui.find("missionUsePresets")));
         QVERIFY(!ui.missions.creationReady()); QVERIFY(!confirmation->property("checked").toBool());
         ui.find("missionConfigurePreset")->setProperty("text", "unsupported");

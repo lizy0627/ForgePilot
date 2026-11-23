@@ -1,19 +1,18 @@
 .pragma library
 .import "../panels/Theme.js" as Base
 
-// Use the shared palette. Defaults keep this view compatible with installations
-// whose palette predates the shared typography and spacing tokens.
+// Neutral workspace surfaces keep the shared accent and status colors distinct.
 function token(name, fallback) { return Base[name] === undefined ? fallback : Base[name]; }
-var background = Base.background;
-var panel = Base.panel;
-var sidebar = Base.sidebar;
-var raised = Base.raised;
-var input = Base.input;
-var border = Base.border;
-var text = Base.text;
-var secondary = Base.secondary;
-var muted = Base.muted;
-var hover = Base.hover;
+var background = "#191a1b";
+var panel = "#222324";
+var sidebar = "#151617";
+var raised = "#2b2d2e";
+var input = "#202122";
+var border = "#3a3d3e";
+var text = "#f2f2ef";
+var secondary = "#c4c6c5";
+var muted = "#a1a5a3";
+var hover = "#303233";
 var selection = Base.selection;
 var warning = Base.warning;
 var dangerFill = Base.dangerFill;
