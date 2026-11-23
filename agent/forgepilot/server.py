@@ -11,6 +11,7 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
 from .api import create_app
+from .artifacts.models import DataPolicy
 from .cli import SafeArgumentParser
 from .errors import ForgePilotError
 from .models.accounting import close_accounting_logging, configure_accounting_logging
@@ -141,6 +142,8 @@ def main(argv=None, *, stop_requested=None, on_ready=lambda: None):
                                  summary_factory=summary_factory, mcp_disabled=args.disable_mcp,
                                  legacy_mcp_config=args.mcp_config,
                                  model_client_closer=close_resources,
+                                 skill_gateway=model_clients,
+                                 skill_data_policy=DataPolicy(cloud_model_allowed=args.mission_allow_cloud_model),
                                  rag_coordinator=rag_coordinator, api_token=local_token,
                                  development_config=resources.development, git_executable=args.git)
                 from .mission_factory import build_mission_workflow

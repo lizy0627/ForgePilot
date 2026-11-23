@@ -11,8 +11,8 @@ from .artifacts.canonical import canonical_json_bytes, content_sha256
 from .errors import ForgePilotError
 from .mission_events import append_mission_event
 from .recording import now
-from .skill_mission_drafts import validate_mission_artifact_refs
-from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillIdentity, SkillVersion
+from .skill_mission_drafts import create_mission_draft_locked, validate_mission_artifact_refs
+from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillGenerationAttempt, SkillIdentity, SkillVersion
 from .skill_selection import FrozenSkill, load_frozen, resolve_selection
 
 if TYPE_CHECKING:
@@ -31,6 +31,26 @@ class SkillMatchMetadata:
     keyword_groups: list[list[str]]
     project_tags: list[str]
     task_types: list[str]
+
+
+def _attempt(row: sqlite3.Row) -> SkillGenerationAttempt:
+    return SkillGenerationAttempt(
+        attempt_id=row["attempt_id"], draft_id=row["draft_id"], start_revision=row["start_revision"],
+        status=row["status"], template_version=row["template_version"], route=row["route"],
+        elapsed_ms=row["elapsed_ms"], error_code=row["error_code"],
+        usage=json.loads(row["usage_json"]) if row["usage_json"] else None,
+        suggestion=json.loads(row["suggestion_json"]) if row["suggestion_json"] else None,
+    )
+
+
+def _with_latest_attempt(db: sqlite3.Connection, draft: SkillDraft) -> SkillDraft:
+    row = db.execute("""SELECT * FROM skill_generation_attempts WHERE draft_id=?
+                        ORDER BY sequence DESC LIMIT 1""", (draft.draft_id,)).fetchone()
+    if row is None:
+        return draft
+    latest = _attempt(row)
+    return draft.model_copy(update={"latest_attempt": latest,
+                                    "data": draft.data.model_copy(update={"generation_status": latest.status})})
 
 
 def _draft(row: sqlite3.Row) -> SkillDraft:
@@ -84,7 +104,14 @@ def _check_request_id(request_id: str) -> None:
         raise ForgePilotError("invalid_skill_request", "Expected a nonempty request ID of at most 256 characters")
 
 
-def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | None, data: SkillDraftData) -> None:
+def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | None, data: SkillDraftData,
+                  draft_id: str | None = None, *, verify_artifacts: bool = True) -> None:
+    if data.edited_lesson is not None:
+        found = db.execute('''SELECT 1 FROM skill_generation_attempts
+                              WHERE draft_id=? AND attempt_id=? AND suggestion_json IS NOT NULL''',
+                           (draft_id, data.edited_lesson.attempt_id)).fetchone()
+        if found is None:
+            raise ForgePilotError("invalid_skill_evidence", "The edited lesson requires a suggestion from this draft")
     if source_mission_id is None:
         if data.evidence_revision is not None or data.evidence_refs:
             raise ForgePilotError("invalid_skill_evidence", "Evidence requires a source Mission")
@@ -118,8 +145,9 @@ def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | Non
                                (source_mission_id, ref.record_id)).fetchone()
         if found is None:
             raise ForgePilotError("invalid_skill_evidence", "Evidence reference does not match a source Mission record")
-    validate_mission_artifact_refs(missions, source_mission_id,
-                                  (ref for ref in data.evidence_refs if ref.kind == "artifact"))
+    if verify_artifacts:
+        validate_mission_artifact_refs(missions, source_mission_id,
+                                       (ref for ref in data.evidence_refs if ref.kind == "artifact"))
 
 
 class SkillRepository:
@@ -159,14 +187,15 @@ class SkillRepository:
                                   for identity in event["skills"])
             return {"selected_skills": metadata.get("selected_skills", []), "injections": injections}
 
-    def get_draft(self, draft_id: str) -> SkillDraft:
+    def get_draft(self, draft_id: str, *, verify_artifacts: bool = True) -> SkillDraft:
         with self._store.locked_connection() as db:
-            return self._checked_draft(db, _draft_row(db, draft_id))
+            return self._checked_draft(db, _draft_row(db, draft_id), verify_artifacts=verify_artifacts)
 
-    def _checked_draft(self, db: sqlite3.Connection, row: sqlite3.Row) -> SkillDraft:
+    def _checked_draft(self, db: sqlite3.Connection, row: sqlite3.Row, *, verify_artifacts: bool = True) -> SkillDraft:
         draft = _draft(row)
-        _check_source(db, self._store.missions, draft.source_mission_id, draft.data)
-        return draft
+        _check_source(db, self._store.missions, draft.source_mission_id, draft.data, draft.draft_id,
+                      verify_artifacts=verify_artifacts)
+        return _with_latest_attempt(db, draft)
 
     def _draft_rows(self, db: sqlite3.Connection, source_mission_id: str | None, *,
                     limit: int = -1, offset: int = 0) -> list[sqlite3.Row]:
@@ -217,13 +246,108 @@ class SkillRepository:
                     timestamp, timestamp, base_skill_id, base_version))
         return _draft(_draft_row(db, draft_id))
 
-    def _replayed_draft(self, db: sqlite3.Connection, request_id: str, fingerprint: str) -> SkillDraft | None:
+    def _replayed_draft(self, db: sqlite3.Connection, request_id: str, fingerprint: str, *,
+                        verify_artifacts: bool = True) -> SkillDraft | None:
         existing = db.execute("SELECT * FROM skill_drafts WHERE request_id=?", (request_id,)).fetchone()
         if existing is None:
             return None
         if existing["create_hash"] != fingerprint:
             raise ForgePilotError("skill_request_conflict", "Request ID already identifies another draft request")
-        return self._checked_draft(db, existing)
+        return self._checked_draft(db, existing, verify_artifacts=verify_artifacts)
+
+    def create_generation(self, task_id: str, *, developer_note: str = "", request_id: str | None = None,
+                          template_version: str) -> tuple[SkillDraft, str, bool]:
+        request_id = str(uuid4()) if request_id is None else request_id
+        with self._store.transaction() as db:
+            draft = create_mission_draft_locked(self._store, db, task_id, developer_note,
+                                                request_id, "model_mission_draft")
+            return self._begin_generation(db, draft, request_id, template_version, expected_revision=None)
+
+    def regenerate(self, draft_id: str, *, expected_revision: int, request_id: str,
+                   template_version: str) -> tuple[SkillDraft, str, bool]:
+        with self._store.transaction() as db:
+            # Admission checks ownership, cutoff and stored hashes. The worker
+            # verifies the bounded payloads it will use before calling the model.
+            draft = self._checked_draft(db, _draft_row(db, draft_id), verify_artifacts=False)
+            return self._begin_generation(db, draft, request_id, template_version, expected_revision=expected_revision)
+
+    def _begin_generation(self, db, draft, request_id, template_version, *, expected_revision):
+        _check_request_id(request_id)
+        operation = "create" if expected_revision is None else "regenerate"
+        # Replay before checking editor revision or closed state. The client may
+        # be recovering an acknowledgement well after the developer moved on.
+        prior = db.execute("SELECT * FROM skill_generation_attempts WHERE request_id=?", (request_id,)).fetchone()
+        if prior is not None:
+            if (prior["draft_id"] != draft.draft_id or prior["operation"] != operation
+                    or (expected_revision is not None and prior["start_revision"] != expected_revision)):
+                raise ForgePilotError("skill_request_conflict", "Request ID already identifies a different attempt")
+            return draft, prior["attempt_id"], False
+        if expected_revision is not None:
+            _check_revision(draft.revision, expected_revision)
+        if draft.result_version is not None or draft.source_mission_id is None:
+            raise ForgePilotError("skill_revision_conflict", "Generation requires an open Mission draft")
+        if draft.latest_attempt and draft.latest_attempt.status == "generating":
+            raise ForgePilotError("skill_revision_conflict", "A generation attempt is already active")
+        attempt = SkillGenerationAttempt(attempt_id=str(uuid4()), draft_id=draft.draft_id, start_revision=draft.revision,
+                                         status="generating", template_version=template_version)
+        db.execute("""INSERT INTO skill_generation_attempts(
+                      attempt_id,draft_id,request_id,operation,start_revision,status,template_version)
+                      VALUES(?,?,?,?,?,'generating',?)""",
+                   (attempt.attempt_id, draft.draft_id, request_id, operation, draft.revision, template_version))
+        return _with_latest_attempt(db, draft), attempt.attempt_id, True
+
+    def get_attempt(self, draft_id: str, attempt_id: str) -> SkillGenerationAttempt:
+        with self._store.locked_connection() as db:
+            row = db.execute("SELECT * FROM skill_generation_attempts WHERE draft_id=? AND attempt_id=?",
+                             (draft_id, attempt_id)).fetchone()
+            if row is None:
+                raise ForgePilotError("skill_attempt_not_found", "Generation attempt does not belong to this draft")
+            return _attempt(row)
+
+    def record_generation_route(self, attempt_id: str, start_revision: int, route: str) -> bool:
+        with self._store.transaction() as db:
+            return db.execute("""UPDATE skill_generation_attempts SET route=? WHERE attempt_id=?
+                                 AND start_revision=? AND status='generating'""",
+                              (route, attempt_id, start_revision)).rowcount == 1
+
+    def finish_generation(self, attempt_id: str, *, start_revision: int, status: str, suggestion=None,
+                          error_code=None, route=None, elapsed_ms=None, usage=None) -> bool:
+        """Compare against this attempt's captured revision, independent of later edits."""
+        if status == "generating" or (status == "ready") != (suggestion is not None):
+            raise ValueError("Expected a terminal outcome and a suggestion only for successful generation")
+        with self._store.transaction() as db:
+            row = db.execute("SELECT * FROM skill_generation_attempts WHERE attempt_id=? AND start_revision=?",
+                             (attempt_id, start_revision)).fetchone()
+            if row is None:
+                return False
+            # Some providers include free-form diagnostics alongside token counts.
+            counts = {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                      if isinstance(usage, dict) and type(usage.get(key)) is int and usage[key] >= 0}
+            outcome = SkillGenerationAttempt(
+                attempt_id=attempt_id, draft_id=row["draft_id"], start_revision=start_revision, status=status,
+                template_version=row["template_version"], route=route or row["route"], suggestion=suggestion,
+                error_code=error_code, elapsed_ms=elapsed_ms, usage=counts or None,
+            )
+            encoded = outcome.suggestion.model_dump_json() if outcome.suggestion is not None else None
+            if row["status"] != "generating":
+                # A provider may complete after cancellation or timeout. Retain
+                # the first late suggestion on its receipt without reviving it.
+                if encoded and row["status"] in {"interrupted", "timed_out", "cancelled"}:
+                    db.execute("""UPDATE skill_generation_attempts SET suggestion_json=?, usage_json=COALESCE(usage_json,?)
+                                  WHERE attempt_id=? AND suggestion_json IS NULL""",
+                               (encoded, json.dumps(counts) if counts else None, attempt_id))
+                return False
+            db.execute("""UPDATE skill_generation_attempts SET status=?,route=?,elapsed_ms=?,usage_json=?,
+                          error_code=?,suggestion_json=? WHERE attempt_id=?""",
+                       (status, outcome.route, elapsed_ms, json.dumps(counts) if counts else None,
+                        error_code, encoded, attempt_id))
+            return True
+
+    def interrupt_generations(self) -> None:
+        """Opening the database under its process lease gives us exclusive recovery ownership."""
+        with self._store.transaction() as db:
+            db.execute("""UPDATE skill_generation_attempts SET status='interrupted',error_code='process_restarted'
+                          WHERE status='generating'""")
 
     def edit_draft(self, draft_id: str, *, expected_revision: int, data: SkillDraftData) -> SkillDraft:
         """Replace the editable document at an exact revision."""
@@ -234,7 +358,7 @@ class SkillRepository:
 
     def patch_draft(self, draft_id: str, *, expected_revision: int, changes: dict) -> SkillDraft:
         """Only the editor fields may change. Keep the original private evidence and cutoff."""
-        if not changes or changes.keys() - {"name", "content", "developer_note", "pending_inference"}:
+        if not changes or changes.keys() - {"name", "content", "developer_note", "pending_inference", "edited_lesson"}:
             raise ForgePilotError("invalid_skill_request", "Expected editable draft fields")
         with self._store.transaction() as db:
             row = _draft_row(db, draft_id)
@@ -250,10 +374,10 @@ class SkillRepository:
         _check_revision(row["revision"], expected_revision)
         if row["result_version"] is not None:
             raise ForgePilotError("skill_revision_conflict", "Reviewed drafts are closed; start a version revision")
-        _check_source(db, self._store.missions, row["source_mission_id"], data)
+        _check_source(db, self._store.missions, row["source_mission_id"], data, row["draft_id"])
         db.execute("""UPDATE skill_drafts SET data_json=?,revision=revision+1,updated_at=?
                       WHERE draft_id=?""", (data.model_dump_json(), now(), row["draft_id"]))
-        return _draft(_draft_row(db, row["draft_id"]))
+        return _with_latest_attempt(db, _draft(_draft_row(db, row["draft_id"])))
 
     def draft_from_version(self, skill_id: str, version: int, *, request_id: str) -> SkillDraft:
         """Copy the reusable fields of an exact version into a new private working draft."""

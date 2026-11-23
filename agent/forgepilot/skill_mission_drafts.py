@@ -12,8 +12,12 @@ from .errors import ForgePilotError
 from .mission_events import TERMINAL_MISSION_STATUSES
 from .skill_models import SkillDraft, SkillDraftData, SkillEvidenceRef
 
+# Model jobs verify entire immutable envelopes before projecting allowed fields.
+# Skip oversize records before loading a diff or an external payload.
+MAX_GENERATION_ARTIFACT_BYTES = 1_048_576
 
-def _evidence_items(content):
+
+def _evidence_items(content, *, change_summary=True):
     """Only public validation values can become recorded results.
 
     Other material stays in its private artifact. A pointer identifies the
@@ -31,6 +35,8 @@ def _evidence_items(content):
     elif isinstance(content, TaskSpec):
         yield "/objective", "source_context", None
     elif isinstance(content, ChangeSet):
+        if change_summary:
+            yield "/summary", "source_context", None
         for i in range(len(content.files)):
             yield f"/files/{i}/change_type", "source_context", None
 
@@ -55,22 +61,29 @@ def validate_mission_artifact_refs(missions, mission_id: str, refs) -> None:
                 raise ForgePilotError("invalid_skill_evidence", "Referenced artifact entry does not match its record")
 
 
-def _freeze_refs(db, missions, mission_id):
+def _freeze_refs(db, missions, mission_id, *, bounded=False):
     groups = []
     # Take the latest stored artifact of each relevant type. All reads share
     # the write transaction which pins both the Mission revision and the set
     # of existing artifacts (including those stored before admission).
     for kind in ("ValidationReport", "EvidenceBundle", "TaskSpec", "ChangeSet"):
-        row = db.execute("""SELECT artifact_id FROM artifacts WHERE task_id=? AND artifact_type=?
+        row = db.execute("""SELECT artifact_id,size_bytes FROM artifacts WHERE task_id=? AND artifact_type=?
                             ORDER BY rowid DESC LIMIT 1""", (mission_id, kind)).fetchone()
-        if row is None:
+        if row is None or (bounded and row["size_bytes"] > MAX_GENERATION_ARTIFACT_BYTES):
             continue
-        artifact = _owned_artifact(missions, mission_id, row["artifact_id"])
+        try:
+            artifact = _owned_artifact(missions, mission_id, row["artifact_id"])
+        except ForgePilotError:
+            if bounded:
+                # Preserve the new local note. The job can use the remaining
+                # verified kinds or finish with insufficient evidence.
+                continue
+            raise
         groups.append([
             SkillEvidenceRef(kind="artifact", record_id=artifact.artifact_id,
                              content_sha256=artifact.content_sha256, locator=locator,
                              classification=classification, recorded_value=value)
-            for locator, classification, value in islice(_evidence_items(artifact.content), 8)
+            for locator, classification, value in islice(_evidence_items(artifact.content, change_summary=bounded), 8)
         ])
     # Reserve room for each available type before taking secondary entries.
     return tuple(islice((ref for layer in zip_longest(*groups) for ref in layer if ref is not None), 8))
@@ -79,20 +92,26 @@ def _freeze_refs(db, missions, mission_id):
 def create_mission_draft(store, task_id: str, *, developer_note: str = "",
                          request_id: str | None = None) -> SkillDraft:
     request_id = str(uuid4()) if request_id is None else request_id
+    with store.transaction() as db:
+        return create_mission_draft_locked(store, db, task_id, developer_note, request_id, "manual_mission_draft")
+
+
+def create_mission_draft_locked(store, db, task_id, developer_note, request_id, operation):
     note = SkillDraftData(developer_note=developer_note)
     # Replaying the original intent must succeed even after edits, a new
     # artifact, or a later change of the Mission's state/revision.
-    fingerprint = content_sha256({"operation": "manual_mission_draft", "mission_id": task_id,
+    fingerprint = content_sha256({"operation": operation, "mission_id": task_id,
                                   "developer_note": note.developer_note})
-    with store.transaction() as db:
-        existing = store.skills._replayed_draft(db, request_id, fingerprint)
-        if existing is not None:
-            return existing
-        if not store.missions.is_admitted(task_id):
-            raise ForgePilotError("unknown_mission", "Mission does not exist")
-        run = store.missions.get_graph_run(task_id)
-        if run["status"] not in TERMINAL_MISSION_STATUSES:
-            raise ForgePilotError("mission_not_terminal", "A manual draft requires a terminal Mission")
-        refs = () if run["status"] == "skipped" else _freeze_refs(db, store.missions, task_id)
-        data = note.model_copy(update={"evidence_revision": run["current_revision"], "evidence_refs": refs})
-        return store.skills._insert_draft(db, request_id, data, source_mission_id=task_id, create_hash=fingerprint)
+    bounded = operation == "model_mission_draft"
+    existing = store.skills._replayed_draft(db, request_id, fingerprint, verify_artifacts=not bounded)
+    if existing is not None:
+        return existing
+    if not store.missions.is_admitted(task_id):
+        raise ForgePilotError("unknown_mission", "Mission does not exist")
+    run = store.missions.get_graph_run(task_id)
+    if run["status"] not in TERMINAL_MISSION_STATUSES:
+        raise ForgePilotError("mission_not_terminal", "A draft requires a terminal Mission")
+    refs = () if run["status"] == "skipped" else _freeze_refs(
+        db, store.missions, task_id, bounded=bounded)
+    data = note.model_copy(update={"evidence_revision": run["current_revision"], "evidence_refs": refs})
+    return store.skills._insert_draft(db, request_id, data, source_mission_id=task_id, create_hash=fingerprint)

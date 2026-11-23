@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .skill_models import SelectedSkill, SkillDraft, SkillDraftContent, SkillIdentity, SkillStage
+from .skill_suggestion import EditedLesson
 
 
 MissionID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")]
@@ -168,8 +169,21 @@ SkillRequestID = Annotated[str, Field(min_length=1, max_length=256, pattern=r"\S
 
 
 class CreateSkillDraft(MissionRequest):
+    generation_mode: Literal["manual", "model"] = Field(
+        default="manual", description="Choose model explicitly to start one asynchronous generation attempt.")
     developer_note: str = Field(default="", max_length=4096, description="Private developer observation.")
     request_id: SkillRequestID | None = Field(default=None, description="Reuse this ID when retrying creation.")
+
+
+class RegenerateSkillDraft(MissionRequest):
+    """Start another attempt for an open Mission draft at its current editor revision."""
+
+    expected_revision: MissionRevision
+    request_id: SkillRequestID
+
+
+class CancelSkillGeneration(MissionRequest):
+    """The URL identifies the exact attempt to stop."""
 
 
 class SaveSkillDraft(MissionRequest):
@@ -181,6 +195,7 @@ class SaveSkillDraft(MissionRequest):
     content: SkillDraftContent = Field(default_factory=SkillDraftContent, description="Complete replacement of the editable guidance.")
     developer_note: str = Field(default="", max_length=4096)
     pending_inference: str = Field(default="", max_length=4096)
+    edited_lesson: EditedLesson | None = Field(default=None, description="Private revision of the cited suggestion.")
 
     @model_validator(mode="after")
     def require_edit(self):

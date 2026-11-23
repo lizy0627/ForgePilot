@@ -391,7 +391,7 @@ def test_initialize_reopen_three_tables_and_version(tmp_path):
             "task_graph_runs","task_node_attempts","artifacts","artifact_relations","approvals","model_calls",
             "checkpoints","checkpoint_intents","workspace_records","validation_runs","security_events",
             "graph_node_states","graph_run_inputs","graph_node_results","graph_events","writer_scope_expansions",
-            "skills","skill_versions","skill_drafts","mission_skill_snapshots",
+            "skills","skill_versions","skill_drafts","mission_skill_snapshots","skill_generation_attempts",
         }
         assert store._db.execute("PRAGMA foreign_keys").fetchone()[0]==1
         store.close()
@@ -409,7 +409,8 @@ def test_schema_version_ledger_has_unique_contiguous_ownership():
     assert SchemaVersion.GRAPH_ORCHESTRATOR == 9
     assert SchemaVersion.GRAPH_CHECKPOINT_RECOVERY == 10
     assert SchemaVersion.WRITER_SCOPE_EXPANSION == 11
-    assert SchemaVersion.LOCAL_SKILL_LIBRARY == CURRENT_SCHEMA_VERSION == 12
+    assert SchemaVersion.LOCAL_SKILL_LIBRARY == 12
+    assert SchemaVersion.SKILL_GENERATION_ATTEMPTS == CURRENT_SCHEMA_VERSION == 13
     assert not requires_upgrade_backup(0)
     assert all(requires_upgrade_backup(version) for version in versions[:-1])
     assert not requires_upgrade_backup(int(CURRENT_SCHEMA_VERSION))

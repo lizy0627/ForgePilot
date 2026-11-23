@@ -81,3 +81,24 @@ def create_skill_schema(db: sqlite3.Connection) -> None:
     )
     for statement in statements:
         db.execute(statement)
+
+
+def create_generation_schema(db: sqlite3.Connection) -> None:
+    db.execute("""CREATE TABLE skill_generation_attempts(
+        sequence INTEGER PRIMARY KEY,
+        attempt_id TEXT NOT NULL UNIQUE,
+        draft_id TEXT NOT NULL REFERENCES skill_drafts(draft_id) ON DELETE CASCADE,
+        request_id TEXT NOT NULL UNIQUE,
+        operation TEXT NOT NULL CHECK(operation IN ('create','regenerate')),
+        start_revision INTEGER NOT NULL CHECK(start_revision >= 1),
+        status TEXT NOT NULL CHECK(status IN ('generating','ready','failed','interrupted','cancelled','timed_out')),
+        template_version TEXT NOT NULL,
+        route TEXT,
+        elapsed_ms INTEGER CHECK(elapsed_ms >= 0),
+        usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)),
+        error_code TEXT,
+        suggestion_json TEXT CHECK(suggestion_json IS NULL OR json_valid(suggestion_json))
+        ) STRICT""")
+    db.execute("""CREATE UNIQUE INDEX skill_generation_active ON skill_generation_attempts(draft_id)
+                  WHERE status='generating'""")
+    db.execute("CREATE INDEX skill_generation_latest ON skill_generation_attempts(draft_id,sequence DESC)")

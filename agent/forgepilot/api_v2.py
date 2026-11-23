@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import Header, Path, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 
 from .api_v2_models import (
@@ -12,7 +13,8 @@ from .api_v2_models import (
     MissionID, MissionHash, MissionPage, MissionRecoveryResponse, MissionResponse, MissionResume, MissionRetry,
     MissionValidation, PreviewMission, MissionSourcePreview, MissionScopeExpansion,
     SkillRecommendationRequest, SkillRecommendations, MissionSkills,
-    CreateSkillDraft, SaveSkillDraft, PublishLocalSkill, CreateSkillRevisionDraft,
+    CancelSkillGeneration, CreateSkillDraft, RegenerateSkillDraft, SaveSkillDraft, PublishLocalSkill,
+    CreateSkillRevisionDraft,
     DisableSkill, SkillDraftPage, SkillPage,
 )
 from .errors import ForgePilotError
@@ -20,7 +22,7 @@ from .mcp import decode
 from .orchestration.models import NodeStatus
 from .skill_api_contract import SKILL_ERRORS, skill_responses
 from .skill_mission_drafts import create_mission_draft
-from .skill_models import SkillDraft, SkillIdentity, SkillVersion
+from .skill_models import SkillDraft, SkillGenerationAttempt, SkillIdentity, SkillVersion
 from .skill_recommendations import recommend_skills
 
 
@@ -52,6 +54,11 @@ V2_ERROR_STATUS = {
 SkillID = Annotated[str, Path(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$")]
 PageSize = Annotated[int, Query(ge=1, le=100)]
 PageOffset = Annotated[int, Query(ge=0, le=2**63 - 2)]
+GENERATION_ACCEPTED = {
+    "model": SkillDraft,
+    "description": "Model generation request persisted. Location identifies the attempt for this request ID.",
+    "headers": {"Location": {"description": "Attempt status URL.", "schema": {"type": "string"}}},
+}
 
 
 class MissionRequestGuard:
@@ -100,9 +107,14 @@ class MissionRequestGuard:
         await self.app(scope, replay, send)
 
 
-def register_skill_routes(app, store):
+def register_skill_routes(app, store, draft_jobs):
     skills = store.skills
     errors = {status: {"model": MissionErrorResponse} for status in (400, 401, 403, 413, 415, 422, 500, 503)}
+
+    def accepted(response, draft, attempt_id):
+        response.status_code = 202
+        response.headers["Location"] = f"/api/v2/skill-drafts/{draft.draft_id}/attempts/{attempt_id}"
+        return draft
 
     @app.post("/api/v2/skills/recommendations", response_model=SkillRecommendations, responses=errors)
     def skill_recommendations(body: SkillRecommendationRequest):
@@ -118,19 +130,40 @@ def register_skill_routes(app, store):
         return {"recommendations": matches}
 
     @app.post("/api/v2/missions/{task_id}/skill-drafts", response_model=SkillDraft, status_code=201,
-              responses=skill_responses("unknown_mission", "mission_not_terminal", "skill_request_conflict",
-                                        "invalid_skill_evidence", write=True))
-    def create_mission_skill_draft(task_id: MissionID, body: CreateSkillDraft):
-        """Freeze the terminal Mission revision and private evidence in a manual draft.
+              responses={202: GENERATION_ACCEPTED,
+                         **skill_responses("unknown_mission", "mission_not_terminal", "skill_request_conflict",
+                                           "invalid_skill_evidence", write=True)})
+    async def create_mission_skill_draft(task_id: MissionID, body: CreateSkillDraft, response: Response):
+        """Freeze the terminal Mission revision and private evidence in a local draft.
 
         Succeeded, historical completed, failed and cancelled Missions can supply up to eight
         evidence items. A skipped Mission accepts a note only. Interrupted and retryable
         Missions return mission_not_terminal. No model configuration is required.
 
-        Supply the same request_id on retries to recover the original draft and its latest edits.
-        Omitting the ID creates a new draft on each call.
+        Manual creation returns 201. Choose generation_mode=model to create a draft and
+        an attempt atomically (202). Poll the draft by ID for the outcome. When evidence,
+        policy or the configured route cannot support generation, the note is still editable.
+        Reuse request_id on retries. Omitting the ID creates a new draft on each call.
         """
-        return create_mission_draft(store, task_id, **body.model_dump())
+        if body.generation_mode == "model":
+            draft, attempt_id = await draft_jobs.create(task_id, developer_note=body.developer_note,
+                                                        request_id=body.request_id)
+            return accepted(response, draft, attempt_id)
+        return await run_in_threadpool(create_mission_draft, store, task_id, developer_note=body.developer_note,
+                                       request_id=body.request_id)
+
+    @app.post("/api/v2/skill-drafts/{draft_id}/regenerate", response_model=SkillDraft, status_code=202,
+              responses={202: GENERATION_ACCEPTED,
+                         **skill_responses("skill_draft_not_found", "skill_revision_conflict", "skill_request_conflict",
+                                           "invalid_skill_evidence", write=True)})
+    async def regenerate_skill_draft(draft_id: MissionID, body: RegenerateSkillDraft, response: Response):
+        """Explicitly request one new suggestion using the draft's frozen evidence.
+
+        Poll GET /api/v2/skill-drafts/{draft_id}. Generation writes to its attempt and preserves
+        editor fields. Repeat the request ID and expected revision to replay the same operation.
+        """
+        draft, attempt_id = await draft_jobs.regenerate(draft_id, **body.model_dump())
+        return accepted(response, draft, attempt_id)
 
     @app.get("/api/v2/skill-drafts", response_model=SkillDraftPage, responses=skill_responses("invalid_skill_evidence"))
     def list_skill_drafts(limit: PageSize = 20, offset: PageOffset = 0, source_mission_id: MissionID | None = None):
@@ -146,6 +179,18 @@ def register_skill_routes(app, store):
         """
         return skills.get_draft(draft_id)
 
+    @app.get("/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}", response_model=SkillGenerationAttempt,
+             responses=skill_responses("skill_attempt_not_found"))
+    def get_skill_generation_attempt(draft_id: MissionID, attempt_id: MissionID):
+        """Read the outcome for one attempt, even after the developer requests another."""
+        return skills.get_attempt(draft_id, attempt_id)
+
+    @app.post("/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}/cancel", response_model=SkillGenerationAttempt,
+              responses=skill_responses("skill_attempt_not_found", write=True))
+    async def cancel_skill_generation(draft_id: MissionID, attempt_id: MissionID, body: CancelSkillGeneration):
+        """Stop the identified attempt. Repeated cancellation returns its stored outcome."""
+        return await draft_jobs.cancel(draft_id, attempt_id)
+
     @app.patch("/api/v2/skill-drafts/{draft_id}", response_model=SkillDraft,
                responses=skill_responses("skill_draft_not_found", "skill_revision_conflict",
                                          "invalid_skill_evidence", write=True))
@@ -153,7 +198,10 @@ def register_skill_routes(app, store):
         """Save editor fields at expected_revision. Saving leaves recommendations unchanged.
 
         Omitted top-level fields keep their values. Sending content replaces the complete
-        guidance document. Repeating the last successful save returns the saved revision.
+        guidance document. Use edited_lesson to keep a private, editable copy of the six
+        suggested fields and the developer's evidence assessment alongside the original
+        attempt. Review reusable guidance in content before publishing. Repeating the
+        last successful save returns the saved revision.
         On skill_revision_conflict retain local edits and reload the draft before merging.
         """
         return skills.patch_draft(draft_id, expected_revision=body.expected_revision,

@@ -1,6 +1,6 @@
 """Thin FastAPI adapter for the existing task service and ordered session events."""
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import asyncio
 import hmac
 import json
@@ -29,6 +29,7 @@ from .api_v2 import MissionRequestGuard, V2_ERROR_STATUS, register_mission_route
 from .mission_host import MissionHost
 from .mission_events import MissionEventStream
 from .runtime_control import register_runtime_routes
+from .skill_draft_jobs import SkillDraftJobs
 
 MAX_API_BODY = 1_048_576
 MAX_API_TARGET = 8_192
@@ -145,7 +146,8 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                conversation_stream_max_subscribers=8,
                chat_factory=None, summary_factory=None, mcp_disabled=False, legacy_mcp_config=None,
                model_client_closer=None, rag_coordinator=None, mission_factory=None,
-               mission_stream_max_subscribers=8, api_token=None, development_config=None, git_executable=None):
+               mission_stream_max_subscribers=8, api_token=None, development_config=None, git_executable=None,
+               skill_gateway=None, skill_data_policy=None):
     if api_token is not None and (not isinstance(api_token, str) or not api_token or not api_token.isascii()):
         raise ValueError("Local API token must be nonempty ASCII")
     host = TaskHost(service_factory, store=store, max_tasks=max_tasks, mcp_disabled=mcp_disabled,
@@ -160,23 +162,19 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
         mcp_disabled=mcp_disabled, development_config=development_config, git_executable=git_executable)
     mission_streams = MissionEventStream(host.store, heartbeat_seconds=heartbeat_seconds,
                                         max_subscribers=mission_stream_max_subscribers)
+    draft_jobs = SkillDraftJobs(host.store, host.runtime, skill_gateway, skill_data_policy, capacity=host.capacity)
 
     @asynccontextmanager
     async def lifespan(app):
         await host.start()
-        try:
+        async with AsyncExitStack() as cleanup:
+            cleanup.push_async_callback(host.close, close_resources=model_client_closer)
+            cleanup.push_async_callback(conversations.close)
+            cleanup.push_async_callback(missions.close)
+            cleanup.push_async_callback(draft_jobs.close)
+            cleanup.push_async_callback(host.runtime.begin_shutdown)
+            await draft_jobs.start()
             yield
-        finally:
-            try:
-                try:
-                    await host.runtime.begin_shutdown()
-                finally:
-                    await missions.close()
-            finally:
-                try:
-                    await conversations.close()
-                finally:
-                    await host.close(close_resources=model_client_closer)
 
     app = FastAPI(title="ForgePilot local Agent API", version="1.0.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
@@ -257,7 +255,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
     register_mission_routes(app, missions, mission_streams)
-    register_skill_routes(app, host.store)
+    register_skill_routes(app, host.store, draft_jobs)
     register_runtime_routes(app, host)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)

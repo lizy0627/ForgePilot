@@ -88,9 +88,64 @@ def _manual_skill_examples():
     }
 
 
+def _skill_generation_examples(manual):
+    draft = manual["skill_draft_with_validation_response"]
+    attempt_id = "99999999-9999-4999-8999-999999999999"
+    path = f"/api/v2/skill-drafts/{draft['draft_id']}"
+    attempt_path = f"{path}/attempts/{attempt_id}"
+    attempt = {
+        "attempt_id": attempt_id, "draft_id": draft["draft_id"], "start_revision": draft["revision"],
+        "status": "generating", "template_version": "skill-draft.v1", "route": None,
+        "elapsed_ms": None, "usage": None, "error_code": None, "suggestion": None,
+    }
+    accepted = {**draft, "latest_attempt": attempt, "data": {**draft["data"], "generation_status": "generating"}}
+    note = "先看公开验证结果，再定位失败阶段。"
+    suggestion = {
+        "phenomenon": "改动后公开验证失败。",
+        "priority_checks": "先查看失败阶段及其退出码。",
+        "decision_branches": "构建失败时先查构建步骤，构建成功而测试失败时检查测试结果。",
+        "stop_conditions": "确定第一个失败阶段后，转入对应验证。",
+        "boundaries": "适用于有公开验证记录的任务。",
+        "conclusion": "本次验证失败，根因仍待确认。",
+        "basis": [
+            {"key": "E-e8d95748107aceb9-1", "classification": "verified_result",
+             "reference": draft["data"]["evidence_refs"][0]},
+            {"key": "unknown", "classification": "pending_inference", "reference": None},
+        ],
+    }
+    ready = {**attempt, "status": "ready", "route": "summary/local", "elapsed_ms": 420,
+             "usage": {"prompt_tokens": 180, "completion_tokens": 64}, "suggestion": suggestion}
+    return {
+        "skill_generate_request": {"generation_mode": "model", "request_id": "write-lesson", "developer_note": note},
+        "skill_generate_accepted_response": {
+            **accepted, "data": {**accepted["data"], "developer_note": note}},
+        "skill_generation_attempt_request": {"method": "GET", "path": attempt_path},
+        "skill_generation_ready_response": ready,
+        "skill_generation_insufficient_response": {
+            **attempt, "status": "failed", "route": "summary/local", "elapsed_ms": 3,
+            "error_code": "skill_draft_evidence_insufficient"},
+        "skill_generation_interrupted_response": {**attempt, "status": "interrupted",
+                                                 "error_code": "generation_interrupted"},
+        "skill_regenerate_request": {"expected_revision": draft["revision"], "request_id": "try-again"},
+        "skill_cancel_generation_request": {"method": "POST", "path": attempt_path + "/cancel", "body": {}},
+        "skill_save_edited_suggestion_request": {
+            "expected_revision": draft["revision"], "name": "定位公开验证失败阶段",
+            "edited_lesson": {**{key: value for key, value in suggestion.items() if key != "basis"},
+                              "attempt_id": attempt_id, "conclusion": "需核对第一个失败阶段。",
+                              "basis_note": "状态记录支持验证失败，第二处引用仍待确认。"},
+            "content": {"triggers": ["公开验证失败"], "stages": ["impact_test_analysis"],
+                        "body": "查看第一个失败的退出码。构建失败就检查构建日志，测试失败就核对用例。定位阶段后停止排查。",
+                        "boundaries": ["需要有可复核的公开验证结果。"]},
+            "developer_note": "验证记录显示失败。", "pending_inference": "需要进一步核对失败阶段。",
+        },
+    }
+
+
 def examples():
     result = json.loads(Path(__file__).with_name("protocol_examples.v1.json").read_text(encoding="utf-8"))
-    result.update(_manual_skill_examples())
+    manual = _manual_skill_examples()
+    result.update(manual)
+    result.update(_skill_generation_examples(manual))
     result.update({
         "skill_recommendations_request": {
             "description": "保存成功但列表仍显示旧值", "task_type": "bug_fix", "project_tags": ["Qt"],

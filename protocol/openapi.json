@@ -24,6 +24,13 @@
         "title": "ApproveTask",
         "type": "object"
       },
+      "CancelSkillGeneration": {
+        "additionalProperties": false,
+        "description": "The URL identifies the exact attempt to stop.",
+        "properties": {},
+        "title": "CancelSkillGeneration",
+        "type": "object"
+      },
       "CancelTask": {
         "additionalProperties": false,
         "properties": {
@@ -676,6 +683,16 @@
             "title": "Developer Note",
             "type": "string"
           },
+          "generation_mode": {
+            "default": "manual",
+            "description": "Choose model explicitly to start one asynchronous generation attempt.",
+            "enum": [
+              "manual",
+              "model"
+            ],
+            "title": "Generation Mode",
+            "type": "string"
+          },
           "request_id": {
             "anyOf": [
               {
@@ -767,6 +784,70 @@
           "enabled"
         ],
         "title": "DisableSkill",
+        "type": "object"
+      },
+      "EditedLesson": {
+        "additionalProperties": false,
+        "description": "Private editor copy. The attempt retains the original citation receipts.",
+        "properties": {
+          "attempt_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "title": "Attempt Id",
+            "type": "string"
+          },
+          "basis_note": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Basis Note",
+            "type": "string"
+          },
+          "boundaries": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Boundaries",
+            "type": "string"
+          },
+          "conclusion": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "decision_branches": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Decision Branches",
+            "type": "string"
+          },
+          "phenomenon": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Phenomenon",
+            "type": "string"
+          },
+          "priority_checks": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Priority Checks",
+            "type": "string"
+          },
+          "stop_conditions": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Stop Conditions",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phenomenon",
+          "priority_checks",
+          "decision_branches",
+          "stop_conditions",
+          "boundaries",
+          "conclusion",
+          "attempt_id"
+        ],
+        "title": "EditedLesson",
         "type": "object"
       },
       "ErrorDetail": {
@@ -3937,6 +4018,31 @@
         "title": "RagIndexStatusResponse",
         "type": "object"
       },
+      "RegenerateSkillDraft": {
+        "additionalProperties": false,
+        "description": "Start another attempt for an open Mission draft at its current editor revision.",
+        "properties": {
+          "expected_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "request_id"
+        ],
+        "title": "RegenerateSkillDraft",
+        "type": "object"
+      },
       "RuntimeStatus": {
         "properties": {
           "active_count": {
@@ -3969,6 +4075,17 @@
             "maxLength": 4096,
             "title": "Developer Note",
             "type": "string"
+          },
+          "edited_lesson": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EditedLesson"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Private revision of the cited suggestion."
           },
           "expected_revision": {
             "maximum": 9.223372036854776e+18,
@@ -4188,6 +4305,16 @@
             "title": "Draft Id",
             "type": "string"
           },
+          "latest_attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillGenerationAttempt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "result_skill_id": {
             "anyOf": [
               {
@@ -4386,6 +4513,16 @@
             "title": "Developer Note",
             "type": "string"
           },
+          "edited_lesson": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EditedLesson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "evidence_refs": {
             "default": [],
             "items": {
@@ -4414,7 +4551,9 @@
               "generating",
               "ready",
               "failed",
-              "interrupted"
+              "interrupted",
+              "cancelled",
+              "timed_out"
             ],
             "title": "Generation Status",
             "type": "string"
@@ -4551,6 +4690,112 @@
           "record_id"
         ],
         "title": "SkillEvidenceRef",
+        "type": "object"
+      },
+      "SkillGenerationAttempt": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "string"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed Ms"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9_]{1,128}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "start_revision": {
+            "minimum": 1.0,
+            "title": "Start Revision",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "generating",
+              "ready",
+              "failed",
+              "interrupted",
+              "cancelled",
+              "timed_out"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillSuggestion"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "template_version": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Template Version",
+            "type": "string"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "draft_id",
+          "start_revision",
+          "status",
+          "template_version"
+        ],
+        "title": "SkillGenerationAttempt",
         "type": "object"
       },
       "SkillIdentity": {
@@ -4814,6 +5059,67 @@
         "title": "SkillRecommendations",
         "type": "object"
       },
+      "SkillSuggestion": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "items": {
+              "$ref": "#/components/schemas/SuggestionBasis"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Basis",
+            "type": "array"
+          },
+          "boundaries": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Boundaries",
+            "type": "string"
+          },
+          "conclusion": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "decision_branches": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Decision Branches",
+            "type": "string"
+          },
+          "phenomenon": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Phenomenon",
+            "type": "string"
+          },
+          "priority_checks": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Priority Checks",
+            "type": "string"
+          },
+          "stop_conditions": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Stop Conditions",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phenomenon",
+          "priority_checks",
+          "decision_branches",
+          "stop_conditions",
+          "boundaries",
+          "conclusion",
+          "basis"
+        ],
+        "title": "SkillSuggestion",
+        "type": "object"
+      },
       "SkillVersion": {
         "additionalProperties": false,
         "properties": {
@@ -4854,6 +5160,52 @@
           "created_at"
         ],
         "title": "SkillVersion",
+        "type": "object"
+      },
+      "SuggestionBasis": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "enum": [
+              "source_context",
+              "developer_observation",
+              "pending_inference",
+              "verified_result"
+            ],
+            "title": "Classification",
+            "type": "string"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9_.:-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillEvidenceRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "classification",
+          "reference"
+        ],
+        "title": "SuggestionBasis",
         "type": "object"
       },
       "SummaryState": {
@@ -12737,7 +13089,7 @@
     },
     "/api/v2/missions/{task_id}/skill-drafts": {
       "post": {
-        "description": "Freeze the terminal Mission revision and private evidence in a manual draft.\n\nSucceeded, historical completed, failed and cancelled Missions can supply up to eight\nevidence items. A skipped Mission accepts a note only. Interrupted and retryable\nMissions return mission_not_terminal. No model configuration is required.\n\nSupply the same request_id on retries to recover the original draft and its latest edits.\nOmitting the ID creates a new draft on each call.",
+        "description": "Freeze the terminal Mission revision and private evidence in a local draft.\n\nSucceeded, historical completed, failed and cancelled Missions can supply up to eight\nevidence items. A skipped Mission accepts a note only. Interrupted and retryable\nMissions return mission_not_terminal. No model configuration is required.\n\nManual creation returns 201. Choose generation_mode=model to create a draft and\nan attempt atomically (202). Poll the draft by ID for the outcome. When evidence,\npolicy or the configured route cannot support generation, the note is still editable.\nReuse request_id on retries. Omitting the ID creates a new draft on each call.",
         "operationId": "create_mission_skill_draft_api_v2_missions__task_id__skill_drafts_post",
         "parameters": [
           {
@@ -12771,6 +13123,24 @@
               }
             },
             "description": "Successful Response"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Model generation request persisted. Location identifies the attempt for this request ID.",
+            "headers": {
+              "Location": {
+                "description": "Attempt status URL.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -13446,7 +13816,7 @@
         "summary": "Get Skill Draft"
       },
       "patch": {
-        "description": "Save editor fields at expected_revision. Saving leaves recommendations unchanged.\n\nOmitted top-level fields keep their values. Sending content replaces the complete\nguidance document. Repeating the last successful save returns the saved revision.\nOn skill_revision_conflict retain local edits and reload the draft before merging.",
+        "description": "Save editor fields at expected_revision. Saving leaves recommendations unchanged.\n\nOmitted top-level fields keep their values. Sending content replaces the complete\nguidance document. Use edited_lesson to keep a private, editable copy of the six\nsuggested fields and the developer's evidence assessment alongside the original\nattempt. Review reusable guidance in content before publishing. Repeating the\nlast successful save returns the saved revision.\nOn skill_revision_conflict retain local edits and reload the draft before merging.",
         "operationId": "save_skill_draft_api_v2_skill_drafts__draft_id__patch",
         "parameters": [
           {
@@ -13593,6 +13963,278 @@
           }
         },
         "summary": "Save Skill Draft"
+      }
+    },
+    "/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}": {
+      "get": {
+        "description": "Read the outcome for one attempt, even after the developer requests another.",
+        "operationId": "get_skill_generation_attempt_api_v2_skill_drafts__draft_id__attempts__attempt_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attempt_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Attempt Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillGenerationAttempt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_attempt_not_found: The draft has no generation attempt with this ID."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: parameters or fields failed validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Get Skill Generation Attempt"
+      }
+    },
+    "/api/v2/skill-drafts/{draft_id}/attempts/{attempt_id}/cancel": {
+      "post": {
+        "description": "Stop the identified attempt. Repeated cancellation returns its stored outcome.",
+        "operationId": "cancel_skill_generation_api_v2_skill_drafts__draft_id__attempts__attempt_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attempt_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Attempt Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelSkillGeneration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillGenerationAttempt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_attempt_not_found: The draft has no generation attempt with this ID."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Cancel Skill Generation"
       }
     },
     "/api/v2/skill-drafts/{draft_id}/publish-local": {
@@ -13744,6 +14386,165 @@
           }
         },
         "summary": "Publish Local Skill"
+      }
+    },
+    "/api/v2/skill-drafts/{draft_id}/regenerate": {
+      "post": {
+        "description": "Explicitly request one new suggestion using the draft's frozen evidence.\n\nPoll GET /api/v2/skill-drafts/{draft_id}. Generation writes to its attempt and preserves\neditor fields. Repeat the request ID and expected revision to replay the same operation.",
+        "operationId": "regenerate_skill_draft_api_v2_skill_drafts__draft_id__regenerate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegenerateSkillDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Model generation request persisted. Location identifies the attempt for this request ID.",
+            "headers": {
+              "Location": {
+                "description": "Attempt status URL.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_draft_not_found: The draft does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_revision_conflict: The revision changed, the draft was closed, or the base version was superseded or disabled. Keep local edits and reload before merging. skill_request_conflict: The request ID already identifies a different operation or input."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Regenerate Skill Draft"
       }
     },
     "/api/v2/skills": {

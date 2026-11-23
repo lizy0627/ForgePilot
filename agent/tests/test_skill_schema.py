@@ -40,7 +40,7 @@ def test_v11_upgrade_keeps_history_and_backs_up_once(tmp_path):
     path = tmp_path / "upgrade.sqlite3"
     conversation, old_schema = v11_database(path)
     with closing(SqliteEventStore(path)) as store:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == SchemaVersion.LOCAL_SKILL_LIBRARY
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == SchemaVersion.SKILL_GENERATION_ATTEMPTS
         assert store.conversation_detail(conversation)["title"] == "升级前的历史"
         assert_v11(store.migration_backup_path, conversation, old_schema)
     with closing(SqliteEventStore(path)) as reopened:

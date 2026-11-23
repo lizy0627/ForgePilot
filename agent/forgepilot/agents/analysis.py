@@ -9,7 +9,6 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 import json
-from urllib.parse import urlsplit
 
 from pydantic import Field
 
@@ -20,6 +19,7 @@ from ..errors import ForgePilotError
 from ..mission_observability import model_call, tool_call, validate_tool
 from ..models.accounting import ModelBudget
 from ..models.errors import category_of
+from ..models.routing import route_uses_cloud
 from ..orchestration.analysis_review import AnalysisReviewStore
 from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics, NodeResult, NodeStatus, NodeType, FailureKind, _plain_json
 from ..orchestration.node_handlers import HandlerRegistry, NodeExecutionError
@@ -49,11 +49,6 @@ STAGES = {
 }
 
 
-def _uses_cloud(route):
-    return any(profile and urlsplit(profile.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}
-               for profile in (route.primary, route.fallback))
-
-
 def validate_skill_routes(workflow, skills, data_policy):
     """Check the actual analyst roles and all provider candidates before admission or use."""
     for stage in sorted({stage for skill in skills for stage in skill.content.stages}):
@@ -70,7 +65,7 @@ def validate_skill_routes(workflow, skills, data_policy):
         except (AttributeError, ForgePilotError):
             raise ForgePilotError("skill_route_denied", f"Skill requires a valid model route for {stage}") from None
         local_only = any(skill.content.usage_scope == "local_only" for skill in skills if stage in skill.content.stages)
-        if (local_only or not data_policy.cloud_model_allowed) and _uses_cloud(route):
+        if (local_only or not data_policy.cloud_model_allowed) and route_uses_cloud(route):
             raise ForgePilotError("skill_route_denied", f"Skill requires local primary and fallback models for {stage}")
 
 
@@ -520,7 +515,7 @@ class AnalysisService:
         if policy.cloud_model_allowed:
             return
         route = self.gateway.router.validate_agent(definition)
-        if _uses_cloud(route):
+        if route_uses_cloud(route):
             raise ForgePilotError("policy_denied", "Data policy forbids the configured cloud model route")
 
     def _retrieval_for(self, policy):

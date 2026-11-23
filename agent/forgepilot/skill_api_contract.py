@@ -5,6 +5,7 @@ from .api_v2_models import MissionErrorResponse
 SKILL_ERRORS = {
     "unknown_mission": (404, "The source Mission does not exist."),
     "skill_draft_not_found": (404, "The draft does not exist."),
+    "skill_attempt_not_found": (404, "The draft has no generation attempt with this ID."),
     "skill_not_found": (404, "The skill or requested version does not exist."),
     "mission_not_terminal": (409, "The Mission is still active or recoverable."),
     "skill_request_conflict": (409, "The request ID already identifies a different operation or input."),

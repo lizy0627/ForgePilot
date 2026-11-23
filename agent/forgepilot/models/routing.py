@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from ..errors import ForgePilotError
 from .profiles import ModelConfiguration, ModelProfile
@@ -11,6 +12,11 @@ from .profiles import ModelConfiguration, ModelProfile
 class ResolvedRoute:
     primary: ModelProfile
     fallback: ModelProfile | None
+
+
+def route_uses_cloud(route: ResolvedRoute) -> bool:
+    return any(urlsplit(profile.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}
+               for profile in (route.primary, route.fallback) if profile)
 
 
 class ModelRouter:

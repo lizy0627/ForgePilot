@@ -8,6 +8,8 @@ import unicodedata
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .artifacts.models import Sha256Text
+from .skill_evidence_ref import SkillEvidenceRef
+from .skill_suggestion import EditedLesson, SkillSuggestion
 
 
 class _SkillModel(BaseModel):
@@ -85,31 +87,6 @@ class SkillContent(SkillDraftContent):
         return self
 
 
-class SkillEvidenceRef(_SkillModel):
-    """Artifact ID, MissionEvent.event_id (task_id:sequence), or graph node ID."""
-
-    kind: Literal["artifact", "event", "node"]
-    record_id: str = Field(min_length=1, max_length=300)
-    content_sha256: Sha256Text | None = None
-    # New manual drafts locate an allowlisted field within immutable artifact
-    # content. Omit these extensions for old, whole-record references.
-    locator: str | None = Field(default=None, min_length=1, max_length=128, exclude_if=not_)
-    classification: Literal["source_context", "developer_observation", "pending_inference",
-                            "verified_result"] | None = Field(default=None, exclude_if=not_)
-    recorded_value: str | None = Field(default=None, min_length=1, max_length=128, exclude_if=not_)
-
-    @model_validator(mode="after")
-    def require_artifact_digest(self):
-        if (self.kind == "artifact") != (self.content_sha256 is not None):
-            raise ValueError("Only artifact references carry a mandatory content SHA-256")
-        if (self.locator is None) != (self.classification is None) or (
-                self.locator is not None and self.kind != "artifact"):
-            raise ValueError("An item locator and classification require a specific artifact field")
-        if (self.recorded_value is not None) != (self.classification == "verified_result"):
-            raise ValueError("Only a verified result carries its recorded value")
-        return self
-
-
 class SkillDraftData(_SkillModel):
     """Local editor data. Only name and reviewed content are promoted."""
 
@@ -119,8 +96,9 @@ class SkillDraftData(_SkillModel):
     pending_inference: str = Field(default="", max_length=4_096, exclude_if=not_)
     evidence_revision: int | None = Field(default=None, ge=1)
     evidence_refs: tuple[SkillEvidenceRef, ...] = Field(default=(), max_length=8)
+    edited_lesson: EditedLesson | None = Field(default=None, exclude_if=not_)
     model_suggestion: str = Field(default="", max_length=4_096)
-    generation_status: Literal["manual", "generating", "ready", "failed", "interrupted"] = "manual"
+    generation_status: Literal["manual", "generating", "ready", "failed", "interrupted", "cancelled", "timed_out"] = "manual"
 
     _refs = field_validator("evidence_refs", mode="before")(_as_tuple)
 
@@ -130,7 +108,21 @@ class SkillDraftData(_SkillModel):
         return SkillContent.model_validate(self.content.model_dump())
 
 
+class SkillGenerationAttempt(_SkillModel):
+    attempt_id: str
+    draft_id: str
+    start_revision: int = Field(ge=1)
+    status: Literal["generating", "ready", "failed", "interrupted", "cancelled", "timed_out"]
+    template_version: str = Field(min_length=1, max_length=128)
+    route: str | None = Field(default=None, max_length=256)
+    elapsed_ms: int | None = Field(default=None, ge=0)
+    usage: dict[str, Annotated[int, Field(ge=0)]] | None = None
+    error_code: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,128}$")
+    suggestion: SkillSuggestion | None = None
+
+
 class SkillDraft(_SkillModel):
+    latest_attempt: SkillGenerationAttempt | None = Field(default=None, exclude_if=not_)
     draft_id: str
     source_mission_id: str | None = None
     revision: int = Field(ge=1)

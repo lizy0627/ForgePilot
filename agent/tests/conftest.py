@@ -36,7 +36,7 @@ def qt_draft():
 
 def drop_skill_schema(db):
     """Rebuild pre-v12 test databases after seeding their legacy records."""
-    for table in ("mission_skill_snapshots", "skill_drafts", "skill_versions", "skills"):
+    for table in ("skill_generation_attempts", "mission_skill_snapshots", "skill_drafts", "skill_versions", "skills"):
         db.execute(f'DROP TABLE "{table}"')
 
 
