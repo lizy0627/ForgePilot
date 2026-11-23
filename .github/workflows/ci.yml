@@ -140,6 +140,10 @@ jobs:
       - name: Qt offline HTTP and QML integration / develop, main and release
         if: github.event_name != 'pull_request'
         shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen:configfile=client/tests/desktop-screen.json
+          QT_QUICK_BACKEND: software
+          QT_QPA_FONTDIR: C:\Windows\Fonts
         run: ./scripts/ci-qt-integration.ps1
 
       - name: Deploy client runtime
