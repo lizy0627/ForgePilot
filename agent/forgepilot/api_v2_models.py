@@ -2,9 +2,9 @@
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .skill_models import SelectedSkill, SkillStage
+from .skill_models import SelectedSkill, SkillDraft, SkillDraftContent, SkillIdentity, SkillStage
 
 
 MissionID = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")]
@@ -162,6 +162,69 @@ class SkillRecommendation(BaseModel):
 
 class SkillRecommendations(BaseModel):
     recommendations: list[SkillRecommendation] = Field(max_length=3)
+
+
+SkillRequestID = Annotated[str, Field(min_length=1, max_length=256, pattern=r"\S")]
+
+
+class CreateSkillDraft(MissionRequest):
+    developer_note: str = Field(default="", max_length=4096, description="Private developer observation.")
+    request_id: SkillRequestID | None = Field(default=None, description="Reuse this ID when retrying creation.")
+
+
+class SaveSkillDraft(MissionRequest):
+    """Send one or more edited fields. Omitted fields retain their stored values."""
+
+    model_config = ConfigDict(json_schema_extra={"minProperties": 2})
+    expected_revision: MissionRevision
+    name: str = Field(default="", max_length=128)
+    content: SkillDraftContent = Field(default_factory=SkillDraftContent, description="Complete replacement of the editable guidance.")
+    developer_note: str = Field(default="", max_length=4096)
+    pending_inference: str = Field(default="", max_length=4096)
+
+    @model_validator(mode="after")
+    def require_edit(self):
+        if self.model_fields_set == {"expected_revision"}:
+            raise ValueError("Include at least one editable field")
+        return self
+
+
+class PublishLocalSkill(MissionRequest):
+    """Approve the exact saved draft revision. A retry must reuse the request ID and revision."""
+
+    expected_revision: MissionRevision
+    request_id: SkillRequestID
+
+
+class CreateSkillRevisionDraft(MissionRequest):
+    version: MissionRevision
+    request_id: SkillRequestID
+
+
+class DisableSkill(MissionRequest):
+    expected_revision: MissionRevision
+    enabled: Literal[False]
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def require_boolean_false(cls, value):
+        if value is not False:
+            raise ValueError("Set enabled to false to disable a skill")
+        return value
+
+
+class SkillDraftPage(BaseModel):
+    drafts: list[SkillDraft] = Field(max_length=100)
+    next_offset: int | None = Field(ge=0)
+
+
+class SkillListItem(SkillIdentity):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class SkillPage(BaseModel):
+    skills: list[SkillListItem] = Field(max_length=100)
+    next_offset: int | None = Field(ge=0)
 
 
 class SkillInjection(SelectedSkill):

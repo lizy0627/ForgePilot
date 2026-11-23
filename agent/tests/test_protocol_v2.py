@@ -11,10 +11,13 @@ from forgepilot.api_v2_models import (
     CreateMission, MissionApproval, MissionControl, MissionDelivery, MissionErrorResponse,
     MissionResume, MissionResponse, MissionRetry, MissionScopeExpansion,
     MissionNode, MissionSkills, SkillRecommendationRequest, SkillRecommendations,
+    CreateSkillDraft, CreateSkillRevisionDraft, DisableSkill, PublishLocalSkill,
+    SaveSkillDraft, SkillDraftPage, SkillPage,
 )
 from forgepilot.export_protocol import export, generated_protocol
 from forgepilot.mission_events import MissionEvent
 from forgepilot.protocol_examples import examples
+from forgepilot.skill_models import SkillDraft, SkillIdentity, SkillVersion
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +79,23 @@ def test_all_generated_protocol_artifacts_have_no_drift(tmp_path):
 def test_v2_request_examples_match_strict_transport_schemas():
     samples = examples()
     for name, model in (
+        ("skill_draft_create_request", CreateSkillDraft),
+        ("skill_draft_create_response", SkillDraft),
+        ("skill_draft_with_validation_response", SkillDraft),
+        ("skill_draft_save_request", SaveSkillDraft),
+        ("skill_draft_save_response", SkillDraft),
+        ("skill_draft_page_response", SkillDraftPage),
+        ("skill_draft_detail_response", SkillDraft),
+        ("skill_publish_local_request", PublishLocalSkill),
+        ("skill_publish_local_response", SkillVersion),
+        ("skill_page_response", SkillPage),
+        ("skill_version_detail_response", SkillVersion),
+        ("skill_revision_draft_request", CreateSkillRevisionDraft),
+        ("skill_revision_draft_response", SkillDraft),
+        ("skill_disable_request", DisableSkill),
+        ("skill_disable_response", SkillIdentity),
+        ("skill_save_conflict_error", MissionErrorResponse),
+        ("skill_evidence_mismatch_error", MissionErrorResponse),
         ("skill_recommendations_request", SkillRecommendationRequest),
         ("skill_recommendations_excluded_request", SkillRecommendationRequest),
         ("skill_recommendations_unmatched_request", SkillRecommendationRequest),

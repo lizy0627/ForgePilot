@@ -112,6 +112,49 @@ def test_private_evidence_requires_matching_mission_digest_and_revision(store, q
         assert store.skills.get_draft(draft.draft_id) == draft
 
 
+def test_read_and_review_recheck_private_evidence_after_draft_was_created(store, qt_draft):
+    for mission_id in (TASK_ID, str(uuid4())):
+        make_mission(store, mission_id)
+        artifact = create_artifact(task_id=mission_id, producer="orchestrator.v1", producer_node="work",
+                                   content=task_spec())
+        store.artifacts.put(artifact)
+        finish_mission(store, mission_id)
+    # A persisted reference from a different Mission must be rejected even if
+    # the artifact ID and digest agree with one another.
+    draft = store.skills.create_draft(request_id="working", data=qt_draft, source_mission_id=TASK_ID)
+    with store.transaction() as db:
+        cutoff = db.execute("SELECT current_revision FROM task_graph_runs WHERE task_id=?", (TASK_ID,)).fetchone()[0]
+        reference = SkillEvidenceRef(kind="artifact", record_id=artifact.artifact_id,
+                                     content_sha256=artifact.content_sha256)
+        forged = qt_draft.model_copy(update={"evidence_revision": cutoff, "evidence_refs": (reference,)})
+        db.execute("UPDATE skill_drafts SET data_json=? WHERE draft_id=?", (forged.model_dump_json(), draft.draft_id))
+
+    operations = (
+        lambda: store.skills.get_draft(draft.draft_id),
+        lambda: store.skills.list_draft_page(limit=1, offset=0),
+        lambda: store.skills.create_draft(request_id="working", data=qt_draft, source_mission_id=TASK_ID),
+        lambda: store.skills.publish_local(draft.draft_id, expected_revision=draft.revision, request_id="review"),
+    )
+    for read in operations:
+        with pytest.raises(ForgePilotError, match="invalid_skill_evidence"):
+            read()
+    assert store.skills.list_available() == []
+
+
+def test_patch_replay_after_restart_and_competing_edit_preserves_saved_fields(tmp_path, qt_draft):
+    path = tmp_path / "edits.sqlite3"
+    changes = {"name": "已核对的排查经验", "developer_note": "保留这条现场观察"}
+    with closing(SqliteEventStore(path)) as store:
+        draft = store.skills.create_draft(request_id="working", data=qt_draft)
+        saved = store.skills.patch_draft(draft.draft_id, expected_revision=draft.revision, changes=changes)
+        assert saved.data.content == draft.data.content and saved.revision == draft.revision + 1
+    with closing(SqliteEventStore(path)) as store:
+        assert store.skills.patch_draft(draft.draft_id, expected_revision=draft.revision, changes=changes) == saved
+        with pytest.raises(ForgePilotError, match="skill_revision_conflict"):
+            store.skills.patch_draft(draft.draft_id, expected_revision=draft.revision, changes={"name": "另一窗口"})
+        assert store.skills.get_draft(draft.draft_id) == saved
+
+
 def test_double_publish_and_persistent_request_replay(tmp_path, qt_draft):
     path = tmp_path / "review.sqlite3"
     with closing(SqliteEventStore(path)) as store:

@@ -666,6 +666,59 @@
         "title": "CreateMission",
         "type": "object"
       },
+      "CreateSkillDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "developer_note": {
+            "default": "",
+            "description": "Private developer observation.",
+            "maxLength": 4096,
+            "title": "Developer Note",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reuse this ID when retrying creation.",
+            "title": "Request Id"
+          }
+        },
+        "title": "CreateSkillDraft",
+        "type": "object"
+      },
+      "CreateSkillRevisionDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "request_id"
+        ],
+        "title": "CreateSkillRevisionDraft",
+        "type": "object"
+      },
       "CreateTask": {
         "additionalProperties": false,
         "properties": {
@@ -692,6 +745,28 @@
           "prompt"
         ],
         "title": "CreateTask",
+        "type": "object"
+      },
+      "DisableSkill": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "const": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "enabled"
+        ],
+        "title": "DisableSkill",
         "type": "object"
       },
       "ErrorDetail": {
@@ -3513,6 +3588,31 @@
         "title": "PreviewMission",
         "type": "object"
       },
+      "PublishLocalSkill": {
+        "additionalProperties": false,
+        "description": "Approve the exact saved draft revision. A retry must reuse the request ID and revision.",
+        "properties": {
+          "expected_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "request_id"
+        ],
+        "title": "PublishLocalSkill",
+        "type": "object"
+      },
       "RagIndexDeleted": {
         "properties": {
           "available": {
@@ -3855,6 +3955,46 @@
         "title": "RuntimeStatus",
         "type": "object"
       },
+      "SaveSkillDraft": {
+        "additionalProperties": false,
+        "description": "Send one or more edited fields. Omitted fields retain their stored values.",
+        "minProperties": 2,
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/SkillDraftContent",
+            "description": "Complete replacement of the editable guidance."
+          },
+          "developer_note": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Developer Note",
+            "type": "string"
+          },
+          "expected_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Name",
+            "type": "string"
+          },
+          "pending_inference": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Pending Inference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "SaveSkillDraft",
+        "type": "object"
+      },
       "SelectedSkill": {
         "additionalProperties": false,
         "description": "Exact reviewed identity accepted from the recommendation client.",
@@ -3882,6 +4022,576 @@
           "content_sha256"
         ],
         "title": "SelectedSkill",
+        "type": "object"
+      },
+      "SkillContent": {
+        "additionalProperties": false,
+        "description": "Only this validated payload is serialized and hashed for a version.",
+        "properties": {
+          "body": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "boundaries": {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Boundaries",
+            "type": "array"
+          },
+          "exclusions": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Exclusions",
+            "type": "array"
+          },
+          "keyword_groups": {
+            "default": [],
+            "items": {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 8,
+              "minItems": 2,
+              "type": "array"
+            },
+            "maxItems": 8,
+            "title": "Keyword Groups",
+            "type": "array"
+          },
+          "project_tags": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Project Tags",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "maximum": 1.0,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "stages": {
+            "items": {
+              "enum": [
+                "root_cause_analysis",
+                "impact_test_analysis"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Stages",
+            "type": "array"
+          },
+          "summary": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Summary",
+            "type": "string"
+          },
+          "task_types": {
+            "default": [],
+            "items": {
+              "enum": [
+                "bug_fix",
+                "feature"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Task Types",
+            "type": "array"
+          },
+          "triggers": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Triggers",
+            "type": "array"
+          },
+          "usage_scope": {
+            "default": "local_only",
+            "enum": [
+              "local_only",
+              "allowed_by_policy"
+            ],
+            "title": "Usage Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "stages",
+          "boundaries"
+        ],
+        "title": "SkillContent",
+        "type": "object"
+      },
+      "SkillDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "base_skill_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Skill Id"
+          },
+          "base_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/SkillDraftData"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "result_skill_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Skill Id"
+          },
+          "result_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Version"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source_mission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Mission Id"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id",
+          "revision",
+          "data",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SkillDraft",
+        "type": "object"
+      },
+      "SkillDraftContent": {
+        "additionalProperties": false,
+        "description": "An editor can save any subset of the execution fields.",
+        "properties": {
+          "body": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Body",
+            "type": "string"
+          },
+          "boundaries": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Boundaries",
+            "type": "array"
+          },
+          "exclusions": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Exclusions",
+            "type": "array"
+          },
+          "keyword_groups": {
+            "default": [],
+            "items": {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 8,
+              "minItems": 2,
+              "type": "array"
+            },
+            "maxItems": 8,
+            "title": "Keyword Groups",
+            "type": "array"
+          },
+          "project_tags": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Project Tags",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "maximum": 1.0,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "stages": {
+            "default": [],
+            "items": {
+              "enum": [
+                "root_cause_analysis",
+                "impact_test_analysis"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Stages",
+            "type": "array"
+          },
+          "summary": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Summary",
+            "type": "string"
+          },
+          "task_types": {
+            "default": [],
+            "items": {
+              "enum": [
+                "bug_fix",
+                "feature"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Task Types",
+            "type": "array"
+          },
+          "triggers": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Triggers",
+            "type": "array"
+          },
+          "usage_scope": {
+            "default": "local_only",
+            "enum": [
+              "local_only",
+              "allowed_by_policy"
+            ],
+            "title": "Usage Scope",
+            "type": "string"
+          }
+        },
+        "title": "SkillDraftContent",
+        "type": "object"
+      },
+      "SkillDraftData": {
+        "additionalProperties": false,
+        "description": "Local editor data. Only name and reviewed content are promoted.",
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/SkillDraftContent",
+            "default": {
+              "body": "",
+              "boundaries": [],
+              "exclusions": [],
+              "schema_version": 1,
+              "stages": [],
+              "triggers": [],
+              "usage_scope": "local_only"
+            }
+          },
+          "developer_note": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Developer Note",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SkillEvidenceRef"
+            },
+            "maxItems": 8,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "evidence_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Revision"
+          },
+          "generation_status": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "generating",
+              "ready",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Generation Status",
+            "type": "string"
+          },
+          "model_suggestion": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Model Suggestion",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Name",
+            "type": "string"
+          },
+          "pending_inference": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Pending Inference",
+            "type": "string"
+          }
+        },
+        "title": "SkillDraftData",
+        "type": "object"
+      },
+      "SkillDraftPage": {
+        "properties": {
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/SkillDraft"
+            },
+            "maxItems": 100,
+            "title": "Drafts",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          }
+        },
+        "required": [
+          "drafts",
+          "next_offset"
+        ],
+        "title": "SkillDraftPage",
+        "type": "object"
+      },
+      "SkillEvidenceRef": {
+        "additionalProperties": false,
+        "description": "Artifact ID, MissionEvent.event_id (task_id:sequence), or graph node ID.",
+        "properties": {
+          "classification": {
+            "anyOf": [
+              {
+                "enum": [
+                  "source_context",
+                  "developer_observation",
+                  "pending_inference",
+                  "verified_result"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Sha256"
+          },
+          "kind": {
+            "enum": [
+              "artifact",
+              "event",
+              "node"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locator"
+          },
+          "record_id": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_value": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded Value"
+          }
+        },
+        "required": [
+          "kind",
+          "record_id"
+        ],
+        "title": "SkillEvidenceRef",
+        "type": "object"
+      },
+      "SkillIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "current_version": {
+            "minimum": 1.0,
+            "title": "Current Version",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "skill_id": {
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "builtin",
+              "team"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "skill_id",
+          "source",
+          "current_version",
+          "enabled",
+          "revision"
+        ],
+        "title": "SkillIdentity",
         "type": "object"
       },
       "SkillInjection": {
@@ -3925,6 +4635,84 @@
           "attempt"
         ],
         "title": "SkillInjection",
+        "type": "object"
+      },
+      "SkillListItem": {
+        "additionalProperties": false,
+        "properties": {
+          "current_version": {
+            "minimum": 1.0,
+            "title": "Current Version",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "skill_id": {
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "builtin",
+              "team"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "skill_id",
+          "source",
+          "current_version",
+          "enabled",
+          "revision",
+          "name"
+        ],
+        "title": "SkillListItem",
+        "type": "object"
+      },
+      "SkillPage": {
+        "properties": {
+          "next_offset": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/SkillListItem"
+            },
+            "maxItems": 100,
+            "title": "Skills",
+            "type": "array"
+          }
+        },
+        "required": [
+          "skills",
+          "next_offset"
+        ],
+        "title": "SkillPage",
         "type": "object"
       },
       "SkillRecommendation": {
@@ -4024,6 +4812,48 @@
           "recommendations"
         ],
         "title": "SkillRecommendations",
+        "type": "object"
+      },
+      "SkillVersion": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/SkillContent"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "skill_id": {
+            "title": "Skill Id",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "skill_id",
+          "version",
+          "name",
+          "content",
+          "content_sha256",
+          "created_at"
+        ],
+        "title": "SkillVersion",
         "type": "object"
       },
       "SummaryState": {
@@ -11905,6 +12735,157 @@
         "summary": "Mission Scope Expansion"
       }
     },
+    "/api/v2/missions/{task_id}/skill-drafts": {
+      "post": {
+        "description": "Freeze the terminal Mission revision and private evidence in a manual draft.\n\nSucceeded, historical completed, failed and cancelled Missions can supply up to eight\nevidence items. A skipped Mission accepts a note only. Interrupted and retryable\nMissions return mission_not_terminal. No model configuration is required.\n\nSupply the same request_id on retries to recover the original draft and its latest edits.\nOmitting the ID creates a new draft on each call.",
+        "operationId": "create_mission_skill_draft_api_v2_missions__task_id__skill_drafts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSkillDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unknown_mission: The source Mission does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "mission_not_terminal: The Mission is still active or recoverable. skill_request_conflict: The request ID already identifies a different operation or input."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Create Mission Skill Draft"
+      }
+    },
     "/api/v2/missions/{task_id}/skills": {
       "get": {
         "description": "Show admitted selections and actual model input by analysis node and attempt.",
@@ -12222,6 +13203,664 @@
         "summary": "Runtime Status"
       }
     },
+    "/api/v2/skill-drafts": {
+      "get": {
+        "description": "List local drafts and their review receipts, most recently edited first.",
+        "operationId": "list_skill_drafts_api_v2_skill_drafts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775806,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_mission_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraftPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: parameters or fields failed validation. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "List Skill Drafts"
+      }
+    },
+    "/api/v2/skill-drafts/{draft_id}": {
+      "get": {
+        "description": "Reopen the saved draft. An artifact locator is a JSON Pointer relative to the\nsource Mission artifact's content. A verified result describes the recorded validation\noutcome at that locator. All private references stay with the draft after review.",
+        "operationId": "get_skill_draft_api_v2_skill_drafts__draft_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_draft_not_found: The draft does not exist."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: parameters or fields failed validation. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Get Skill Draft"
+      },
+      "patch": {
+        "description": "Save editor fields at expected_revision. Saving leaves recommendations unchanged.\n\nOmitted top-level fields keep their values. Sending content replaces the complete\nguidance document. Repeating the last successful save returns the saved revision.\nOn skill_revision_conflict retain local edits and reload the draft before merging.",
+        "operationId": "save_skill_draft_api_v2_skill_drafts__draft_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSkillDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_draft_not_found: The draft does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_revision_conflict: The revision changed, the draft was closed, or the base version was superseded or disabled. Keep local edits and reload before merging."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Save Skill Draft"
+      }
+    },
+    "/api/v2/skill-drafts/{draft_id}/publish-local": {
+      "post": {
+        "description": "Approve the saved revision. Replay the same request_id and revision for the committed version.",
+        "operationId": "publish_local_skill_api_v2_skill_drafts__draft_id__publish_local_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishLocalSkill"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_draft_not_found: The draft does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_request_conflict: The request ID already identifies a different operation or input. skill_revision_conflict: The revision changed, the draft was closed, or the base version was superseded or disabled. Keep local edits and reload before merging."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers. skill_draft_incomplete: Review requires a name, guidance, stages, boundaries and a matching rule. invalid_skill_evidence: The private reference failed source Mission, cutoff, artifact hash or item validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Publish Local Skill"
+      }
+    },
+    "/api/v2/skills": {
+      "get": {
+        "description": "List local library identities, including disabled skills and their current revisions.",
+        "operationId": "list_skills_api_v2_skills_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775806,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: parameters or fields failed validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "List Skills"
+      }
+    },
     "/api/v2/skills/recommendations": {
       "post": {
         "description": "Return up to three enabled, reviewed skills for the task description.\n\nExclusion phrases veto a match. A symptom phrase or a complete keyword group\nqualifies a candidate. Rank by counts of matched symptoms, complete groups and\nproject tags, in that order. Break ties by ascending skill ID.",
@@ -12329,6 +13968,430 @@
           }
         },
         "summary": "Skill Recommendations"
+      }
+    },
+    "/api/v2/skills/{skill_id}": {
+      "patch": {
+        "description": "Disable the skill at its current revision. Existing version details remain available.",
+        "operationId": "disable_skill_api_v2_skills__skill_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "skill_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$",
+              "title": "Skill Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisableSkill"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillIdentity"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_not_found: The skill or requested version does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_revision_conflict: The revision changed, the draft was closed, or the base version was superseded or disabled. Keep local edits and reload before merging."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Disable Skill"
+      }
+    },
+    "/api/v2/skills/{skill_id}/drafts": {
+      "post": {
+        "description": "Open a revision draft from the exact base version. Publish checks that the base is still current.",
+        "operationId": "create_skill_revision_draft_api_v2_skills__skill_id__drafts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "skill_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$",
+              "title": "Skill Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSkillRevisionDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDraft"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_not_found: The skill or requested version does not exist."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_request_conflict: The request ID already identifies a different operation or input."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request body exceeds 64 KiB."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: use application/json with identity encoding."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: send a JSON object matching the schema, with unique keys and finite numbers."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Create Skill Revision Draft"
+      }
+    },
+    "/api/v2/skills/{skill_id}/versions/{version}": {
+      "get": {
+        "description": "Read the immutable reviewed content of an exact version.",
+        "operationId": "get_skill_version_api_v2_skills__skill_id__versions__version__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "skill_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$",
+              "title": "Skill Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775806,
+              "minimum": 1,
+              "title": "Version",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "host_not_allowed: use a local loopback address."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "unauthorized: supply X-ForgePilot-Token when token authentication is configured."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "origin_not_allowed: cross-origin access is disabled."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "skill_not_found: The skill or requested version does not exist."
+          },
+          "414": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "request_too_large: the request target exceeds 8 KiB."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_request: parameters or fields failed validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "api_internal: unexpected service failure."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionErrorResponse"
+                }
+              }
+            },
+            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+          }
+        },
+        "summary": "Get Skill Version"
       }
     }
   }

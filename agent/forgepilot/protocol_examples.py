@@ -6,13 +6,91 @@ legacy message. Example paths, identifiers and hashes carry no authority.
 import json
 from pathlib import Path
 
+from .artifacts.canonical import content_sha256
+from .skill_models import SkillContent, SkillDraftContent
+
 
 TASK_ID = "11111111-1111-4111-8111-111111111111"
 STAMP = "2026-10-27T08:00:00Z"
 
 
+def _manual_skill_examples():
+    """One manual review starting from a cancelled Mission with no artifacts."""
+    draft_id = "55555555-5555-4555-8555-555555555555"
+    skill_id = "66666666-6666-4666-8666-666666666666"
+    note = "保存成功后列表仍是旧值。下次先检查模型行。"
+    draft_data = {
+        "name": "", "content": SkillDraftContent().model_dump(mode="json"), "developer_note": note,
+        "evidence_revision": 12, "evidence_refs": [], "generation_status": "manual", "model_suggestion": "",
+    }
+    draft = {
+        "draft_id": draft_id, "source_mission_id": TASK_ID, "revision": 1, "data": draft_data,
+        "base_skill_id": None, "base_version": None, "result_skill_id": None, "result_version": None,
+        "created_at": STAMP, "updated_at": STAMP,
+    }
+    name = "Qt 列表保存后仍显示旧值"
+    content = SkillContent(
+        body="先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+        triggers=["列表仍显示旧值"], stages=["root_cause_analysis"],
+        boundaries=["适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"],
+    ).model_dump(mode="json")
+    inference = "可能漏发了模型通知，需检查对应行的值和通知范围。"
+    saved = {**draft, "revision": 2,
+             "data": {**draft_data, "name": name, "content": content, "pending_inference": inference}}
+    published = {**saved, "revision": 3, "result_skill_id": skill_id, "result_version": 1}
+    version = {
+        "skill_id": skill_id, "version": 1, "content_sha256": content_sha256(content),
+        "name": name, "content": content, "created_at": STAMP,
+    }
+    identity = {"skill_id": skill_id, "current_version": 1, "enabled": True, "revision": 1, "source": "local"}
+    return {
+        "skill_draft_create_request": {"developer_note": note, "request_id": "note-1"},
+        "skill_draft_create_response": draft,
+        "skill_draft_with_validation_response": {
+            **draft, "data": {**draft_data, "evidence_refs": [{
+                "kind": "artifact", "record_id": "88888888-8888-4888-8888-888888888888",
+                "content_sha256": "a" * 64, "locator": "/status", "classification": "verified_result",
+                "recorded_value": "failed",
+            }]},
+        },
+        "skill_draft_save_request": {
+            "expected_revision": 1, "name": name, "content": content, "pending_inference": inference,
+        },
+        "skill_draft_save_response": saved,
+        "skill_draft_page_request": {
+            "method": "GET", "path": f"/api/v2/skill-drafts?source_mission_id={TASK_ID}&limit=20&offset=0",
+        },
+        "skill_draft_page_response": {"drafts": [published], "next_offset": None},
+        "skill_draft_detail_request": {"method": "GET", "path": f"/api/v2/skill-drafts/{draft_id}"},
+        "skill_draft_detail_response": published,
+        "skill_publish_local_request": {"expected_revision": 2, "request_id": "review-1"},
+        "skill_publish_local_response": version,
+        "skill_page_request": {"method": "GET", "path": "/api/v2/skills?limit=20&offset=0"},
+        "skill_page_response": {"skills": [{**identity, "name": name}], "next_offset": None},
+        "skill_version_detail_request": {"method": "GET", "path": f"/api/v2/skills/{skill_id}/versions/1"},
+        "skill_version_detail_response": version,
+        "skill_revision_draft_request": {"version": 1, "request_id": "revision-draft-1"},
+        "skill_revision_draft_response": {
+            **draft, "draft_id": "77777777-7777-4777-8777-777777777777", "source_mission_id": None,
+            "base_skill_id": skill_id, "base_version": 1,
+            "data": {**draft_data, "name": name, "content": content, "developer_note": "", "evidence_revision": None},
+        },
+        "skill_disable_request": {"expected_revision": 1, "enabled": False},
+        "skill_disable_response": {**identity, "enabled": False, "revision": 2},
+        "skill_save_conflict_error": {"error": {
+            "code": "skill_revision_conflict", "message": "Revision changed; refresh before saving",
+            "details": [], "task_id": None,
+        }},
+        "skill_evidence_mismatch_error": {"error": {
+            "code": "invalid_skill_evidence", "message": "Evidence reference does not match a source Mission record",
+            "details": [], "task_id": None,
+        }},
+    }
+
+
 def examples():
     result = json.loads(Path(__file__).with_name("protocol_examples.v1.json").read_text(encoding="utf-8"))
+    result.update(_manual_skill_examples())
     result.update({
         "skill_recommendations_request": {
             "description": "保存成功但列表仍显示旧值", "task_type": "bug_fix", "project_tags": ["Qt"],

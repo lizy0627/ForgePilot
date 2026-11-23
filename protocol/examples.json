@@ -905,6 +905,275 @@
       "task_id": "11111111-1111-4111-8111-111111111111"
     }
   },
+  "skill_disable_request": {
+    "enabled": false,
+    "expected_revision": 1
+  },
+  "skill_disable_response": {
+    "current_version": 1,
+    "enabled": false,
+    "revision": 2,
+    "skill_id": "66666666-6666-4666-8666-666666666666",
+    "source": "local"
+  },
+  "skill_draft_create_request": {
+    "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+    "request_id": "note-1"
+  },
+  "skill_draft_create_response": {
+    "base_skill_id": null,
+    "base_version": null,
+    "created_at": "2026-10-27T08:00:00Z",
+    "data": {
+      "content": {
+        "body": "",
+        "boundaries": [],
+        "exclusions": [],
+        "schema_version": 1,
+        "stages": [],
+        "triggers": [],
+        "usage_scope": "local_only"
+      },
+      "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+      "evidence_refs": [],
+      "evidence_revision": 12,
+      "generation_status": "manual",
+      "model_suggestion": "",
+      "name": ""
+    },
+    "draft_id": "55555555-5555-4555-8555-555555555555",
+    "result_skill_id": null,
+    "result_version": null,
+    "revision": 1,
+    "source_mission_id": "11111111-1111-4111-8111-111111111111",
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "skill_draft_detail_request": {
+    "method": "GET",
+    "path": "/api/v2/skill-drafts/55555555-5555-4555-8555-555555555555"
+  },
+  "skill_draft_detail_response": {
+    "base_skill_id": null,
+    "base_version": null,
+    "created_at": "2026-10-27T08:00:00Z",
+    "data": {
+      "content": {
+        "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+        "boundaries": [
+          "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+        ],
+        "exclusions": [],
+        "schema_version": 1,
+        "stages": [
+          "root_cause_analysis"
+        ],
+        "triggers": [
+          "列表仍显示旧值"
+        ],
+        "usage_scope": "local_only"
+      },
+      "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+      "evidence_refs": [],
+      "evidence_revision": 12,
+      "generation_status": "manual",
+      "model_suggestion": "",
+      "name": "Qt 列表保存后仍显示旧值",
+      "pending_inference": "可能漏发了模型通知，需检查对应行的值和通知范围。"
+    },
+    "draft_id": "55555555-5555-4555-8555-555555555555",
+    "result_skill_id": "66666666-6666-4666-8666-666666666666",
+    "result_version": 1,
+    "revision": 3,
+    "source_mission_id": "11111111-1111-4111-8111-111111111111",
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "skill_draft_page_request": {
+    "method": "GET",
+    "path": "/api/v2/skill-drafts?source_mission_id=11111111-1111-4111-8111-111111111111&limit=20&offset=0"
+  },
+  "skill_draft_page_response": {
+    "drafts": [
+      {
+        "base_skill_id": null,
+        "base_version": null,
+        "created_at": "2026-10-27T08:00:00Z",
+        "data": {
+          "content": {
+            "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+            "boundaries": [
+              "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+            ],
+            "exclusions": [],
+            "schema_version": 1,
+            "stages": [
+              "root_cause_analysis"
+            ],
+            "triggers": [
+              "列表仍显示旧值"
+            ],
+            "usage_scope": "local_only"
+          },
+          "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+          "evidence_refs": [],
+          "evidence_revision": 12,
+          "generation_status": "manual",
+          "model_suggestion": "",
+          "name": "Qt 列表保存后仍显示旧值",
+          "pending_inference": "可能漏发了模型通知，需检查对应行的值和通知范围。"
+        },
+        "draft_id": "55555555-5555-4555-8555-555555555555",
+        "result_skill_id": "66666666-6666-4666-8666-666666666666",
+        "result_version": 1,
+        "revision": 3,
+        "source_mission_id": "11111111-1111-4111-8111-111111111111",
+        "updated_at": "2026-10-27T08:00:00Z"
+      }
+    ],
+    "next_offset": null
+  },
+  "skill_draft_save_request": {
+    "content": {
+      "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+      "boundaries": [
+        "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+      ],
+      "exclusions": [],
+      "schema_version": 1,
+      "stages": [
+        "root_cause_analysis"
+      ],
+      "triggers": [
+        "列表仍显示旧值"
+      ],
+      "usage_scope": "local_only"
+    },
+    "expected_revision": 1,
+    "name": "Qt 列表保存后仍显示旧值",
+    "pending_inference": "可能漏发了模型通知，需检查对应行的值和通知范围。"
+  },
+  "skill_draft_save_response": {
+    "base_skill_id": null,
+    "base_version": null,
+    "created_at": "2026-10-27T08:00:00Z",
+    "data": {
+      "content": {
+        "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+        "boundaries": [
+          "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+        ],
+        "exclusions": [],
+        "schema_version": 1,
+        "stages": [
+          "root_cause_analysis"
+        ],
+        "triggers": [
+          "列表仍显示旧值"
+        ],
+        "usage_scope": "local_only"
+      },
+      "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+      "evidence_refs": [],
+      "evidence_revision": 12,
+      "generation_status": "manual",
+      "model_suggestion": "",
+      "name": "Qt 列表保存后仍显示旧值",
+      "pending_inference": "可能漏发了模型通知，需检查对应行的值和通知范围。"
+    },
+    "draft_id": "55555555-5555-4555-8555-555555555555",
+    "result_skill_id": null,
+    "result_version": null,
+    "revision": 2,
+    "source_mission_id": "11111111-1111-4111-8111-111111111111",
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "skill_draft_with_validation_response": {
+    "base_skill_id": null,
+    "base_version": null,
+    "created_at": "2026-10-27T08:00:00Z",
+    "data": {
+      "content": {
+        "body": "",
+        "boundaries": [],
+        "exclusions": [],
+        "schema_version": 1,
+        "stages": [],
+        "triggers": [],
+        "usage_scope": "local_only"
+      },
+      "developer_note": "保存成功后列表仍是旧值。下次先检查模型行。",
+      "evidence_refs": [
+        {
+          "classification": "verified_result",
+          "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": "artifact",
+          "locator": "/status",
+          "record_id": "88888888-8888-4888-8888-888888888888",
+          "recorded_value": "failed"
+        }
+      ],
+      "evidence_revision": 12,
+      "generation_status": "manual",
+      "model_suggestion": "",
+      "name": ""
+    },
+    "draft_id": "55555555-5555-4555-8555-555555555555",
+    "result_skill_id": null,
+    "result_version": null,
+    "revision": 1,
+    "source_mission_id": "11111111-1111-4111-8111-111111111111",
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "skill_evidence_mismatch_error": {
+    "error": {
+      "code": "invalid_skill_evidence",
+      "details": [],
+      "message": "Evidence reference does not match a source Mission record",
+      "task_id": null
+    }
+  },
+  "skill_page_request": {
+    "method": "GET",
+    "path": "/api/v2/skills?limit=20&offset=0"
+  },
+  "skill_page_response": {
+    "next_offset": null,
+    "skills": [
+      {
+        "current_version": 1,
+        "enabled": true,
+        "name": "Qt 列表保存后仍显示旧值",
+        "revision": 1,
+        "skill_id": "66666666-6666-4666-8666-666666666666",
+        "source": "local"
+      }
+    ]
+  },
+  "skill_publish_local_request": {
+    "expected_revision": 2,
+    "request_id": "review-1"
+  },
+  "skill_publish_local_response": {
+    "content": {
+      "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+      "boundaries": [
+        "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+      ],
+      "exclusions": [],
+      "schema_version": 1,
+      "stages": [
+        "root_cause_analysis"
+      ],
+      "triggers": [
+        "列表仍显示旧值"
+      ],
+      "usage_scope": "local_only"
+    },
+    "content_sha256": "85baaa5b9040af56a02a51d092172532077416875f79d27cd9ee2905a952a4ea",
+    "created_at": "2026-10-27T08:00:00Z",
+    "name": "Qt 列表保存后仍显示旧值",
+    "skill_id": "66666666-6666-4666-8666-666666666666",
+    "version": 1
+  },
   "skill_recommendations_empty_response": {
     "recommendations": []
   },
@@ -936,6 +1205,78 @@
   },
   "skill_recommendations_unmatched_request": {
     "description": "给导出文件增加时间戳"
+  },
+  "skill_revision_draft_request": {
+    "request_id": "revision-draft-1",
+    "version": 1
+  },
+  "skill_revision_draft_response": {
+    "base_skill_id": "66666666-6666-4666-8666-666666666666",
+    "base_version": 1,
+    "created_at": "2026-10-27T08:00:00Z",
+    "data": {
+      "content": {
+        "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+        "boundaries": [
+          "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+        ],
+        "exclusions": [],
+        "schema_version": 1,
+        "stages": [
+          "root_cause_analysis"
+        ],
+        "triggers": [
+          "列表仍显示旧值"
+        ],
+        "usage_scope": "local_only"
+      },
+      "developer_note": "",
+      "evidence_refs": [],
+      "evidence_revision": null,
+      "generation_status": "manual",
+      "model_suggestion": "",
+      "name": "Qt 列表保存后仍显示旧值"
+    },
+    "draft_id": "77777777-7777-4777-8777-777777777777",
+    "result_skill_id": null,
+    "result_version": null,
+    "revision": 1,
+    "source_mission_id": null,
+    "updated_at": "2026-10-27T08:00:00Z"
+  },
+  "skill_save_conflict_error": {
+    "error": {
+      "code": "skill_revision_conflict",
+      "details": [],
+      "message": "Revision changed; refresh before saving",
+      "task_id": null
+    }
+  },
+  "skill_version_detail_request": {
+    "method": "GET",
+    "path": "/api/v2/skills/66666666-6666-4666-8666-666666666666/versions/1"
+  },
+  "skill_version_detail_response": {
+    "content": {
+      "body": "先读取刚保存的模型行。值仍旧时，检查回写路径。值已更新时，检查 dataChanged 的范围和角色。",
+      "boundaries": [
+        "适用于 Qt Model/View。用当前任务的模型行与视图证据选择分支。"
+      ],
+      "exclusions": [],
+      "schema_version": 1,
+      "stages": [
+        "root_cause_analysis"
+      ],
+      "triggers": [
+        "列表仍显示旧值"
+      ],
+      "usage_scope": "local_only"
+    },
+    "content_sha256": "85baaa5b9040af56a02a51d092172532077416875f79d27cd9ee2905a952a4ea",
+    "created_at": "2026-10-27T08:00:00Z",
+    "name": "Qt 列表保存后仍显示旧值",
+    "skill_id": "66666666-6666-4666-8666-666666666666",
+    "version": 1
   },
   "stale_plan_error": {
     "error": {

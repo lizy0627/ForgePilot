@@ -257,7 +257,7 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
     errors = {code: {"model": ErrorResponse} for code in (400, 403, 404, 409, 422, 500, 503)}
     register_mcp_routes(app, host, {**errors, **{code: {"model": ErrorResponse} for code in (413, 415, 429, 499, 504)}})
     register_mission_routes(app, missions, mission_streams)
-    register_skill_routes(app, host.store.skills)
+    register_skill_routes(app, host.store)
     register_runtime_routes(app, host)
 
     @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=202, responses=errors)

@@ -11,6 +11,7 @@ from .artifacts.canonical import canonical_json_bytes, content_sha256
 from .errors import ForgePilotError
 from .mission_events import append_mission_event
 from .recording import now
+from .skill_mission_drafts import validate_mission_artifact_refs
 from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillIdentity, SkillVersion
 from .skill_selection import FrozenSkill, load_frozen, resolve_selection
 
@@ -83,7 +84,7 @@ def _check_request_id(request_id: str) -> None:
         raise ForgePilotError("invalid_skill_request", "Expected a nonempty request ID of at most 256 characters")
 
 
-def _check_source(db: sqlite3.Connection, source_mission_id: str | None, data: SkillDraftData) -> None:
+def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | None, data: SkillDraftData) -> None:
     if source_mission_id is None:
         if data.evidence_revision is not None or data.evidence_refs:
             raise ForgePilotError("invalid_skill_evidence", "Evidence requires a source Mission")
@@ -117,6 +118,8 @@ def _check_source(db: sqlite3.Connection, source_mission_id: str | None, data: S
                                (source_mission_id, ref.record_id)).fetchone()
         if found is None:
             raise ForgePilotError("invalid_skill_evidence", "Evidence reference does not match a source Mission record")
+    validate_mission_artifact_refs(missions, source_mission_id,
+                                  (ref for ref in data.evidence_refs if ref.kind == "artifact"))
 
 
 class SkillRepository:
@@ -158,18 +161,33 @@ class SkillRepository:
 
     def get_draft(self, draft_id: str) -> SkillDraft:
         with self._store.locked_connection() as db:
-            return _draft(_draft_row(db, draft_id))
+            return self._checked_draft(db, _draft_row(db, draft_id))
 
-    def list_drafts(self, *, source_mission_id: str | None = None) -> list[SkillDraft]:
+    def _checked_draft(self, db: sqlite3.Connection, row: sqlite3.Row) -> SkillDraft:
+        draft = _draft(row)
+        _check_source(db, self._store.missions, draft.source_mission_id, draft.data)
+        return draft
+
+    def _draft_rows(self, db: sqlite3.Connection, source_mission_id: str | None, *,
+                    limit: int = -1, offset: int = 0) -> list[sqlite3.Row]:
         """Find drafts and their review results, most recently edited first."""
         query = "SELECT * FROM skill_drafts"
         params = ()
         if source_mission_id is not None:
             query += " WHERE source_mission_id=?"
             params = (source_mission_id,)
+        return db.execute(query + " ORDER BY updated_at DESC, draft_id DESC LIMIT ? OFFSET ?",
+                          (*params, limit, offset)).fetchall()
+
+    def list_drafts(self, *, source_mission_id: str | None = None) -> list[SkillDraft]:
         with self._store.locked_connection() as db:
-            rows = db.execute(query + " ORDER BY updated_at DESC, draft_id DESC", params)
-            return [_draft(row) for row in rows]
+            return [self._checked_draft(db, row) for row in self._draft_rows(db, source_mission_id)]
+
+    def list_draft_page(self, *, source_mission_id: str | None = None, limit: int, offset: int) -> dict:
+        with self._store.locked_connection() as db:
+            rows = self._draft_rows(db, source_mission_id, limit=limit + 1, offset=offset)
+            return {"drafts": [self._checked_draft(db, row) for row in rows[:limit]],
+                    "next_offset": offset + limit if len(rows) > limit else None}
 
     def create_draft(self, *, request_id: str, data: SkillDraftData,
                      source_mission_id: str | None = None) -> SkillDraft:
@@ -179,18 +197,16 @@ class SkillRepository:
 
     def _insert_draft(self, db: sqlite3.Connection, request_id: str, data: SkillDraftData, *,
                       source_mission_id: str | None = None, base_skill_id: str | None = None,
-                      base_version: int | None = None) -> SkillDraft:
+                      base_version: int | None = None, create_hash: str | None = None) -> SkillDraft:
         _check_request_id(request_id)
-        fingerprint = content_sha256({
+        fingerprint = create_hash or content_sha256({
             "source_mission_id": source_mission_id, "base_skill_id": base_skill_id,
             "base_version": base_version, "data": data.model_dump(mode="json"),
         })
-        existing = db.execute("SELECT * FROM skill_drafts WHERE request_id=?", (request_id,)).fetchone()
+        existing = self._replayed_draft(db, request_id, fingerprint)
         if existing is not None:
-            if existing["create_hash"] != fingerprint:
-                raise ForgePilotError("skill_request_conflict", "Request ID already identifies another draft request")
-            return _draft(existing)
-        _check_source(db, source_mission_id, data)
+            return existing
+        _check_source(db, self._store.missions, source_mission_id, data)
         draft_id = str(uuid4())
         timestamp = now()
         db.execute("""INSERT INTO skill_drafts(
@@ -201,18 +217,43 @@ class SkillRepository:
                     timestamp, timestamp, base_skill_id, base_version))
         return _draft(_draft_row(db, draft_id))
 
+    def _replayed_draft(self, db: sqlite3.Connection, request_id: str, fingerprint: str) -> SkillDraft | None:
+        existing = db.execute("SELECT * FROM skill_drafts WHERE request_id=?", (request_id,)).fetchone()
+        if existing is None:
+            return None
+        if existing["create_hash"] != fingerprint:
+            raise ForgePilotError("skill_request_conflict", "Request ID already identifies another draft request")
+        return self._checked_draft(db, existing)
+
     def edit_draft(self, draft_id: str, *, expected_revision: int, data: SkillDraftData) -> SkillDraft:
         """Replace the editable document at an exact revision."""
         data = SkillDraftData.model_validate(data)
         with self._store.transaction() as db:
             row = _draft_row(db, draft_id)
-            _check_revision(row["revision"], expected_revision)
-            if row["result_version"] is not None:
-                raise ForgePilotError("skill_revision_conflict", "Reviewed drafts are closed; start a version revision")
-            _check_source(db, row["source_mission_id"], data)
-            db.execute("""UPDATE skill_drafts SET data_json=?,revision=revision+1,updated_at=?
-                          WHERE draft_id=?""", (data.model_dump_json(), now(), draft_id))
-            return _draft(_draft_row(db, draft_id))
+            return self._save_draft(db, row, expected_revision, data)
+
+    def patch_draft(self, draft_id: str, *, expected_revision: int, changes: dict) -> SkillDraft:
+        """Only the editor fields may change. Keep the original private evidence and cutoff."""
+        if not changes or changes.keys() - {"name", "content", "developer_note", "pending_inference"}:
+            raise ForgePilotError("invalid_skill_request", "Expected editable draft fields")
+        with self._store.transaction() as db:
+            row = _draft_row(db, draft_id)
+            draft = _draft(row)
+            data = SkillDraftData.model_validate({**draft.data.model_dump(), **changes})
+            if (draft.result_version is None and type(expected_revision) is int and draft.revision == expected_revision + 1
+                    and draft.data == data):
+                return self._checked_draft(db, row)
+            return self._save_draft(db, row, expected_revision, data)
+
+    def _save_draft(self, db: sqlite3.Connection, row: sqlite3.Row,
+                    expected_revision: int, data: SkillDraftData) -> SkillDraft:
+        _check_revision(row["revision"], expected_revision)
+        if row["result_version"] is not None:
+            raise ForgePilotError("skill_revision_conflict", "Reviewed drafts are closed; start a version revision")
+        _check_source(db, self._store.missions, row["source_mission_id"], data)
+        db.execute("""UPDATE skill_drafts SET data_json=?,revision=revision+1,updated_at=?
+                      WHERE draft_id=?""", (data.model_dump_json(), now(), row["draft_id"]))
+        return _draft(_draft_row(db, row["draft_id"]))
 
     def draft_from_version(self, skill_id: str, version: int, *, request_id: str) -> SkillDraft:
         """Copy the reusable fields of an exact version into a new private working draft."""
@@ -237,7 +278,7 @@ class SkillRepository:
             _check_revision(row["revision"], expected_revision)
             if row["result_version"] is not None:
                 raise ForgePilotError("skill_revision_conflict", "This draft has already been reviewed")
-            draft = _draft(row)
+            draft = self._checked_draft(db, row)
             try:
                 content = draft.data.reviewed_content()
             except ValueError:
@@ -274,6 +315,15 @@ class SkillRepository:
         with self._store.locked_connection() as db:
             return _identity(db, skill_id)
 
+    def list_skill_page(self, *, limit: int, offset: int) -> dict:
+        with self._store.locked_connection() as db:
+            rows = db.execute("""SELECT s.skill_id,s.source,s.current_version,s.enabled,s.revision,v.name
+                                 FROM skills s JOIN skill_versions v
+                                 ON (s.skill_id,s.current_version)=(v.skill_id,v.version)
+                                 ORDER BY s.skill_id LIMIT ? OFFSET ?""", (limit + 1, offset)).fetchall()
+        return {"skills": [{**row, "enabled": bool(row["enabled"])} for row in rows[:limit]],
+                "next_offset": offset + limit if len(rows) > limit else None}
+
     def list_available(self) -> list[SkillVersion]:
         with self._store.locked_connection() as db:
             rows = db.execute("""SELECT v.* FROM skills s JOIN skill_versions v
@@ -306,6 +356,8 @@ class SkillRepository:
     def disable(self, skill_id: str, *, expected_revision: int) -> SkillIdentity:
         with self._store.transaction() as db:
             current = _identity(db, skill_id)
+            if not current.enabled and type(expected_revision) is int and current.revision == expected_revision + 1:
+                return current
             _check_revision(current.revision, expected_revision)
             if current.enabled:
                 db.execute("UPDATE skills SET enabled=0,revision=revision+1 WHERE skill_id=?", (skill_id,))
