@@ -39,7 +39,10 @@ Item {
         }
     }
     onCompactHistoryChanged: if (!compactHistory && historyDrawer) historyDrawer.close()
-    onVisibleChanged: if (!visible && historyDrawer) historyDrawer.close()
+    onVisibleChanged: if (!visible) {
+        if (historyDrawer) historyDrawer.close()
+        if (skillHistory) skillHistory.close()
+    }
     readonly property string attentionNodeId: {
         for (var i = 0; i < nodeRecords.length; ++i)
             if (nodeRecords[i].status === "awaiting_human") return nodeRecords[i].nodeId
@@ -72,6 +75,7 @@ Item {
     function refreshView() {
         if (currentTaskId !== mission.taskId) {
             currentTaskId = mission.taskId
+            skillHistory.close()
             selectionPinned = false; selectedNodeId = ""; detailsVisible = false
             toolsExpanded = false
             if (hasTask) taskCenterExpanded = false
@@ -105,6 +109,25 @@ Item {
     function followProgress() {
         selectionPinned = false
         refreshView()
+    }
+    function skillHistoryText() {
+        if (mission.missionSkillsLoading) return "正在读取任务技能记录…"
+        if (mission.missionSkillsError) return mission.missionSkillsError
+        var history = mission.missionSkills
+        if (history.task_id !== mission.taskId) return ""
+        if (!history.selected_skills.length) return "创建此任务时未选择技能。"
+        return history.selected_skills.map(function(skill) {
+            var records = history.injections.filter(function(entry) {
+                return entry.skill_id === skill.skill_id && entry.version === skill.version
+                    && entry.content_sha256 === skill.content_sha256
+            })
+            var lines = [skill.skill_id + " · v" + skill.version, "SHA-256  " + skill.content_sha256]
+            if (!records.length) lines.push("尚无提供给模型的记录。")
+            else records.forEach(function(entry) {
+                lines.push("已提供给模型 · " + Flow.nodeTitle(entry) + " · 第 " + entry.attempt + " 次尝试")
+            })
+            return lines.join("\n")
+        }).join("\n\n")
     }
     onSelectedNodeIdChanged: updateDetails()
     function openTaskDraft(request, repository, source) {
@@ -218,6 +241,12 @@ Item {
                 onClicked: root.toolsExpanded = !root.toolsExpanded
             }
             Controls.ActionButton {
+                objectName: "workflowSkillHistoryButton"; visible: root.demandCollapsed
+                text: "技能"; flat: true; horizontalPadding: Theme.spaceSm
+                Accessible.name: "查看已选择的技能"
+                onClicked: skillHistory.open()
+            }
+            Controls.ActionButton {
                 objectName: "workflowDemandToggle"
                 text: root.demandCollapsed ? "新建任务" : "返回当前任务"
                 onClicked: {
@@ -322,6 +351,29 @@ Item {
         sequence: "Escape"
         enabled: root.visible && root.hasTask && (root.detailsVisible || root.taskCenterExpanded)
         onActivated: { if (root.detailsVisible) root.closeDetails(); else root.taskCenterExpanded = false }
+    }
+    Dialog {
+        id: skillHistory; objectName: "missionSkillHistoryDialog"
+        title: "已选择的技能"; modal: true; anchors.centerIn: Overlay.overlay
+        width: Math.min(620, root.width - 2 * Theme.spaceLg)
+        height: Math.min(360, root.height - 2 * Theme.spaceLg)
+        onAboutToShow: root.mission.loadMissionSkills()
+        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
+        contentItem: Controls.AppScrollView {
+            clip: true
+            Controls.AppTextArea {
+                objectName: "missionSkillHistoryText"; readOnly: true; selectByMouse: true
+                textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere
+                text: root.skillHistoryText()
+            }
+        }
+        footer: DialogButtonBox {
+            Controls.ActionButton {
+                text: "刷新"; flat: true; enabled: !root.mission.missionSkillsLoading
+                onClicked: root.mission.loadMissionSkills()
+            }
+            Controls.ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
     }
     Dialog {
         id: errorDialog; title: "任务连接信息"; modal: true; anchors.centerIn: Overlay.overlay

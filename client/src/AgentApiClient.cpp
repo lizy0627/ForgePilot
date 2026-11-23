@@ -2,6 +2,7 @@
 #include "Protocol.h"
 #include "JsonHttp.h"
 #include "workbench/MissionProtocol.h"
+#include <QJsonArray>
 #include <QNetworkProxy>
 #include <QTimer>
 #include <QUrlQuery>
@@ -105,7 +106,12 @@ quint64 AgentApiClient::send(const QString &operation, const QString &id, const 
     return serial;
 }
 
-quint64 AgentApiClient::createMission(const QJsonObject &body) { return sendMission("mission.create", {}, body); }
+quint64 AgentApiClient::createMission(const QJsonObject &body) {
+    auto request = body;
+    if (request.value("selected_skills") == QJsonValue(QJsonArray{})) request.remove("selected_skills");
+    return sendMission("mission.create", {}, request);
+}
+quint64 AgentApiClient::recommendSkills(const QJsonObject &body) { return sendMission("mission.recommendations", {}, body); }
 quint64 AgentApiClient::previewMission(const QJsonObject &body) { return sendMission("mission.preview", {}, body); }
 quint64 AgentApiClient::discardMissionPreview(const QString &token) { return sendMission("mission.discard_preview", {}, {{"preview_token", token}}); }
 quint64 AgentApiClient::listMissions(const QString &before, const QString &repositoryPath, const QString &status) {
@@ -141,7 +147,9 @@ quint64 AgentApiClient::rejectRequest(const QString &op, const QString &id, cons
     return serial;
 }
 quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body) {
-    if (op != "mission.create" && op != "mission.preview" && op != "mission.discard_preview" && op != "mission.list" && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
+    const bool needsTaskId = !QSet<QString>{"mission.create", "mission.recommendations", "mission.preview",
+        "mission.discard_preview", "mission.list"}.contains(op);
+    if (needsTaskId && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
     if (!MissionProtocol::validRequest(op, body)) return rejectRequest(op, id, "invalid_request");
     const auto serial = ++m_next;
     QString path = id.isEmpty() ? QString{} : '/' + id;
@@ -151,7 +159,8 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
     else if (action == "approve") path += "/approvals";
     else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();
     else if (action != "create" && action != "get" && action != "list") path += '/' + action;
-    auto url = MissionProtocol::endpoint(m_base, path);
+    auto url = action == "recommendations" ? m_base.resolved(QUrl("/api/v2/skills/recommendations"))
+                                           : MissionProtocol::endpoint(m_base, path);
     if (action == "list") {
         QStringList query{"limit=20"};
         for (const auto &key : {"before", "repository_path", "status"}) {
@@ -176,6 +185,7 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
                     ? response.body.value("error").toObject().value("code").toString() : "invalid_response";
             } else if (response.networkError != QNetworkReply::NoError) code = "network_error";
             else if (response.invalidJson || !MissionProtocol::validResponse(op, id, response.body)
+                || ((action == "recommendations" || action == "skills") && status != 200)
                 || ((action == "create" || action == "approve" || action == "retry" || action == "resume") && status != 202)
                 || (action == "artifact" && response.body.value("artifact_id") != body.value("artifact_id"))) code = "invalid_response";
             if (!code.isEmpty()) {

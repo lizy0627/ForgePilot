@@ -15,12 +15,27 @@ Rectangle {
     property bool composerMode: false
     property bool advancedExpanded: false
     readonly property string draftRepositoryPath: repositoryInput.text.trim()
+    readonly property string draftTaskType: ["auto", "bug_fix", "feature"][kind.currentIndex] || "auto"
+    readonly property bool hasCmakePreset: mission.creationReady && mission.creationPreview.build?.source === "preset"
+    property bool formReady: false
     property string committedRepositoryPath: ""
     property var ragOverride: null
     property var selectedMcpIds: []
     property bool submittedDraft: false
     property string selectedContext: ""
     property var baselinePaths: []
+    function updateRecommendations() {
+        if (!formReady) return
+        if (visible)
+            mission.updateSkillContext(requestInput.text.trim(), draftTaskType, draftRepositoryPath,
+                                       hasCmakePreset ? ["cmake"] : [])
+        else
+            mission.resetSkillContext()
+    }
+    onVisibleChanged: updateRecommendations()
+    onDraftRepositoryPathChanged: updateRecommendations()
+    onDraftTaskTypeChanged: updateRecommendations()
+    onHasCmakePresetChanged: updateRecommendations()
     function baselineRequest() {
         var result = {repository_path: draftRepositoryPath, base_ref: "HEAD", baseline_paths: baselinePaths}
         if (presetSelection.checked) {
@@ -33,7 +48,7 @@ Rectangle {
     function submitMission() {
         var result = baselineRequest()
         result.request = requestInput.text.trim()
-        result.task_type = ["auto", "bug_fix", "feature"][kind.currentIndex]
+        result.task_type = draftTaskType
         result.preview_token = root.mission.creationPreview.preview_token
         result.baseline_confirmed = baselineConfirmation.checked
         result.mcp_server_ids = root.selectedMcpIds
@@ -43,6 +58,7 @@ Rectangle {
     }
     Connections {
         target: root.mission
+        function onBaseUrlChanged() { root.updateRecommendations() }
         function onCreationChanged() { if (baselineConfirmation && !root.mission.creationReady) baselineConfirmation.checked = false }
         function onMissionCreated() { if (root.submittedDraft) root.resetDraftTools() }
     }
@@ -55,6 +71,8 @@ Rectangle {
     border.width: composerMode ? 0 : 1
     implicitWidth: 244
     Component.onCompleted: {
+        formReady = true
+        updateRecommendations()
         if (mcp) mcp.refreshMissionChoices()
     }
     function resetBaseline() {
@@ -72,11 +90,13 @@ Rectangle {
     }
     function fillDraft(request, repository, source) {
         resetDraftTools()
+        mission.resetSkillContext()
         committedRepositoryPath = repository.trim()
         requestInput.text = request
         selectedContext = source
         if (repositoryInput.text === repository) resetBaseline()
         else repositoryInput.text = repository
+        updateRecommendations()
     }
     FolderDialog {
         id: folder; title: "选择任务仓库"; options: FolderDialog.DontUseNativeDialog
@@ -153,6 +173,7 @@ Rectangle {
                             wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
                             placeholderText: root.composerMode ? "描述任务目标…" : "描述 Agent 任务"
                             Accessible.name: "任务目标"
+                            onTextChanged: root.updateRecommendations()
                             font.pixelSize: root.composerMode ? 16 : Theme.fontSizeMd
                             background: Rectangle {
                                 implicitHeight: 94; radius: Theme.radiusMd
@@ -199,6 +220,65 @@ Rectangle {
                     : repositoryInput.text.length > 30
                 Layout.fillWidth: true; title: "完整仓库路径"; text: repositoryInput.text
                 maximumHeight: 150
+            }
+            Label {
+                objectName: "missionSkillRecommendationNotice"
+                visible: root.mission.recommendationsLoading || !!root.mission.recommendationError
+                Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
+                color: root.mission.recommendationError ? Theme.warning : Theme.secondary
+                text: root.mission.recommendationError || "正在匹配技能…"
+            }
+            Label {
+                visible: root.mission.skillRecommendations.length > 0
+                text: "推荐技能（最多选 2 项）"; color: Theme.text; font.weight: Font.DemiBold
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: root.mission.skillRecommendations
+                delegate: Rectangle {
+                    id: skillCard
+                    required property var modelData
+                    property bool expanded: false
+                    Layout.fillWidth: true; implicitHeight: skillFields.implicitHeight + 2 * Theme.spaceSm
+                    radius: Theme.radiusMd; color: Theme.panel; border.color: Theme.border
+                    ColumnLayout {
+                        id: skillFields
+                        anchors.fill: parent; anchors.margins: Theme.spaceSm; spacing: Theme.spaceXs
+                        RowLayout {
+                            Layout.fillWidth: true
+                            CheckBox {
+                                id: skillChoice; objectName: "missionSkillChoice"
+                                readonly property string skillId: skillCard.modelData.skill_id
+                                Layout.fillWidth: true; Layout.minimumWidth: 0
+                                text: skillCard.modelData.name + " · v" + skillCard.modelData.version
+                                checked: root.mission.selectedSkillIds.indexOf(skillId) >= 0
+                                enabled: !root.mission.busy && (checked || root.mission.selectedSkillIds.length < 2)
+                                contentItem: Label {
+                                    text: skillChoice.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                                    color: skillChoice.enabled ? Theme.text : Theme.disabledText
+                                    leftPadding: skillChoice.indicator.width + skillChoice.spacing
+                                }
+                                onToggled: root.mission.setSkillSelected(skillId, checked)
+                            }
+                            Controls.ActionButton {
+                                objectName: "missionSkillSummaryToggle"
+                                text: skillCard.expanded ? "收起摘要" : "查看摘要"; flat: true
+                                Accessible.name: text + " · " + skillCard.modelData.name
+                                onClicked: skillCard.expanded = !skillCard.expanded
+                            }
+                        }
+                        Label {
+                            objectName: "missionSkillReasons"; Layout.fillWidth: true
+                            text: skillCard.modelData.reasons.join("、"); color: Theme.secondary
+                            textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                        }
+                        Label {
+                            objectName: "missionSkillSummary"; Layout.fillWidth: true
+                            text: skillCard.modelData.summary; visible: skillCard.expanded
+                            textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: Theme.text
+                        }
+                    }
+                }
             }
             GridLayout {
                 id: creationGrid

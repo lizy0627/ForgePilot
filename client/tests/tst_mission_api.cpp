@@ -46,6 +46,76 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void skillRecommendationContract() {
+        const QString op = "mission.recommendations";
+        const auto request = example("skill_recommendations_request");
+        QVERIFY(MissionProtocol::validRequest(op, request));
+        QVERIFY(MissionProtocol::validRequest(op, example("skill_recommendations_unmatched_request")));
+        auto invalid = request;
+        invalid["repository_path"] = "D:/fixture";
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        invalid = request; invalid["task_type"] = "analysis";
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        for (const QString &value : {QString(" "), QString(8193, 'x'), QString(QChar::Null)}) {
+            invalid = request; invalid["description"] = value;
+            QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        }
+        invalid = request; invalid["project_tags"] = QJsonArray{QString(257, 'x')};
+        QVERIFY(!MissionProtocol::validRequest(op, invalid));
+        const auto response = example("skill_recommendations_response");
+        QVERIFY(MissionProtocol::validResponse(op, {}, response));
+        QVERIFY(MissionProtocol::validResponse(op, {}, example("skill_recommendations_empty_response")));
+        const auto candidate = response.value("recommendations").toArray().first().toObject();
+        for (const auto &key : {"skill_id", "version", "content_sha256", "name", "summary", "reasons"}) {
+            auto broken = candidate;
+            broken.remove(key);
+            QVERIFY2(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}), key);
+        }
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{candidate, candidate}}}));
+        auto broken = candidate;
+        broken["reasons"] = QJsonArray{};
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+        broken = candidate; broken["version"] = "1";
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+        broken = candidate; broken["content_sha256"] = QString(64, 'g');
+        QVERIFY(!MissionProtocol::validResponse(op, {}, {{"recommendations", QJsonArray{broken}}}));
+    }
+    void skillRecommendationAndCreatePostBodies() {
+        const auto request = example("skill_recommendations_request");
+        const auto response = example("skill_recommendations_response");
+        const auto withSkills = example("mission_create_with_skills_request");
+        Source source;
+        source.handle = [&](const Request &r) {
+            if (r.path == "/api/v2/skills/recommendations") Source::json(r, response);
+            else if (r.body.contains("selected_skills")) Source::json(r, example("mission_skill_selection_changed_error"), 409);
+            else Source::json(r, mission(), 202);
+        };
+        AgentApiClient api;
+        api.setBaseUrl(source.url());
+        QSignalSpy received(&api, &AgentApiClient::responseReceived), errors(&api, &AgentApiClient::requestError);
+        const auto serial = api.recommendSkills(request);
+        QTRY_COMPARE(received.size(), 1);
+        QCOMPARE(received.first()[0].toULongLong(), serial);
+        QCOMPARE(received.first()[1].toString(), "mission.recommendations");
+        QCOMPARE(received.first()[3].toJsonObject(), response);
+        QCOMPARE(source.requests.first().method, "POST");
+        QCOMPARE(source.requests.first().path, "/api/v2/skills/recommendations");
+        QCOMPARE(source.requests.first().body, request);
+        api.createMission(withSkills);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first()[3].toInt(), 409);
+        QCOMPARE(errors.first()[4].toString(), "skill_selection_changed");
+        QCOMPARE(source.requests.last().method, "POST");
+        QCOMPARE(source.requests.last().path, "/api/v2/missions");
+        QCOMPARE(source.requests.last().body, withSkills);
+        auto empty = withSkills;
+        empty["selected_skills"] = QJsonArray{};
+        api.createMission(empty);
+        QTRY_COMPARE(received.size(), 2);
+        empty.remove("selected_skills");
+        QCOMPARE(source.requests.last().body, empty);
+        QCOMPARE(source.requests.size(), 3);
+    }
     void reviewedSkillSelectionAndInjectionHistory() {
         const auto request = example("mission_create_with_skills_request");
         const auto history = example("mission_skills_response");

@@ -75,6 +75,190 @@ class MissionControllerTests : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(MissionProtocol::validMission(mission())); QVERIFY(MissionProtocol::validGraph(graph(mission()))); }
+    void skillRecommendationsDebounceAndIgnoreSupersededReplies()
+    {
+        Fixture f;
+        QList<Request> held;
+        f.intercept = [&](const Request &r) {
+            if (r.path != "/api/v2/skills/recommendations") return false;
+            held.append(r);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        for (const auto &text : {"a", "ab", "abc"})
+            c.updateSkillContext(text, "auto", "D:/repo", {});
+        QTRY_COMPARE(held.size(), 1);
+        QCOMPARE(held[0].body, (QJsonObject{{"description", "abc"}, {"task_type", "auto"}}));
+        c.updateSkillContext("new", "bug_fix", "D:/repo", {"Qt"});
+        QTRY_COMPARE(held.size(), 2);
+        QCOMPARE(held[1].body, (QJsonObject{{"description", "new"}, {"task_type", "bug_fix"}, {"project_tags", QJsonArray{"Qt"}}}));
+        const auto latest = protocolExample("skill_recommendations_response");
+        auto stale = latest.value("recommendations").toArray().first().toObject();
+        stale.insert("name", "stale result");
+        QSignalSpy changes(&c, &MissionController::skillRecommendationsChanged);
+        Source::json(held[1], latest);
+        Source::json(held[0], {{"recommendations", QJsonArray{stale}}});
+        QTRY_VERIFY(!c.recommendationsLoading());
+        QTest::qWait(80);
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(c.skillRecommendations(), latest.value("recommendations").toArray().toVariantList());
+        QVERIFY(c.selectedSkillIds().isEmpty());
+        const auto id = stale.value("skill_id").toString();
+        c.setSkillSelected(id, true);
+        QCOMPARE(c.selectedSkillIds(), QStringList{id});
+        QCOMPARE(changes.size(), 1);
+        c.updateSkillContext("new", "bug_fix", "D:/other", {"Qt"});
+        QVERIFY(c.selectedSkillIds().isEmpty());
+        QVERIFY(c.skillRecommendations().isEmpty());
+        QTRY_COMPARE(held.size(), 3);
+        QCOMPARE(held[2].body, held[1].body); // Repository identity stays local.
+
+        Fixture other;
+        c.setBaseUrl(other.source.url());
+        Source::json(held[2], latest);
+        QTRY_VERIFY(c.historyLoaded());
+        QVERIFY(c.skillRecommendations().isEmpty());
+        QVERIFY(!c.recommendationsLoading());
+        QCOMPARE(other.posts("/skills/recommendations"), 0);
+    }
+    void checkedSkillsUseExactIdentitiesAndRejectionRequiresExplicitResubmission_data()
+    {
+        QTest::addColumn<QString>("code");
+        QTest::addColumn<int>("status");
+        QTest::addColumn<bool>("refreshChoices");
+        QTest::newRow("superseded-version") << QString("skill_selection_changed") << 409 << true;
+        QTest::newRow("older-create-schema") << QString("invalid_request") << 422 << true;
+        QTest::newRow("local-route-required") << QString("skill_route_denied") << 403 << false;
+        QTest::newRow("input-budget") << QString("skill_budget_exceeded") << 422 << false;
+    }
+    void checkedSkillsUseExactIdentitiesAndRejectionRequiresExplicitResubmission()
+    {
+        QFETCH(QString, code);
+        QFETCH(int, status);
+        QFETCH(bool, refreshChoices);
+        Fixture f;
+        const auto exact = protocolExample("mission_skills_response").value("selected_skills").toArray();
+        auto first = protocolExample("skill_recommendations_response").value("recommendations").toArray().first().toObject();
+        auto second = first;
+        const auto secondIdentity = exact[1].toObject();
+        for (auto it = secondIdentity.begin(); it != secondIdentity.end(); ++it)
+            second.insert(it.key(), it.value());
+        auto third = first;
+        third.insert("skill_id", "third");
+        const QJsonObject offered{{"recommendations", QJsonArray{first, second, third}}};
+        const QString token(64, 'a');
+        const QJsonObject preview{{"preview_token", token}, {"base_commit", QString(40,'a')},
+            {"source_head", QString(40,'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{}},
+            {"patch", ""}, {"build", QJsonObject{{"source", "preset"}}}};
+        QList<QJsonObject> creations;
+        f.intercept = [&](const Request &r) {
+            if (r.path == "/api/v2/missions/preview") Source::json(r, preview);
+            else if (r.path == "/api/v2/skills/recommendations") Source::json(r, offered);
+            else if (r.method == "POST" && r.path == "/api/v2/missions") {
+                creations.append(r.body);
+                if (creations.size() == 1) Source::json(r, conflict(code), status);
+                else Source::json(r, f.current, 202);
+            } else return false;
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.previewCreation({{"repository_path", "D:/repo"}});
+        c.updateSkillContext("worker", "bug_fix", "D:/repo", {});
+        QTRY_VERIFY(c.creationReady());
+        QTRY_COMPARE(c.skillRecommendations().size(), 3);
+        c.setSkillSelected(first.value("skill_id").toString(), true);
+        c.setSkillSelected(second.value("skill_id").toString(), true);
+        c.setSkillSelected("third", true);
+        QCOMPARE(c.selectedSkillIds().size(), 2);
+        QCOMPARE(c.creationPreview(), preview.toVariantMap());
+        QVERIFY(c.creationReady());
+        QCOMPARE(f.posts("/missions/preview"), 1);
+        const QVariantMap draft{{"request", "worker"}, {"repository_path", "D:/repo"},
+            {"task_type", "bug_fix"}, {"preview_token", token}};
+        c.createMission(draft);
+        QTRY_VERIFY(!c.creationError().isEmpty());
+        QCOMPARE(creations.size(), 1);
+        auto expected = QJsonObject::fromVariantMap(draft);
+        expected.insert("selected_skills", exact);
+        QCOMPARE(creations[0], expected);
+        if (refreshChoices) {
+            QVERIFY(c.selectedSkillIds().isEmpty());
+            QTRY_COMPARE(f.posts("/skills/recommendations"), 2);
+        } else {
+            QCOMPARE(c.selectedSkillIds().size(), 2);
+            QCOMPARE(f.posts("/skills/recommendations"), 1);
+            c.setSkillSelected(second.value("skill_id").toString(), false);
+        }
+        QTRY_VERIFY(!c.recommendationsLoading());
+        QCOMPARE(creations.size(), 1);
+        QVERIFY(c.creationReady());
+        QCOMPARE(c.creationPreview(), preview.toVariantMap());
+        c.createMission(draft);
+        QTRY_COMPARE(creations.size(), 2);
+        auto retry = QJsonObject::fromVariantMap(draft);
+        if (!refreshChoices) retry.insert("selected_skills", QJsonArray{exact.first()});
+        QCOMPARE(creations[1], retry);
+        QCOMPARE(f.posts("/missions/preview"), 1);
+    }
+    void unavailableRecommendationRouteAllowsPlainCreation()
+    {
+        Fixture f;
+        f.intercept = [&](const Request &r) {
+            if (r.path != "/api/v2/skills/recommendations") return false;
+            Source::json(r, {{"detail", "Not Found"}}, 404);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.updateSkillContext("worker", "auto", "D:/repo", {});
+        QTRY_VERIFY(!c.recommendationError().isEmpty());
+        QVERIFY(c.creationError().isEmpty());
+        QVERIFY(c.error().isEmpty());
+        const QVariantMap draft{{"request", "worker"}, {"repository_path", "D:/repo"}};
+        c.createMission(draft);
+        QTRY_COMPARE(c.taskId(), A);
+        QCOMPARE(f.posts("/missions"), 1);
+        for (const auto &r : f.source.requests)
+            if (r.method == "POST" && r.path == "/api/v2/missions") QCOMPARE(r.body, QJsonObject::fromVariantMap(draft));
+    }
+    void frozenSkillUsageLoadsOnlyOnDemandAndFollowsTaskIdentity()
+    {
+        Fixture f;
+        QList<Request> held;
+        f.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/skills")) return false;
+            held.append(r);
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(f.source.url());
+        c.selectMission(A);
+        QTRY_VERIFY(c.synchronized());
+        QCOMPARE(held.size(), 0);
+        c.loadMissionSkills();
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 1);
+        f.current = mission(B, 12, "succeeded");
+        c.selectMission(B);
+        QVERIFY(c.missionSkills().isEmpty());
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 2);
+        auto latest = protocolExample("mission_skills_response");
+        latest.insert("task_id", B);
+        Source::json(held[1], latest);
+        Source::json(held[0], protocolExample("mission_skills_empty_response"));
+        QTRY_COMPARE(c.missionSkills(), latest.toVariantMap());
+        c.refresh();
+        QTRY_VERIFY(c.synchronized());
+        QCOMPARE(held.size(), 2);
+        c.loadMissionSkills();
+        QTRY_COMPARE(held.size(), 3);
+        Source::json(held[2], conflict("skill_snapshot_invalid"), 409);
+        QTRY_VERIFY(!c.missionSkillsError().isEmpty());
+        QVERIFY(c.error().isEmpty());
+    }
     void creationPreviewInvalidationDisposesLateResultsAndRequiresReconfirmation_data()
     {
         QTest::addColumn<QString>("conflictCode");

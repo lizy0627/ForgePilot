@@ -66,17 +66,46 @@ bool only(const QJsonObject &o, const QSet<QString> &fields) {
 bool optional(const QJsonObject &o, const QString &name, bool (*check)(const QJsonValue &)) {
     return !o.contains(name) || check(o.value(name));
 }
+bool skillIdentity(const QJsonObject &skill) {
+    static const QRegularExpression idPattern(QRegularExpression::anchoredPattern("[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}"));
+    return idPattern.match(skill.value("skill_id").toString()).hasMatch()
+        && integer(skill.value("version"), 1) && skill.value("content_sha256").toString().size() == 64
+        && MissionProtocol::validHash(skill.value("content_sha256"));
+}
 bool selectedSkills(const QJsonValue &value) {
     if (!value.isArray() || value.toArray().size() > 2) return false;
-    static const QRegularExpression idPattern(QRegularExpression::anchoredPattern("[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}"));
     QSet<QString> ids;
     for (const auto &entry : value.toArray()) {
         const auto skill = entry.toObject();
         const auto id = skill.value("skill_id").toString();
-        if (!only(skill, {"skill_id", "version", "content_sha256"}) || !idPattern.match(id).hasMatch()
-            || ids.contains(id) || !integer(skill.value("version"), 1)
-            || skill.value("content_sha256").toString().size() != 64
-            || !MissionProtocol::validHash(skill.value("content_sha256"))) return false;
+        if (!only(skill, {"skill_id", "version", "content_sha256"}) || !skillIdentity(skill) || ids.contains(id)) return false;
+        ids.insert(id);
+    }
+    return true;
+}
+bool recommendationText(const QJsonValue &value, qsizetype maxLength) {
+    const auto text = value.toString();
+    return !text.trimmed().isEmpty() && !text.contains(QChar::Null) && text.isValidUtf16()
+        && text.size() <= 2 * maxLength && text.toUcs4().size() <= maxLength;
+}
+bool recommendationRequest(const QJsonObject &body) {
+    if (!only(body, {"description", "task_type", "project_tags"}) || !recommendationText(body.value("description"), 8192)
+        || (body.contains("task_type") && !oneOf(body.value("task_type"), {"auto", "bug_fix", "feature"}))) return false;
+    if (!body.contains("project_tags")) return true;
+    const auto tags = body.value("project_tags");
+    if (!tags.isArray() || tags.toArray().size() > 32) return false;
+    for (const auto &tag : tags.toArray()) if (!recommendationText(tag, 256)) return false;
+    return true;
+}
+bool recommendations(const QJsonValue &value) {
+    if (!value.isArray() || value.toArray().size() > 3) return false;
+    QSet<QString> ids;
+    for (const auto &entry : value.toArray()) {
+        const auto skill = entry.toObject();
+        const auto id = skill.value("skill_id").toString();
+        const auto reasons = skill.value("reasons");
+        if (!skillIdentity(skill) || ids.contains(id) || !text(skill.value("name")) || !skill.value("summary").isString()
+            || !strings(reasons) || reasons.toArray().isEmpty()) return false;
         ids.insert(id);
     }
     return true;
@@ -434,6 +463,7 @@ bool MissionProtocol::validEvent(const QJsonObject &o, const QString &event, con
         && (!d.contains("artifact_ids") || strings(d.value("artifact_ids")));
 }
 bool MissionProtocol::validResponse(const QString &op, const QString &id, const QJsonObject &o) {
+    if (op == "mission.recommendations") return recommendations(o.value("recommendations"));
     if (op == "mission.discard_preview") return o.value("discarded").isBool() && o.value("discarded").toBool();
     if (op == "mission.preview") return validHash(o.value("preview_token"))
         && text(o.value("base_commit")) && text(o.value("source_head"))
@@ -457,6 +487,7 @@ bool MissionProtocol::validResponse(const QString &op, const QString &id, const 
     return validMission(o);
 }
 bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
+    if (op == "mission.recommendations") return recommendationRequest(o);
     if (op == "mission.list") return only(o, {"before", "repository_path", "status"})
         && o.value("before").isString() && o.value("repository_path").isString()
         && o.value("status").isString() && (o.value("status").toString().isEmpty() || validState(o.value("status").toString()));
