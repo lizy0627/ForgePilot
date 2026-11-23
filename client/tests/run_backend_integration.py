@@ -245,6 +245,21 @@ def verify_joint(repository, output, store, task, captures, requests):
         tools=[r['name'] for r in started], tests=task['build_result']['tests']), ensure_ascii=False, indent=2), 'utf-8')
 
 
+def run_qt_test(binary, report, log, env, timeout):
+    # Wait for the test executable itself. A child inheriting a console handle
+    # must not keep the harness waiting for EOF after the executable exits.
+    with tempfile.TemporaryFile() as console:
+        try:
+            run = subprocess.run([str(binary), '-v2', '-o', f'{report},txt'],
+                                 env=env, stdout=console, stderr=subprocess.STDOUT, timeout=timeout)
+        finally:
+            console.seek(0)
+            detail = (report.read_bytes() if report.exists() else b'') + console.read()
+            log.write_bytes(detail)
+            print(detail.decode('utf-8', errors='replace'), flush=True)
+    return run.returncode
+
+
 def main():
     root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -367,18 +382,14 @@ def main():
                         task_states=[r['task']['state'] for r in records], automatic_approval=False,
                         note='Exit 0 only closes the manual session; it is not an acceptance pass'),indent=2),'utf-8')
                 return 0
-            report = output/"qml-test-results.txt"
-            run = subprocess.run([str(binary),"-v1","-o",str(report)+",txt"], env=env, capture_output=True, timeout=180)
-            detail = report.read_bytes() if report.exists() else b""
-            (output/"qml-backend.log").write_bytes(detail+run.stdout+run.stderr)
-            print((detail+run.stdout+run.stderr).decode("utf-8",errors="replace"))
+            returncode = run_qt_test(binary, output/'qml-test-results.txt', output/'qml-backend.log', env, 180)
             store=app.state.task_host.store
             records=[]
             for task in store.list():
                 events,closed=store.read(task["task_id"],0)
                 records.append(dict(task=task,events=[dict(id=e.id, payload=e.payload.model_dump()) for e in events],closed=closed))
             (output/"qml-backend-evidence.json").write_text(json.dumps(records,ensure_ascii=False,indent=2),encoding="utf-8")
-            if run.returncode: return run.returncode
+            if returncode: return returncode
             expected=['completed'] if args.scenario=='joint' else [] if args.deletion else ['cancelled','cancelled','completed'] if args.conversations else ["cancelled","cancelled","completed","failed","failed"]
             assert sorted(r["task"]["state"] for r in records)==expected
             if args.scenario == 'joint':
@@ -443,12 +454,8 @@ def main():
             while not server.started:
                 if not thread.is_alive() or time.monotonic()>deadline: raise RuntimeError("Restarted backend did not start")
                 time.sleep(.01)
-            report=output/"qml-restart-results.txt"
-            run=subprocess.run([str(binary),"-v1","-o",str(report)+",txt"],env=env,capture_output=True,timeout=60)
-            detail=report.read_bytes() if report.exists() else b""
-            (output/"qml-restart.log").write_bytes(detail+run.stdout+run.stderr)
-            print((detail+run.stdout+run.stderr).decode("utf-8",errors="replace"))
-            if run.returncode: return run.returncode
+            returncode = run_qt_test(binary, output/'qml-restart-results.txt', output/'qml-restart.log', env, 60)
+            if returncode: return returncode
             if args.conversations:
                 for capture in chat_captures:
                     advertised = {LEGACY_ALIASES.get(tool['name'], tool['name'])
