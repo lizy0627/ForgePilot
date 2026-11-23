@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from conftest import drop_skill_schema
 from forgepilot.artifacts import (
     ArtifactIntegrityError, ArtifactStorageError, ChangeSet, ChangedFile, create_artifact,
 )
@@ -32,6 +33,7 @@ def _v7_database(path: Path) -> str:
     conversation_id = store.create_conversation(title="schema seven survives")["conversation_id"]
     store.close()
     with sqlite3.connect(path) as db:
+        drop_skill_schema(db)
         for table in SCHEMA8_TABLES:
             db.execute(f'DROP TABLE "{table}"')
         db.execute("PRAGMA user_version=7")

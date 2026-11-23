@@ -10,6 +10,12 @@ from forgepilot.llm import ChatReply
 from forgepilot.process import executable
 
 
+def drop_skill_schema(db):
+    """Rebuild pre-v12 test databases after seeding their legacy records."""
+    for table in ("mission_skill_snapshots", "skill_drafts", "skill_versions", "skills"):
+        db.execute(f'DROP TABLE "{table}"')
+
+
 @pytest.fixture(autouse=True)
 def isolated_history_database(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGEPILOT_DATABASE",str(tmp_path / "test-history.sqlite3"))

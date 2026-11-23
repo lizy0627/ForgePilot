@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from conftest import reply,ScriptedLLM
+from conftest import reply,ScriptedLLM,drop_skill_schema
 from forgepilot.api import create_app
 from forgepilot.chat_service import ChatService,READ_TOOLS
 from forgepilot.memory_context import SUMMARY_SYSTEM,project_identity
@@ -437,6 +437,7 @@ async def test_delete_conversation_waits_summary_cleanup_and_no_resurrection():
 def version_two(path):
     store=SqliteEventStore(path); cid=store.create_conversation()['conversation_id']; seed(store,cid,2); store.close()
     with sqlite3.connect(path) as db:
+        drop_skill_schema(db)
         for table in ("writer_scope_expansions", "security_events", "validation_runs", "workspace_records", "checkpoint_intents", "checkpoints",
                       "graph_node_results", "graph_node_states", "graph_run_inputs", "graph_events",
                       "model_calls", "approvals", "artifact_relations", "artifacts",

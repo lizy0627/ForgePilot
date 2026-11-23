@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+from conftest import drop_skill_schema
 from forgepilot.errors import ForgePilotError
 from forgepilot.orchestration.checkpoint import (
     CheckpointIntegrityError, CheckpointStore, checkpoint_id_for,
@@ -47,6 +48,7 @@ def _v9_database(path):
     )
     store.close()
     with sqlite3.connect(path) as db:
+        drop_skill_schema(db)
         db.execute("DROP TABLE writer_scope_expansions")
         db.execute("DROP TABLE checkpoint_intents")
         db.execute("ALTER TABLE task_graph_runs DROP COLUMN recovery_required")

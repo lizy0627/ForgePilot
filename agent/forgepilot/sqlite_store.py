@@ -25,6 +25,8 @@ from .mission_store import (
     create_scope_expansion_schema, recover_graph_runs,
 )
 from .artifacts.sqlite_store import SqliteArtifactStore
+from .skill_schema import create_skill_schema
+from .skill_store import SkillRepository
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
 from uuid import uuid4
@@ -86,6 +88,7 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.artifact_store = self.artifacts
             self.missions = MissionRepository(self)
             self.mission_repository = self.missions
+            self.skills = SkillRepository(self)
             self._recover()
             self.recover_conversations()
             self._inspect_graph_recovery()
@@ -190,6 +193,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.WRITER_SCOPE_EXPANSION:
                 create_scope_expansion_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.WRITER_SCOPE_EXPANSION)}')
+            if version < SchemaVersion.LOCAL_SKILL_LIBRARY:
+                create_skill_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.LOCAL_SKILL_LIBRARY)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(
