@@ -3,6 +3,7 @@
 #include "RagController.h"
 #include "McpController.h"
 #include "ClientUi.h"
+#include "Protocol.h"
 #include "ColorContrast.h"
 #include "HttpFixture.h"
 #include <QGuiApplication>
@@ -22,6 +23,28 @@
 #include <functional>
 
 namespace {
+bool waitForCompletedBuild(TaskController &controller)
+{
+    const bool finished = QTest::qWaitFor([&] { return Protocol::terminal(controller.state()); }, 60000);
+    if (finished && controller.state() == "completed")
+        return true;
+
+    const auto snapshot = controller.snapshot();
+    qWarning() << "Offline build task" << controller.state() << snapshot.value("error").toString();
+    const auto report = snapshot.value("build_result").toMap();
+    const auto commands = report.value("commands").toList();
+    for (const auto &entry : commands) {
+        const auto command = entry.toMap();
+        if (command.value("status").toString() != "succeeded") {
+            qWarning().noquote() << command.value("phase").toString() << command.value("status").toString()
+                                 << command.value("stdout").toString().right(1500)
+                                 << command.value("stderr").toString().left(1500);
+            break;
+        }
+    }
+    return false;
+}
+
 // Exercise persisted v1 conversations explicitly; desktop submissions use Missions.
 bool submitLegacyTask(TaskController &tasks, ConversationController &conversations, const QString &prompt)
 {
@@ -128,7 +151,7 @@ class BackendTest : public QObject {
             api.approveTask(task,1); QTRY_COMPARE(errors.size(),1); QCOMPARE(errors[0][3].toInt(),409); QCOMPARE(errors[0][4].toString(),QString("stale_plan"));
             QCOMPARE(read(repository+"/main.cpp"),baseline); QVERIFY(capture("joint-v2-before-approval"));
             QVERIFY(click("approveButton"));
-            QTRY_COMPARE_WITH_TIMEOUT(controller.state(),QString("completed"),60000);
+            QVERIFY(waitForCompletedBuild(controller));
             QTRY_COMPARE(controller.connectionState(),QString("ended"));
             QTRY_VERIFY(!conversations.active() && !conversations.busy() && !conversations.loading());
             QCOMPARE(controller.taskId(),task); QCOMPARE(controller.snapshot().value("approved_plan_version").toInt(),2);
@@ -628,7 +651,7 @@ private slots:
         QTRY_VERIFY(!find("approveButton")->property("enabled").toBool());
         QTRY_VERIFY(controller.state()!="waiting_approval");
         if(!output.isEmpty()) QVERIFY(window->grabWindow().save(output+"/running.png"));
-        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),"completed",60000);
+        QVERIFY(waitForCompletedBuild(controller));
         QTRY_VERIFY_WITH_TIMEOUT(!controller.snapshot().value("finished_at").toString().isEmpty(),10000);
         QTRY_COMPARE(controller.connectionState(),"ended");
         QCOMPARE(builds.size(),2); QCOMPARE(tests.size(),1); QVERIFY(tests[0][0].toBool());
