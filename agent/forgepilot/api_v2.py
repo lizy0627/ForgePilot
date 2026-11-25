@@ -125,7 +125,7 @@ def register_skill_routes(app, store, draft_jobs):
         qualifies a candidate. Rank by counts of matched symptoms, complete groups and
         project tags, in that order. Break ties by ascending skill ID.
         """
-        matches = recommend_skills(skills, **body.model_dump()) if skill_entries_enabled() else []
+        matches = recommend_skills(skills, **body.model_dump()) if skill_entries_enabled(store) else []
         logging.getLogger(__name__).info("Skill recommendation count=%d", len(matches),
                                          extra={"recommendation_count": len(matches)})
         return {"recommendations": matches}
@@ -146,7 +146,7 @@ def register_skill_routes(app, store, draft_jobs):
         policy or the configured route cannot support generation, the note is still editable.
         Reuse request_id on retries. Omitting the ID creates a new draft on each call.
         """
-        require_skill_entries()
+        require_skill_entries(store)
         if body.generation_mode == "model":
             draft, attempt_id = await draft_jobs.create(task_id, developer_note=body.developer_note,
                                                         request_id=body.request_id)
@@ -164,7 +164,7 @@ def register_skill_routes(app, store, draft_jobs):
         Poll GET /api/v2/skill-drafts/{draft_id}. Generation writes to its attempt and preserves
         editor fields. Repeat the request ID and expected revision to replay the same operation.
         """
-        require_skill_entries()
+        require_skill_entries(store)
         draft, attempt_id = await draft_jobs.regenerate(draft_id, **body.model_dump())
         return accepted(response, draft, attempt_id)
 
@@ -238,7 +238,7 @@ def register_skill_routes(app, store, draft_jobs):
               responses=skill_responses("skill_not_found", "skill_request_conflict", "skill_entries_disabled", write=True))
     def create_skill_revision_draft(skill_id: SkillID, body: CreateSkillRevisionDraft):
         """Open a revision draft from the exact base version. Publish checks that the base is still current."""
-        require_skill_entries()
+        require_skill_entries(store)
         return skills.draft_from_version(skill_id, **body.model_dump())
 
 
@@ -249,7 +249,7 @@ def register_mission_routes(app, host, streams):
     @app.post(prefix, response_model=MissionResponse, status_code=202, responses=errors)
     async def create_mission(body: CreateMission):
         """Freeze the selected reviewed versions at admission. Refresh choices after a 409 skill_selection_changed."""
-        if body.selected_skills and not skill_entries_enabled():
+        if body.selected_skills and not skill_entries_enabled(host.store):
             raise ForgePilotError("skill_selection_changed", "Skill selection is disabled. Refresh and submit without skills")
         return await host.create(**body.model_dump())
 

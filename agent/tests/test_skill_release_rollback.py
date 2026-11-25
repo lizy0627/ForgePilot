@@ -6,18 +6,25 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
+
+from forgepilot import builtin_skills
 from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 from forgepilot.skill_selection import skill_manifest_sha256
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.workspace_manager import WorkspaceManager
 from test_api_v2 import request_body
 from test_artifact_protocol import TASK_ID
 from test_mission_events import finish_mission, make_mission
 from test_skill_drafts_http import V2, error, local_api, success
 from test_skill_recommendations_http import SAVE_TASK, recommend
 from test_skill_selection_store import admit, publish
+from test_workspace_manager import committed_repo
 
 
-def test_stop_new_entries_keeps_private_draft_and_frozen_selection(tmp_path, monkeypatch, qt_draft):
+@pytest.mark.parametrize("cause", ["explicit_disable", "invalid_catalog"])
+def test_stop_new_entries_keeps_private_draft_and_frozen_selection(tmp_path, monkeypatch, qt_draft,
+                                                                 committed_repo, git_exe, cause):
     with local_api(tmp_path) as (client, store):
         make_mission(store)
         finish_mission(store)
@@ -28,8 +35,13 @@ def test_stop_new_entries_keeps_private_draft_and_frozen_selection(tmp_path, mon
         selected = store.skills.resolve_selection([ref])
         admit(store, selected)
 
-    monkeypatch.setenv("FORGEPILOT_DISABLE_SKILL_ENTRIES", "1")
-    with local_api(tmp_path) as (client, store):
+    if cause == "explicit_disable":
+        monkeypatch.setenv("FORGEPILOT_DISABLE_SKILL_ENTRIES", "1")
+    else:
+        (tmp_path / "catalog.json").write_text("invalid", encoding="utf-8")
+        monkeypatch.setattr(builtin_skills, "builtin_resource_directory", lambda: tmp_path)
+    workspace = WorkspaceManager(tmp_path / "workspaces", git_executable=git_exe)
+    with local_api(tmp_path, workspace=workspace) as (client, store):
         assert recommend(client, SAVE_TASK) == []
         detail = f"{V2}/skill-drafts/{draft['draft_id']}"
         assert success(client.get(detail)) == draft
@@ -45,6 +57,11 @@ def test_stop_new_entries_keeps_private_draft_and_frozen_selection(tmp_path, mon
         error(client.post(V2 + "/missions", json=request_body(selected_skills=[ref])),
               409, "skill_selection_changed")
         assert store.skills.load_frozen("m", skill_manifest_sha256(selected)) == selected
+
+        conversation = success(client.post("/api/v1/conversations", json={}), 201)
+        assert success(client.get(f"/api/v1/conversations/{conversation['conversation_id']}")) == conversation
+        mission = success(client.post(V2 + "/missions", json=request_body(repository_path=str(committed_repo))), 202)
+        assert store.skills.mission_usage(mission["task_id"])["selected_skills"] == []
 
 
 def test_restore_pre_upgrade_copy_and_preserve_post_upgrade_data(tmp_path):

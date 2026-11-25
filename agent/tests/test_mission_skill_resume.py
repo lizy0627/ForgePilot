@@ -5,6 +5,7 @@ from threading import Event
 import pytest
 
 from closed_loop_support import make_loop_case
+from forgepilot import builtin_skills
 from forgepilot.orchestration.checkpoint import CheckpointStore
 from forgepilot.orchestration.execution import coordinator_for_storage
 from test_mission_api_workflow import poll
@@ -12,7 +13,7 @@ from test_mission_skill_workflow import RecordingAnalyst, create_mission, select
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("rollback", [None, "explicit_disable", "missing_catalog"])
 async def test_resume_after_task_spec_uses_frozen_skills_at_first_dispatch(tmp_path, git_exe, qt_draft, monkeypatch,
                                                                           rollback):
     case = await make_loop_case(tmp_path, git_exe)
@@ -46,8 +47,10 @@ async def test_resume_after_task_spec_uses_frozen_skills_at_first_dispatch(tmp_p
             host.store.skills.disable(first["skill_id"], expected_revision=2)
 
         restarted_provider = RecordingAnalyst(case)
-        if rollback:
+        if rollback == "explicit_disable":
             monkeypatch.setenv("FORGEPILOT_DISABLE_SKILL_ENTRIES", "1")
+        elif rollback == "missing_catalog":
+            monkeypatch.setattr(builtin_skills, "builtin_resource_directory", lambda: tmp_path / "missing")
         async with session(case, tmp_path, git_exe, restarted_provider, restart=True) as (client, _):
             mission = (await client.get(path)).json()
             assert mission["recovery_required"]

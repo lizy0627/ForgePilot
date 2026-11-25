@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -91,8 +92,16 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.missions = MissionRepository(self)
             self.mission_repository = self.missions
             self.skills = SkillRepository(self)
-            if skill_entries_enabled():
-                import_builtin_skills(self)
+            self.builtin_skill_error: str | None = None
+            if skill_entries_enabled(self):
+                try:
+                    import_builtin_skills(self)
+                except ForgePilotError as exc:
+                    if exc.code not in ("invalid_skill_catalog", "skill_package_conflict", "skill_package_downgrade"):
+                        raise
+                    self.builtin_skill_error = exc.code
+                    logging.getLogger(__name__).warning(
+                        "New skill entries disabled after built-in import failed: %s", exc.code)
             self.skills.interrupt_generations()
             self._recover()
             self.recover_conversations()

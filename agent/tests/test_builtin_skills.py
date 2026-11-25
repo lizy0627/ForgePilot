@@ -101,37 +101,57 @@ def test_withdraw_reinstate_and_preserve_user_disable(tmp_path, monkeypatch, qt_
         assert recommendations(reopened.skills) == set()
 
 
-def test_failed_import_rolls_back_whole_catalog_and_retries(tmp_path, monkeypatch, qt_draft):
+@pytest.mark.parametrize(("error_code", "release_version"), [
+    ("skill_package_conflict", 2),
+    ("skill_package_downgrade", 1),
+    ("invalid_skill_catalog", 2),
+])
+def test_failed_import_rolls_back_whole_catalog_and_retries(
+        tmp_path, monkeypatch, qt_draft, caplog, error_code, release_version):
     first, second = tmp_path / "first", tmp_path / "second"
     with closing(SqliteEventStore()) as author:
         local = publish(author.skills, qt_draft)
-        original = release(first, author.skills, local, 1)
+        original = release(first, author.skills, local, 2)
         addition = release(second, author.skills, local, 1, slug="first-in-batch")
         renamed = publish(author.skills, qt_draft.model_copy(update={"name": "不同的名称"}))
-        conflicting = release(second, author.skills, renamed, 1)
+        replacement = release(second, author.skills, renamed, release_version)
     catalog(first, original)
     monkeypatch.setattr(builtin_skills, "builtin_resource_directory", lambda: first)
     path = tmp_path / "reader.sqlite3"
     with closing(SqliteEventStore(path)) as store:
+        installed = store.skills.get_skill("builtin:qt-example")
+        version = store.skills.get_version(installed.skill_id, installed.current_version)
         draft = store.skills.create_draft(request_id="private", data=qt_draft)
-    # Only the second item conflicts during the write transaction.
-    catalog(second, addition, conflicting)
+    catalog(second, addition, replacement)
+    if error_code == "invalid_skill_catalog":
+        (second / "catalog.json").write_text("invalid", encoding="utf-8")
     monkeypatch.setattr(builtin_skills, "builtin_resource_directory", lambda: second)
-    with pytest.raises(ForgePilotError, match="skill_package_conflict"):
-        SqliteEventStore(path)
-    with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT skill_id,revision FROM skills").fetchall() == [("builtin:qt-example", 1)]
-    (second / "catalog.json").write_text("invalid", encoding="utf-8")
-    with pytest.raises(ForgePilotError, match="invalid_skill_catalog"):
-        SqliteEventStore(path)
-    with monkeypatch.context() as patch:
-        patch.setenv("FORGEPILOT_DISABLE_SKILL_ENTRIES", "1")
-        with closing(SqliteEventStore(path)) as store:
-            assert store.skills.get_draft(draft.draft_id) == draft
+    with closing(SqliteEventStore(path)) as store:
+        assert store.builtin_skill_error == error_code
+        assert store.skills.get_draft(draft.draft_id) == draft
+        assert store.skills.get_skill(installed.skill_id) == installed
+        assert store.skills.get_version(installed.skill_id, installed.current_version) == version
+        assert [row[0] for row in store._db.execute("SELECT skill_id FROM skills")] == [installed.skill_id]
+        assert sum(error_code in message for message in caplog.messages) == 1
     catalog(second, addition)
     with closing(SqliteEventStore(path)) as reopened:
+        assert reopened.builtin_skill_error is None
         assert recommendations(reopened.skills) == {"builtin:first-in-batch"}
         assert reopened.skills.get_draft(draft.draft_id) == draft
+
+
+@pytest.mark.parametrize(("failure", "expected_code"), [
+    (ForgePilotError("unexpected_import_error", "Import failed"), "unexpected_import_error"),
+    (sqlite3.OperationalError("database is locked"), "storage_unavailable"),
+])
+def test_other_import_errors_still_fail_startup(monkeypatch, failure, expected_code):
+    def fail_import(store):
+        raise failure
+
+    monkeypatch.setattr("forgepilot.sqlite_store.import_builtin_skills", fail_import)
+    with pytest.raises(ForgePilotError) as caught:
+        SqliteEventStore()
+    assert caught.value.code == expected_code
 
 
 @pytest.mark.parametrize("entry", [
