@@ -24,6 +24,12 @@ QJsonObject artifact() {
         {"parent_artifact_ids", QJsonArray{}}, {"content_sha256", QString(64, 'a')},
         {"content", QJsonObject{{"summary", "Evidence"}, {"items", QJsonArray{item}}}}};
 }
+QJsonObject futureArtifact() {
+    auto record = artifact();
+    record["artifact_type"] = "FutureAnalysis";
+    record["content"] = QJsonObject{{"observations", QJsonArray{"example"}}};
+    return record;
+}
 QJsonObject graph() {
     const QJsonObject node{{"node_id", "analysis"}, {"node_type", "agent"}, {"status", "running"}, {"attempt", 1}, {"result", QJsonValue::Null}};
     const QJsonObject definition{{"node_id", "analysis"}, {"node_type", "agent"}, {"handler", "analysis"},
@@ -409,6 +415,43 @@ private slots:
         auto a = artifact(); auto content = a["content"].toObject(); auto items = content["items"].toArray();
         auto item = items[0].toObject(); item["confidence"] = "0.8"; items[0] = item; content["items"] = items; a["content"] = content;
         QVERIFY(!MissionProtocol::validArtifact(a));
+    }
+    void unknownArtifactsRequireValidListEnvelopes() {
+        const auto future = futureArtifact();
+        const auto list = [](const QJsonArray &items) {
+            return QJsonObject{{"task_id", A}, {"items", items}};
+        };
+        QVERIFY(MissionProtocol::validArtifacts(list({future})));
+        for (const auto &field : future.keys()) {
+            auto incomplete = future;
+            incomplete.remove(field);
+            QVERIFY2(!MissionProtocol::validArtifacts(list({incomplete})), qPrintable(field));
+        }
+        auto foreign = future;
+        foreign["task_id"] = B;
+        QVERIFY(!MissionProtocol::validArtifacts(list({foreign})));
+        QVERIFY(!MissionProtocol::validArtifacts(list({artifact(), future}))); // Same artifact ID.
+
+        QVERIFY(!MissionProtocol::validResponse("mission.artifact", A, future));
+        QVERIFY(!MissionProtocol::validDiff({{"task_id", A}, {"patch", ""}, {"change_sets", QJsonArray{future}}}));
+        QVERIFY(!MissionProtocol::validValidation({{"task_id", A}, {"items", QJsonArray{future}}, {"latest", future}}));
+    }
+    void malformedKnownReportStillFailsArtifactListRequest() {
+        auto report = artifact();
+        report["artifact_id"] = "33333333-3333-4333-8333-333333333333";
+        report["artifact_type"] = "ValidationReport";
+        report["content"] = QJsonObject{{"status", "passed"}};
+        Source source;
+        source.handle = [&](const Request &r) {
+            Source::json(r, {{"task_id", A}, {"items", QJsonArray{futureArtifact(), report}}});
+        };
+        AgentApiClient api;
+        QVERIFY(api.setBaseUrl(source.url()));
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived), errors(&api, &AgentApiClient::requestError);
+        api.getMissionArtifacts(A);
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first()[4].toString(), "invalid_response");
+        QVERIFY(responses.isEmpty());
     }
     void allV2Routes() {
         Source source;

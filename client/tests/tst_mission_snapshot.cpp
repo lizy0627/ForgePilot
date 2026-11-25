@@ -143,6 +143,11 @@ private slots:
             f.artifacts.append(change);
             f.artifacts.append(report);
         }
+        // Even a future report with familiar fields belongs only in the general list.
+        auto future = report;
+        future["artifact_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        future["artifact_type"] = "FutureValidationReport";
+        f.artifacts.append(future);
         AgentApiClient api; QVERIFY(api.setBaseUrl(f.source.url()));
         MissionSnapshotLoader loader(&api); QSignalSpy ready(&loader, &MissionSnapshotLoader::snapshotReady);
         loader.selectTask(task); loader.refresh();

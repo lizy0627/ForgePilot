@@ -42,9 +42,10 @@ Item {
             if (artifactType(artifacts[i]) === type) return artifacts[i].content || {};
         return {};
     }
-    function artifactTitle(artifact) {
-        return ({TaskSpec:"任务说明", EvidenceBundle:"分析证据", ExecutionPlan:"执行计划", ChangeSet:"代码修改",
-            ValidationReport:"构建与测试", ReviewReport:"独立审查", DeliveryBundle:"交付结果"})[artifactType(artifact)] || "节点产物";
+    function knownArtifactTitle(type) {
+        var titles = {TaskSpec:"任务说明", EvidenceBundle:"分析证据", ExecutionPlan:"执行计划", ChangeSet:"代码修改",
+            ValidationReport:"构建与测试", ReviewReport:"独立审查", DeliveryBundle:"交付结果"};
+        return titles.hasOwnProperty(type) ? titles[type] : "";
     }
     function sections(artifact) {
         var data = artifact.content || {}, entries = [];
@@ -104,8 +105,6 @@ Item {
                 + "\n修改文件：\n" + list(data.changed_files) + "\n补丁路径：" + text(data.patch_path)
                 + "\n残余风险：\n" + list(data.risks) + "\n回退：" + text(data.rollback));
             break;
-        default:
-            add("内容", JSON.stringify(data, null, 2));
         }
         return entries;
     }
@@ -395,7 +394,9 @@ Item {
                     value: root.artifactContent("DeliveryBundle").usage_instructions || ""
                 }
                 Repeater {
-                    model: root.approvalNode || root.deliveryNode ? [] : root.artifacts
+                    model: root.approvalNode || root.deliveryNode
+                        ? root.artifacts.filter(function(item) { return !root.knownArtifactTitle(root.artifactType(item)) })
+                        : root.artifacts
                     delegate: Controls.Panel {
                         id: artifactPanel
                         required property var modelData
@@ -413,7 +414,9 @@ Item {
                         readonly property var evidenceItem: evidence[selectedEvidence] || ({})
                         objectName: "workflowArtifactPanel"
                         Layout.fillWidth: true
-                        title: root.artifactTitle(artifact)
+                        readonly property string knownTitle: root.knownArtifactTitle(kind)
+                        title: knownTitle || kind
+                        subtitle: knownTitle ? "" : "当前客户端暂不支持详情"
                         Repeater {
                             model: root.sections(artifactPanel.artifact)
                             delegate: ReadableBlock {

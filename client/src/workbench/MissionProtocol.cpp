@@ -147,7 +147,18 @@ bool review(const QJsonValue &v, const QString &id, qint64 revision) {
         && MissionProtocol::validHash(o.value("task_spec_hash")) && MissionProtocol::validHash(o.value("plan_hash"))
         && MissionProtocol::validHash(o.value("scope_hash")) && MissionProtocol::validHash(o.value("review_hash"));
 }
-bool artifactContent(const QString &type, const QJsonObject &o) {
+bool validArtifactEnvelope(const QJsonObject &o) {
+    if (!MissionProtocol::validId(o.value("artifact_id").toString()) || !MissionProtocol::validId(o.value("task_id").toString())
+        || o.value("artifact_type").toString().trimmed().isEmpty() || o.value("schema_version").toString() != "1.0"
+        || !text(o.value("producer")) || !text(o.value("producer_node")) || !stamp(o.value("created_at"))
+        || !MissionProtocol::validHash(o.value("content_sha256")) || !strings(o.value("parent_artifact_ids"))
+        || !o.value("content").isObject()) return false;
+    for (const auto &id : o.value("parent_artifact_ids").toArray()) if (!MissionProtocol::validId(id.toString())) return false;
+    return true;
+}
+bool validArtifactContent(const QJsonObject &artifact, bool allowUnknownType) {
+    const auto type = artifact.value("artifact_type").toString();
+    const auto o = artifact.value("content").toObject();
     if (type == "EvidenceBundle") {
         if (!text(o.value("summary")) || !objects(o.value("items"))) return false;
         for (const auto &v : o.value("items").toArray()) {
@@ -256,7 +267,7 @@ bool artifactContent(const QString &type, const QJsonObject &o) {
         && MissionProtocol::validId(o.value("review_report_artifact_id").toString()) && strings(o.value("changed_files"))
         && text(o.value("build_test_summary")) && text(o.value("reviewer_conclusion")) && text(o.value("usage_instructions"))
         && strings(o.value("risks")) && text(o.value("rollback"));
-    return false;
+    return allowUnknownType;
 }
 bool scopeExpansion(const QJsonObject &o) {
     if (!MissionProtocol::validRevision(o.value("revision")) || !text(o.value("node_id"))
@@ -279,15 +290,16 @@ bool scopeExpansion(const QJsonObject &o) {
     }
     return true;
 }
-bool artifactList(const QJsonValue &v, const QString &id, const QString &type = {}) {
+bool artifactList(const QJsonValue &v, const QString &id, const QString &requiredType = {}) {
     if (!v.isArray()) return false;
     QSet<QString> ids;
     for (const auto &item : v.toArray()) {
         if (!item.isObject()) return false;
         const auto a = item.toObject();
         const auto artifactId = a.value("artifact_id").toString();
-        if (!MissionProtocol::validArtifact(a) || a.value("task_id").toString() != id || ids.contains(artifactId)
-            || (!type.isEmpty() && a.value("artifact_type").toString() != type)) return false;
+        if (!validArtifactEnvelope(a) || a.value("task_id").toString() != id || ids.contains(artifactId)
+            || (!requiredType.isEmpty() && a.value("artifact_type").toString() != requiredType)
+            || !validArtifactContent(a, requiredType.isEmpty())) return false;
         ids.insert(artifactId);
     }
     return true;
@@ -428,12 +440,7 @@ bool MissionProtocol::validGraph(const QJsonObject &o) {
     return definitions == ids;
 }
 bool MissionProtocol::validArtifact(const QJsonObject &o) {
-    if (!validId(o.value("artifact_id").toString()) || !validId(o.value("task_id").toString())
-        || o.value("schema_version").toString() != "1.0" || !text(o.value("producer")) || !text(o.value("producer_node"))
-        || !stamp(o.value("created_at")) || !validHash(o.value("content_sha256"))
-        || !strings(o.value("parent_artifact_ids")) || !o.value("content").isObject()) return false;
-    for (const auto &id : o.value("parent_artifact_ids").toArray()) if (!validId(id.toString())) return false;
-    return artifactContent(o.value("artifact_type").toString(), o.value("content").toObject());
+    return validArtifactEnvelope(o) && validArtifactContent(o, false);
 }
 bool MissionProtocol::validArtifacts(const QJsonObject &o) {
     const auto id = o.value("task_id").toString();

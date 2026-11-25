@@ -74,6 +74,15 @@ QJsonObject fixtureJson(const QString &path)
     return document.object();
 }
 
+bool showsText(QQuickItem *item, const QString &text)
+{
+    if (!item || !item->isVisible()) return false;
+    if (item->property("text").toString().contains(text)) return true;
+    for (auto *child : item->childItems())
+        if (showsText(child, text)) return true;
+    return false;
+}
+
 QJsonObject nodeResult(const QJsonArray &artifacts, const QString &route = {})
 {
     return {{"status", "succeeded"}, {"output_artifact_ids", artifacts},
@@ -1857,6 +1866,50 @@ print(json.dumps(result))
         QVERIFY(ui.find("workflowNode", "nodeId", "root_cause_analysis")->isVisible());
         QVERIFY(ui.chooseNode("root_cause_analysis"));
         QCOMPARE(ui.find("workflowPage")->property("selectedNodeId").toString(), QString("root_cause_analysis"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
+    void futureArtifactAlongsideValidationKeepsMissionDetailsReadable()
+    {
+        Fixture fixture;
+        const QString futureId = "10000000-0000-4000-a000-000000000023";
+        const QString futureType = "FutureDiagnostics";
+        const QString opaqueText = "Future-only diagnostic payload";
+        QJsonObject content{{"summary", opaqueText}};
+        auto items = fixture.artifacts.value("items").toArray();
+        items.append(QJsonObject{{"artifact_id", futureId}, {"artifact_type", futureType},
+            {"schema_version", "1.0"}, {"task_id", MissionId}, {"producer", "orchestrator.v1"},
+            {"producer_node", "validation_0"}, {"created_at", "2026-10-27T08:01:00Z"},
+            {"parent_artifact_ids", QJsonArray{Validation0}}, {"content", content},
+            {"content_sha256", QString::fromLatin1(QCryptographicHash::hash(
+                QJsonDocument(content).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex())}});
+        fixture.artifacts["items"] = items;
+        fixture.setOutputs("validation_0", QJsonArray{Validation0, futureId});
+        fixture.setPhase("succeeded", "");
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QCOMPARE(ui.missions.validation()->reports().size(), 1);
+        QCOMPARE(ui.missions.validation()->status(), QString("passed"));
+        QCOMPARE(ui.missions.diff()->patch(), QString("@@ -1 +1 @@\n-old\n+new"));
+
+        QVERIFY(ui.expandStage("plan"));
+        QTRY_VERIFY(ui.find("workflowNode", "nodeId", "generate_plan"));
+        QVERIFY(ui.chooseNode("generate_plan"));
+        QTRY_VERIFY(showsText(ui.find("workflowDetails"), "Cancel, then verify."));
+
+        QVERIFY(ui.expandStage("verification"));
+        QTRY_VERIFY(ui.find("workflowNode", "nodeId", "validation_0"));
+        QVERIFY(ui.chooseNode("validation_0"));
+        QQuickItem *report = nullptr;
+        QTRY_VERIFY((report = ui.find("workflowArtifactPanel", "kind", "ValidationReport")));
+        QVERIFY(showsText(report, "Validation passed."));
+        QVERIFY(showsText(report, "All passed."));
+        auto *future = ui.find("workflowArtifactPanel", "kind", futureType);
+        QVERIFY(showsText(future, futureType));
+        QVERIFY(showsText(future, "当前客户端暂不支持详情"));
+        QVERIFY(!showsText(future, opaqueText));
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void validationArtifactsStayWithTheirOwnRound()
