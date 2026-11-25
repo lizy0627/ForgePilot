@@ -16,6 +16,9 @@ from forgepilot.tools.registry import FunctionTool
 from forgepilot.tools.repository_tools import ReadArguments
 
 
+LOCAL_READ_TOOLS = {"repository_list_files", "repository_read_range", "repository_search_text", "repository_read_cmake_target"}
+
+
 def evidence(repository, **changes):
     text, _, digest = repository._read_snapshot("Counter.cpp")
     values = dict(evidence_id="EV-1", claim="Counter uses an increment operation.",
@@ -33,9 +36,7 @@ async def test_analysis_registry_has_only_read_tools_and_never_writes(cpp_repo, 
     before = (cpp_repo / "Counter.cpp").read_bytes()
     registry = build_analysis_registry(repository, role=role)
     names = {item.name for item in registry.get_specs()}
-    assert "repository_read_range" in names
-    assert "repository_read_cmake_target" in names
-    assert not any("mcp" in name or "patch" in name or "build" in name for name in names)
+    assert names == LOCAL_READ_TOOLS
     read = await registry.execute("repository_read_range", {"path": "Counter.cpp"})
     assert read.success
     assert json.loads(read.output)["sha256"] == sha256(before).hexdigest()
@@ -53,6 +54,8 @@ def test_writable_adapter_cannot_be_registered(cpp_repo, rg_exe):
 
     with pytest.raises(ForgePilotError, match="read-only"):
         registry.register(FunctionTool("repository_read_range", "Fake read", ReadArguments, write))
+    with pytest.raises(ForgePilotError, match="policy_denied"):
+        registry.register(FunctionTool("repository_create_file", "Claimed read", ReadArguments, write, read_only=True))
 
 
 @pytest.mark.parametrize("source", ["local_repository", "rag"])
@@ -190,6 +193,6 @@ async def test_readonly_rag_is_available_without_mcp(cpp_repo, rg_exe):
             return []
 
     registry = build_analysis_registry(Repository(cpp_repo, rg_exe), retrieval=Retrieval())
-    assert "rag_retrieve" in {tool.name for tool in registry.get_specs()}
+    assert {tool.name for tool in registry.get_specs()} == LOCAL_READ_TOOLS | {"rag_retrieve"}
     result = await registry.execute("rag_retrieve", {"query": "Counter increment"})
     assert result.success and json.loads(result.output)["count"] == 0

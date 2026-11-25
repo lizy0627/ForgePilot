@@ -12,6 +12,7 @@ from forgepilot.agents.implementation_tools import ImplementationTools
 from forgepilot.artifacts import (AcceptanceCriterion, AllowedScope, ExecutionPlan, PlanStep,
     RepositorySpec, TaskProblem, TaskSpec, TestPolicy as ArtifactTestPolicy, create_artifact)
 from forgepilot.errors import ForgePilotError
+from forgepilot.policy import LEGACY_ALIASES
 from forgepilot.repository import Repository
 from forgepilot.rag.models import RetrievalResult
 
@@ -114,14 +115,28 @@ async def test_unapproved_and_escaping_paths_fail_before_creation(tree, path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["shell", "git_commit", "mcp_read", "write_file", "edit_file", "read_file"])
-async def test_only_canonical_controlled_tools_are_dispatchable(tree, name):
-    tools = controller(tree)
-    assert set(t.name for t in tools.registry.get_specs()) == {
-        "repository_list_files", "repository_read_range", "repository_search_text",
-        "repository_apply_patch", "repository_create_file", "repository_delete_new_file"}
-    result = await tools.registry.execute(name, {})
-    assert not result.success and "policy_denied" in result.error
+@pytest.mark.parametrize("rag", [False, True])
+async def test_only_canonical_controlled_tools_are_dispatchable(tree, rag):
+    registry = controller(tree, retrieval=FakeRetrieval([]) if rag else None).registry
+    mapping = {"path", "plan_step_id", "acceptance_criteria_ids"}
+    expected = {
+        "repository_list_files": set(),
+        "repository_read_range": {"path"},
+        "repository_search_text": {"query"},
+        "repository_apply_patch": mapping | {"expected_hash", "edits"},
+        "repository_create_file": mapping | {"content"},
+        "repository_delete_new_file": mapping | {"expected_hash"},
+    }
+    if rag:
+        expected["rag_retrieve"] = {"query"}
+    assert {spec.name: set(spec.input_schema.get("required", [])) for spec in registry.get_specs()} == expected
+    external = SimpleNamespace(name="mcp_example_read", read_only=True, mcp_approved=True)
+    with pytest.raises(ForgePilotError, match="policy_denied"):
+        registry.register_approved_mcp(external)
+    for name in (*LEGACY_ALIASES, "shell", "git_commit", external.name):
+        assert registry.get(name) is None
+        result = await registry.execute(name, {})
+        assert not result.success and "policy_denied" in result.error
 
 
 @pytest.mark.asyncio
