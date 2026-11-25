@@ -4,13 +4,18 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from forgepilot.agents.analysis import validate_skill_routes
+from forgepilot.agents.analysis import SKILL_STAGE_ROLES, validate_skill_routes
 from forgepilot.agents.registry import AgentRegistry
 from forgepilot.artifacts.models import DataPolicy
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.accounting import ModelBudget
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from forgepilot.skill_models import SKILL_STAGES
 from test_model_gateway import completion, gateway_for
+
+
+def test_each_selectable_stage_has_a_recipient():
+    assert set(SKILL_STAGE_ROLES) == set(SKILL_STAGES)
 
 
 @pytest.mark.parametrize(("primary", "fallback", "scope", "cloud_allowed", "stage", "accepted"), [
@@ -34,6 +39,9 @@ def test_selection_checks_only_target_roles_and_all_their_routes(qt_draft, prima
     policy = DataPolicy(cloud_model_allowed=cloud_allowed)
     if accepted:
         validate_skill_routes(workflow, skills, policy)
+        workflow.single_agent = True
+        with pytest.raises(ForgePilotError, match="skill_stage_unavailable"):
+            validate_skill_routes(workflow, skills, policy)
     else:
         with pytest.raises(ForgePilotError, match="skill_route_denied"):
             validate_skill_routes(workflow, skills, policy)

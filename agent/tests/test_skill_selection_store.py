@@ -64,7 +64,7 @@ def test_change_between_resolution_and_admission_rolls_back_partial_copy(tmp_pat
         assert store.missions.get_graph_run("m")["workspace_id"] is None
 
 
-def test_ordered_receipts_and_corruption_survive_restart(tmp_path, qt_draft):
+def test_ordered_receipts_and_corruption_survive_restart(tmp_path, qt_draft, monkeypatch):
     path = tmp_path / "db"
     with closing(SqliteEventStore(path)) as store:
         refs = sorted([publish(store, qt_draft), publish(store, qt_draft)], key=lambda ref: ref["skill_id"])
@@ -74,7 +74,11 @@ def test_ordered_receipts_and_corruption_survive_restart(tmp_path, qt_draft):
         assert store.skills.mission_usage("m") == {"selected_skills": refs, "injections": []}
         store.skills.disable(selected[0].skill_id, expected_revision=1)
 
+    # A later release may lower the admission limit while old Missions still use both snapshots.
+    monkeypatch.setattr("forgepilot.skill_selection.MISSION_SKILL_SELECTION_LIMIT", 1)
     with closing(SqliteEventStore(path)) as store:
+        with pytest.raises(ForgePilotError, match="invalid_skill_selection"):
+            store.skills.resolve_selection(refs)
         assert store.skills.load_frozen("m", digest) == selected
         for attempt in (1, 1, 2):
             store.skills.record_injection("m", "root_cause_analysis", attempt, selected)

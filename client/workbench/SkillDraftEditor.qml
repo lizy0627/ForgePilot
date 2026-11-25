@@ -9,6 +9,8 @@ import "WorkflowUi.js" as Flow
 ColumnLayout {
     id: editor
     required property var draft
+    required property var selectableStages
+    property var selectedStages: []
     readonly property var attempt: draft.latest_attempt || ({})
     readonly property var suggestion: attempt.suggestion || null
     readonly property var sections: [
@@ -25,8 +27,7 @@ ColumnLayout {
         pending_inference: inference.text.trim(),
         content: Object.assign({}, saved.content || {}, {
             triggers: lines(triggers.text), boundaries: lines(boundaries.text),
-            body: body.text.trim(), stages: (impactStage.checked ? ["impact_test_analysis"] : [])
-                .concat(rootStage.checked ? ["root_cause_analysis"] : []),
+            body: body.text.trim(), stages: selectedStages,
             usage_scope: policyScope.checked ? "allowed_by_policy" : "local_only"
         }),
         edited_lesson: editedLesson
@@ -51,8 +52,7 @@ ColumnLayout {
         triggers.text = (c.triggers || []).join("\n")
         boundaries.text = (c.boundaries || []).join("\n")
         var stages = c.stages || []
-        rootStage.checked = stages.indexOf("root_cause_analysis") >= 0
-        impactStage.checked = stages.indexOf("impact_test_analysis") >= 0
+        selectedStages = selectableStages.filter(stage => stages.indexOf(stage) >= 0).sort()
         policyScope.checked = c.usage_scope === "allowed_by_policy"
         editedLesson = data.edited_lesson || null
     }
@@ -179,8 +179,21 @@ ColumnLayout {
     Caption { text: "适用阶段" }
     RowLayout {
         enabled: !editor.draft.result_version
-        CheckBox { id: rootStage; objectName: "skillDraftRootStage"; text: "根因分析" }
-        CheckBox { id: impactStage; objectName: "skillDraftImpactStage"; text: "影响与测试分析" }
+        Repeater {
+            model: editor.selectableStages
+            delegate: CheckBox {
+                required property string modelData
+                readonly property var presentation: ({
+                    root_cause_analysis: {label: "根因分析", name: "skillDraftRootStage"},
+                    impact_test_analysis: {label: "影响与测试分析", name: "skillDraftImpactStage"}
+                })[modelData]
+                objectName: presentation ? presentation.name : "skillDraftStage_" + modelData
+                text: presentation ? presentation.label : Flow.nodeTitle({node_id: modelData})
+                checked: editor.selectedStages.indexOf(modelData) >= 0
+                onToggled: editor.selectedStages = checked ? editor.selectedStages.concat(modelData).sort()
+                    : editor.selectedStages.filter(stage => stage !== modelData)
+            }
+        }
     }
     CheckBox { id: policyScope; enabled: !editor.draft.result_version; text: "允许在任务数据策略许可的模型上复用（默认仅限本机）" }
 }

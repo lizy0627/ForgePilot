@@ -388,11 +388,14 @@ void MissionController::refreshRecommendations()
     if (guard) emit recommendationsChanged();
 }
 
+QStringList MissionController::selectableSkillStages() const { return MissionProtocol::selectableSkillStages(); }
+int MissionController::maxSelectedSkills() const { return MissionProtocol::MaxSelectedSkills; }
+
 void MissionController::setSkillSelected(const QString &skillId, bool selected)
 {
     if (m_selectedSkillIds.contains(skillId) == selected) return;
     if (selected) {
-        if (m_selectedSkillIds.size() >= 2) return;
+        if (m_selectedSkillIds.size() >= maxSelectedSkills()) return;
         const bool offered = std::any_of(m_recommendations.begin(), m_recommendations.end(), [&](const QJsonValue &item) {
             return item.toObject().value("skill_id").toString() == skillId;
         });

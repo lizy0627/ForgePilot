@@ -6,7 +6,7 @@ from typing import Sequence
 
 from .artifacts.canonical import content_sha256
 from .errors import ForgePilotError
-from .skill_models import SelectedSkill, SkillContent
+from .skill_models import FROZEN_SKILL_SELECTION_LIMIT, MISSION_SKILL_SELECTION_LIMIT, SelectedSkill, SkillContent
 
 
 @dataclass(frozen=True)
@@ -49,8 +49,8 @@ def _read_content(row: sqlite3.Row, error_code: str) -> FrozenSkill:
 
 
 def resolve_selection(db: sqlite3.Connection, selections) -> tuple[FrozenSkill, ...]:
-    if not isinstance(selections, (list, tuple)) or len(selections) > 2:
-        raise ForgePilotError("invalid_skill_selection", "Select at most two distinct skills")
+    if not isinstance(selections, (list, tuple)) or len(selections) > MISSION_SKILL_SELECTION_LIMIT:
+        raise ForgePilotError("invalid_skill_selection", f"Select at most {MISSION_SKILL_SELECTION_LIMIT} distinct skills")
     try:
         items = sorted((SelectedSkill.model_validate(s) for s in selections), key=lambda s: s.skill_id)
     except ValueError:
@@ -99,7 +99,7 @@ def load_frozen(db: sqlite3.Connection, task_id: str, metadata: dict, expected_d
     rows = db.execute("SELECT * FROM mission_skill_snapshots WHERE mission_id=? ORDER BY position",
                       (task_id,)).fetchall()
     skills = tuple(_read_content(row, "skill_snapshot_invalid") for row in rows)
-    if (not 1 <= len(skills) <= 2 or expected_digest != skill_manifest_sha256(skills)
+    if (not 1 <= len(skills) <= FROZEN_SKILL_SELECTION_LIMIT or expected_digest != skill_manifest_sha256(skills)
             or metadata.get("skill_manifest_sha256") != expected_digest
             or metadata.get("selected_skills") != [skill.identity() for skill in skills]
             or any(row["position"] != index or row["usage_scope"] != skill.content.usage_scope

@@ -4,7 +4,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .skill_models import SelectedSkill, SkillDraft, SkillDraftContent, SkillIdentity, SkillStage
+from .skill_models import (
+    FROZEN_SKILL_SELECTION_LIMIT, MISSION_SKILL_SELECTION_LIMIT, SelectedSkill, SkillDraft,
+    SkillDraftContent, SkillIdentity, SkillStage,
+)
 from .skill_suggestion import EditedLesson
 
 
@@ -74,7 +77,7 @@ class CreateMission(MissionRequest):
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$", max_length=12)
     mcp_server_ids: list[MissionID] = Field(default_factory=list, max_length=4)
     use_rag: bool = False
-    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=2,
+    selected_skills: list[SelectedSkill] = Field(default_factory=list, max_length=MISSION_SKILL_SELECTION_LIMIT,
         description="Exact reviewed versions to freeze. Omit for a mission without skill guidance.")
     baseline_paths: list[str] = Field(default_factory=list, max_length=1000)
     preview_token: MissionHash | None = None
@@ -249,7 +252,7 @@ class SkillInjection(SelectedSkill):
 
 class MissionSkills(BaseModel):
     task_id: MissionID
-    selected_skills: list[SelectedSkill] = Field(max_length=2)
+    selected_skills: list[SelectedSkill] = Field(max_length=FROZEN_SKILL_SELECTION_LIMIT)
     injections: list[SkillInjection]
 
 

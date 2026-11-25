@@ -30,6 +30,7 @@ from .mission_host import MissionHost
 from .mission_events import MissionEventStream
 from .runtime_control import register_runtime_routes
 from .skill_draft_jobs import SkillDraftJobs
+from .skill_models import MISSION_SKILL_SELECTION_LIMIT
 
 MAX_API_BODY = 1_048_576
 MAX_API_TARGET = 8_192
@@ -236,7 +237,8 @@ def create_app(service_factory, *, store=None, max_tasks=32, heartbeat_seconds=1
                 error["loc"][:2] == ("body", "selected_skills") for error in exc.errors()
             ):
                 return error_response("invalid_skill_selection",
-                    "Select up to two distinct skill IDs, each with its integer version and content SHA-256", 422)
+                    f"Select up to {MISSION_SKILL_SELECTION_LIMIT} distinct skill IDs, "
+                    "each with its integer version and content SHA-256", 422)
             return error_response("invalid_request", "Request does not match the v2 schema", 422)
         if request.url.path.startswith("/api/v1/mcp/"):
             # Even field names/loc entries may be an attacker-supplied secret.

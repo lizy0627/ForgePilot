@@ -277,6 +277,7 @@ Dialog {
                     }
                     SkillDraftEditor {
                         id: editor; Layout.fillWidth: true; draft: panel.draft
+                        selectableStages: panel.mission.selectableSkillStages
                         enabled: !(panel.busy && panel.operation !== "poll")
                         onLocate: function(reference) { panel.showEvidence(reference) }
                     }

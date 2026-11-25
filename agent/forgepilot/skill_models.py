@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from operator import not_
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -20,6 +20,10 @@ class _SkillModel(BaseModel):
 
 
 SkillStage = Literal["root_cause_analysis", "impact_test_analysis"]
+SKILL_STAGES: tuple[SkillStage, ...] = get_args(SkillStage)
+MISSION_SKILL_SELECTION_LIMIT = 2
+# The v1 snapshot format is read during replay and through the Mission history API.
+FROZEN_SKILL_SELECTION_LIMIT = 2
 SkillPhrase = Annotated[str, Field(min_length=1, max_length=256)]
 KeywordGroup = Annotated[tuple[SkillPhrase, ...], Field(min_length=2, max_length=8)]
 
@@ -37,7 +41,7 @@ class SkillDraftContent(_SkillModel):
 
     schema_version: int = Field(default=1, ge=1, le=1)
     body: str = Field(default="", max_length=2_000)
-    stages: tuple[SkillStage, ...] = Field(default=(), max_length=2)
+    stages: tuple[SkillStage, ...] = Field(default=(), max_length=len(SKILL_STAGES))
     triggers: tuple[SkillPhrase, ...] = Field(default=(), max_length=16)
     boundaries: tuple[SkillPhrase, ...] = Field(default=(), max_length=16)
     exclusions: tuple[SkillPhrase, ...] = Field(default=(), max_length=16)
@@ -77,7 +81,7 @@ class SkillContent(SkillDraftContent):
     """Only this validated payload is serialized and hashed for a version."""
 
     body: str = Field(min_length=1, max_length=2_000)
-    stages: tuple[SkillStage, ...] = Field(min_length=1, max_length=2)
+    stages: tuple[SkillStage, ...] = Field(min_length=1, max_length=len(SKILL_STAGES))
     boundaries: tuple[SkillPhrase, ...] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")

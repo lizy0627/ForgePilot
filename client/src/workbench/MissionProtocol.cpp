@@ -72,8 +72,8 @@ bool skillIdentity(const QJsonObject &skill) {
         && integer(skill.value("version"), 1) && skill.value("content_sha256").toString().size() == 64
         && MissionProtocol::validHash(skill.value("content_sha256"));
 }
-bool selectedSkills(const QJsonValue &value) {
-    if (!value.isArray() || value.toArray().size() > 2) return false;
+bool selectedSkills(const QJsonValue &value, int limit) {
+    if (!value.isArray() || value.toArray().size() > limit) return false;
     QSet<QString> ids;
     for (const auto &entry : value.toArray()) {
         const auto skill = entry.toObject();
@@ -111,11 +111,13 @@ bool recommendations(const QJsonValue &value) {
     return true;
 }
 bool missionSkills(const QJsonObject &o) {
-    if (!selectedSkills(o.value("selected_skills")) || !o.value("injections").isArray()) return false;
+    // Existing missions follow the limits of their frozen snapshot format.
+    constexpr int maxFrozenSkillsV1 = 2;
+    if (!selectedSkills(o.value("selected_skills"), maxFrozenSkillsV1) || !o.value("injections").isArray()) return false;
     const auto selected = o.value("selected_skills").toArray();
     for (const auto &entry : o.value("injections").toArray()) {
         auto skill = entry.toObject();
-        if (!oneOf(skill.take("node_id"), {"root_cause_analysis", "impact_test_analysis"})
+        if (!MissionProtocol::selectableSkillStages().contains(skill.take("node_id").toString())
             || !integer(skill.take("attempt"), 1) || !selected.contains(skill)) return false;
     }
     return true;
@@ -362,6 +364,10 @@ bool delivery(const QJsonValue &v, const QString &id) {
 }
 }
 
+const QStringList &MissionProtocol::selectableSkillStages() {
+    static const QStringList stages{"root_cause_analysis", "impact_test_analysis"};
+    return stages;
+}
 bool MissionProtocol::validId(const QString &id) {
     static const QRegularExpression p("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
     return p.match(id).hasMatch();
@@ -508,7 +514,7 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
     if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
             "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag", "selected_skills"})
         && text(o.value("repository_path")) && text(o.value("request"))
-        && optional(o, "selected_skills", selectedSkills)
+        && (!o.contains("selected_skills") || selectedSkills(o.value("selected_skills"), MaxSelectedSkills))
         && (!o.contains("mcp_server_ids") || serverIds(o.value("mcp_server_ids")))
         && (!o.contains("use_rag") || o.value("use_rag").isBool())
         && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
@@ -550,7 +556,7 @@ bool MissionProtocol::staleError(const QString &code) {
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
     if (code == "skill_selection_changed") return "所选技能已升级或停用，请刷新候选并重新勾选。";
-    if (code == "invalid_skill_selection") return "请选择至多两项不同的技能，并核对推荐版本及哈希。";
+    if (code == "invalid_skill_selection") return QStringLiteral("请选择至多 %1 项不同的技能，并核对推荐版本及哈希。").arg(MaxSelectedSkills);
     if (code == "skill_snapshot_invalid") return "任务冻结的技能数据缺失或校验失败，请检查任务历史及数据库备份。";
     if (code == "skill_route_denied") return "分析节点的主备模型路由与所选技能的传输范围不符。";
     if (code == "skill_stage_unavailable") return "当前工作流未启用所选技能的分析阶段。";

@@ -90,6 +90,8 @@ async def scenario(root, output):
                 version = json_ok(api.get(version_path))
                 identity = {key: version[key] for key in ("skill_id", "version", "content_sha256")}
                 assert version["content"]["body"] == "Check the value before clamping."
+                stages = version["content"]["stages"]
+                assert stages == ["impact_test_analysis", "root_cause_analysis"]
                 evidence["publish"] = {"source_mission": source, "draft": draft["draft_id"], "reviewed": identity}
 
         # Reopen SQLite with a new app, workspace manager and model gateway.
@@ -104,14 +106,17 @@ async def scenario(root, output):
                     usage = json_ok(api.get(path + "skills"))
                     selected = phase == "selected"
                     assert usage["selected_skills"] == ([identity] if selected else []), usage
-                    assert usage["injections"] == ([dict(identity, node_id="root_cause_analysis", attempt=1)]
-                                                   if selected else []), usage
+                    injections = sorted(usage["injections"], key=lambda injection: injection["node_id"])
+                    expected = [dict(identity, node_id=stage, attempt=1) for stage in stages] if selected else []
+                    assert injections == expected, usage
                     graph = json_ok(api.get(path + "graph"))["definition"]
-                    analyst_node, = [n for n in graph["nodes"] if n["node_id"] == "root_cause_analysis"]
-                    target_prompt = get_prompt(analyst_node["agent_id"], analyst_node["node_id"])
-                    assert len(analyst.calls) == 4 and sum(p == target_prompt for _, p, _ in analyst.calls) == 1
+                    target_prompts = {get_prompt(node["agent_id"], node["node_id"])
+                                      for node in graph["nodes"] if node["node_id"] in stages}
+                    called_prompts = [prompt for _, prompt, _ in analyst.calls]
+                    assert len(called_prompts) == 4 and len(target_prompts) == len(stages)
+                    assert all(called_prompts.count(prompt) == 1 for prompt in target_prompts)
                     for payload, prompt, _ in analyst.calls:
-                        if selected and prompt == target_prompt:
+                        if selected and prompt in target_prompts:
                             received, = payload["skill_references"]
                             assert {k: received[k] for k in identity} == identity, received
                             assert received["body"] == version["content"]["body"]

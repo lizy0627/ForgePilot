@@ -20,6 +20,7 @@ def content_fields():
 
 def test_skill_hash_uses_canonical_json_and_normalized_match_sets(content_fields):
     content = SkillContent(**content_fields)
+    assert content_sha256(content) == "22e5402a6ba2015a5457242b41f166d99e8f326fe50aaeb22fc688e8e2bfd757"
     reordered = dict(reversed(list(content_fields.items())))
     reordered["stages"] = list(reversed(content.stages))
     reordered["triggers"] = list(reversed(content.triggers))

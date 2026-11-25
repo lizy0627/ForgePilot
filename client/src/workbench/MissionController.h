@@ -30,6 +30,8 @@ class MissionController : public QObject {
     Q_PROPERTY(QString creationError READ creationError NOTIFY creationChanged)
     Q_PROPERTY(QVariantList skillRecommendations READ skillRecommendations NOTIFY skillRecommendationsChanged)
     Q_PROPERTY(QStringList selectedSkillIds READ selectedSkillIds NOTIFY recommendationsChanged)
+    Q_PROPERTY(QStringList selectableSkillStages READ selectableSkillStages CONSTANT)
+    Q_PROPERTY(int maxSelectedSkills READ maxSelectedSkills CONSTANT)
     Q_PROPERTY(QString recommendationError READ recommendationError NOTIFY recommendationsChanged)
     Q_PROPERTY(bool recommendationsLoading READ recommendationsLoading NOTIFY recommendationsChanged)
     Q_PROPERTY(QVariantMap missionSkills READ missionSkills NOTIFY missionSkillsChanged)
@@ -71,6 +73,8 @@ public:
     QString creationError() const { return m_creationError; }
     QVariantList skillRecommendations() const { return m_recommendations.toVariantList(); }
     QStringList selectedSkillIds() const { return m_selectedSkillIds; }
+    QStringList selectableSkillStages() const;
+    int maxSelectedSkills() const;
     QString recommendationError() const { return m_recommendationError; }
     bool recommendationsLoading() const { return m_recommendationTimer.isActive() || m_recommendationRequest != 0; }
     QVariantMap missionSkills() const { return m_missionSkills.toVariantMap(); }

@@ -25,7 +25,9 @@ from ..orchestration.models import GraphDefinition, NodeDefinition, NodeMetrics,
 from ..orchestration.node_handlers import HandlerRegistry, NodeExecutionError
 from ..orchestration.runner import GraphRunner
 from ..orchestration.execution import coordinator_for_storage
+from ..skill_models import SkillStage
 from ..skill_selection import skill_manifest_sha256, skill_reference_payload
+from .definitions import AgentRole
 from .registry import AgentRegistry
 from .prompts import get_prompt
 from .contracts import output_schema, validate_task_spec, validate_evidence_bundle, validate_execution_plan
@@ -48,17 +50,23 @@ STAGES = {
     "generalist_plan": ("generalist.v1", ExecutionPlan),
 }
 
+SKILL_STAGE_ROLES: dict[SkillStage, AgentRole] = {
+    "root_cause_analysis": "root_cause_analyst",
+    "impact_test_analysis": "impact_test_analyst",
+}
+
 
 def validate_skill_routes(workflow, skills, data_policy):
     """Check the actual analyst roles and all provider candidates before admission or use."""
     for stage in sorted({stage for skill in skills for stage in skill.content.stages}):
-        if getattr(workflow, "single_agent", False) or stage not in {"root_cause_analysis", "impact_test_analysis"}:
+        expected_role = SKILL_STAGE_ROLES.get(stage)
+        if getattr(workflow, "single_agent", False) or expected_role is None:
             raise ForgePilotError("skill_stage_unavailable", f"No read-only skill target for {stage}")
         try:
             definition = workflow.agents.get(STAGES[stage][0])
         except (AttributeError, KeyError):
             raise ForgePilotError("skill_stage_unavailable", f"Missing skill target for {stage}") from None
-        if definition.role != stage.removesuffix("_analysis") + "_analyst":
+        if definition.role != expected_role:
             raise ForgePilotError("skill_stage_unavailable", f"Wrong analyst role for {stage}")
         try:
             route = workflow.gateway.router.validate_agent(definition)

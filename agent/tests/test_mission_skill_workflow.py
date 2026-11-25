@@ -265,6 +265,10 @@ async def test_two_skills_reach_only_their_selected_analysts(tmp_path, git_exe, 
             content = qt_draft.content.model_copy(update={"body": "Check regression coverage.", "stages": both_stages})
             shared = select_skill(host.store, qt_draft.model_copy(update={"content": content}), request_id="shared")
             manifest = sorted([root_only, shared], key=lambda ref: ref["skill_id"])
+            third = select_skill(host.store, qt_draft, request_id="third")
+            denied = await client.post("/api/v2/missions", json=request_for(case) | {
+                "selected_skills": [*manifest, third]})
+            assert denied.status_code == 422 and denied.json()["error"]["code"] == "invalid_skill_selection"
             path = await create_mission(client, case, selected_skills=list(reversed(manifest)))
             assert (await poll(client, path, {"awaiting_human", "failed"}))["status"] == "awaiting_human"
             graph = (await client.get(path + "/graph")).json()["definition"]

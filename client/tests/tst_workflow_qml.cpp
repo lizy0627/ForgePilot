@@ -1206,6 +1206,35 @@ print(json.dumps(result))
         QCOMPARE(discards, 0);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void thirdSkillChoiceIsDisabledUntilOneIsDeselected()
+    {
+        Fixture fixture;
+        const auto example = fixtureJson("protocol/examples.json").value("skill_recommendations_response").toObject();
+        auto skill = example.value("recommendations").toArray().first().toObject();
+        QJsonArray choices;
+        for (const auto *id : {"first", "second", "third"}) {
+            skill["skill_id"] = id;
+            choices.append(skill);
+        }
+        fixture.intercept = [&](const Request &request) {
+            if (request.path != "/api/v2/skills/recommendations") return false;
+            Source::json(request, {{"recommendations", choices}});
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.find("missionRequestInput")->setProperty("text", "Review these changes");
+        QTRY_VERIFY(ui.find("missionSkillChoice", "skillId", "third"));
+        auto *first = ui.find("missionSkillChoice", "skillId", "first");
+        auto *third = ui.find("missionSkillChoice", "skillId", "third");
+        QVERIFY(ui.click(first));
+        QVERIFY(ui.click(ui.find("missionSkillChoice", "skillId", "second")));
+        QTRY_VERIFY(!third->isEnabled());
+        QVERIFY(!third->property("checked").toBool());
+        QVERIFY(ui.click(first));
+        QTRY_VERIFY(third->isEnabled());
+    }
     void rejectedSkillSelectionPreservesDraft_data()
     {
         QTest::addColumn<bool>("legacy");
@@ -2031,9 +2060,12 @@ print(json.dumps(result))
             QVERIFY(fill("skillDraftTriggers", "negative inputs"));
             QVERIFY(fill("skillDraftBody", "Check the value before clamping."));
             QVERIFY(fill("skillDraftBoundaries", "Only signed input validation."));
-            auto *rootStage = ui.find("skillDraftRootStage");
-            QVERIFY(rootStage);
-            if (!rootStage->property("checked").toBool()) QVERIFY(ui.click(rootStage));
+            for (const auto *name : {"skillDraftRootStage", "skillDraftImpactStage"}) {
+                auto *stage = ui.find(name);
+                QVERIFY(stage);
+                if (!stage->property("checked").toBool()) QVERIFY(ui.click(stage));
+                QVERIFY(stage->property("checked").toBool());
+            }
             QVERIFY(ui.click("skillDraftSave"));
             QTRY_VERIFY(ui.find("skillDraftPublish") && ui.find("skillDraftPublish")->isEnabled());
             QVERIFY(ui.click("skillDraftPublish"));
@@ -2063,8 +2095,10 @@ print(json.dumps(result))
             QVERIFY(history);
             QTRY_VERIFY(history->property("text").toString().contains(selected
                 ? QStringLiteral("已提供给模型 · 分析问题根因") : QStringLiteral("创建此任务时未选择技能")));
-            if (selected)
+            if (selected) {
+                QVERIFY(history->property("text").toString().contains(QStringLiteral("已提供给模型 · 分析影响与测试")));
                 QVERIFY(history->property("text").toString().contains(qEnvironmentVariable("FORGEPILOT_SKILLS_HASH")));
+            }
         }
         QFile receipt(qEnvironmentVariable("FORGEPILOT_SKILLS_RECEIPT"));
         QVERIFY(!ui.missions.taskId().isEmpty() && receipt.open(QIODevice::WriteOnly));

@@ -230,7 +230,7 @@ Rectangle {
             }
             Label {
                 visible: root.mission.skillRecommendations.length > 0
-                text: "推荐技能（最多选 2 项）"; color: Theme.text; font.weight: Font.DemiBold
+                text: "推荐技能（最多选 " + root.mission.maxSelectedSkills + " 项）"; color: Theme.text; font.weight: Font.DemiBold
                 Layout.fillWidth: true
             }
             Repeater {
@@ -252,7 +252,7 @@ Rectangle {
                                 Layout.fillWidth: true; Layout.minimumWidth: 0
                                 text: skillCard.modelData.name + " · v" + skillCard.modelData.version
                                 checked: root.mission.selectedSkillIds.indexOf(skillId) >= 0
-                                enabled: !root.mission.busy && (checked || root.mission.selectedSkillIds.length < 2)
+                                enabled: !root.mission.busy && (checked || root.mission.selectedSkillIds.length < root.mission.maxSelectedSkills)
                                 contentItem: Label {
                                     text: skillChoice.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
                                     color: skillChoice.enabled ? Theme.text : Theme.disabledText

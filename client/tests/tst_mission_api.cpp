@@ -256,12 +256,34 @@ private slots:
         QCOMPARE(source.requests.last().body, empty);
         QCOMPARE(source.requests.size(), 3);
     }
+    void skillStagesAndSelectionLimitMatchExportedOpenApi() {
+        QFile file(QFINDTESTDATA("../../protocol/openapi.json"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto schemas = QJsonDocument::fromJson(file.readAll()).object()["components"].toObject()["schemas"].toObject();
+        const auto properties = [&](const QString &name) { return schemas.value(name).toObject()["properties"].toObject(); };
+        const auto stages = QJsonArray::fromStringList(MissionProtocol::selectableSkillStages());
+        QVERIFY(!stages.isEmpty());
+        for (const auto &name : {"SkillDraftContent", "SkillContent"}) {
+            const auto field = properties(name).value("stages").toObject();
+            QCOMPARE(field.value("items").toObject().value("enum").toArray(), stages);
+            QCOMPARE(field.value("maxItems").toInt(-1), stages.size());
+        }
+        QCOMPARE(properties("SkillInjection").value("node_id").toObject().value("enum").toArray(), stages);
+        QCOMPARE(properties("CreateMission").value("selected_skills").toObject().value("maxItems").toInt(-1),
+                 MissionProtocol::MaxSelectedSkills);
+    }
     void reviewedSkillSelectionAndInjectionHistory() {
         const auto request = example("mission_create_with_skills_request");
         const auto history = example("mission_skills_response");
         const auto selected = request.value("selected_skills").toArray();
         QVERIFY(MissionProtocol::validRequest("mission.create", request));
         auto body = request;
+        auto three = history.value("selected_skills").toArray();
+        auto third = selected.first().toObject();
+        third["skill_id"] = "third";
+        three.append(third);
+        body["selected_skills"] = three;
+        QVERIFY(!MissionProtocol::validRequest("mission.create", body));
         body["selected_skills"] = QJsonArray{selected.first(), selected.first()};
         QVERIFY(!MissionProtocol::validRequest("mission.create", body));
         auto extra = selected.first().toObject();
