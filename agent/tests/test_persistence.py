@@ -410,7 +410,8 @@ def test_schema_version_ledger_has_unique_contiguous_ownership():
     assert SchemaVersion.GRAPH_CHECKPOINT_RECOVERY == 10
     assert SchemaVersion.WRITER_SCOPE_EXPANSION == 11
     assert SchemaVersion.LOCAL_SKILL_LIBRARY == 12
-    assert SchemaVersion.SKILL_GENERATION_ATTEMPTS == CURRENT_SCHEMA_VERSION == 13
+    assert SchemaVersion.SKILL_GENERATION_ATTEMPTS == 13
+    assert SchemaVersion.BUILTIN_SKILL_PROMOTIONS == CURRENT_SCHEMA_VERSION == 14
     assert not requires_upgrade_backup(0)
     assert all(requires_upgrade_backup(version) for version in versions[:-1])
     assert not requires_upgrade_backup(int(CURRENT_SCHEMA_VERSION))

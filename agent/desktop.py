@@ -691,6 +691,9 @@ def launch_configuration_client(config):
         return 1
     environment = build_environment()
     environment.update(desktop_configuration.model_check_environment(config))
+    if os.environ.get('FORGEPILOT_DISABLE_SKILL_ENTRIES') == '1':
+        # First-time setup can launch the backend via the configuration helper.
+        environment['FORGEPILOT_DISABLE_SKILL_ENTRIES'] = '1'
     environment['FORGEPILOT_RUNTIME_CONFIG'] = str(config)
     client = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -746,6 +749,14 @@ def run_project():
 def main():
     if len(sys.argv) == 1:
         return run_project()
+    if sys.argv[1] == 'database-copy':
+        from forgepilot.database_copy import copy_database
+        parser = argparse.ArgumentParser(description="Copy a database into a new rollback directory.")
+        parser.add_argument('--source', type=Path, required=True)
+        parser.add_argument('--destination', type=Path, required=True)
+        args = parser.parse_args(sys.argv[2:])
+        print(copy_database(args.source, args.destination))
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == 'config-helper':
         parser = argparse.ArgumentParser()
         parser.add_argument('action'); parser.add_argument('--config', type=Path, required=True)

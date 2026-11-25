@@ -7,7 +7,7 @@ import pytest
 from conftest import drop_skill_schema
 from forgepilot.artifacts.canonical import canonical_json_bytes, content_sha256
 from forgepilot.errors import ForgePilotError
-from forgepilot.schema_versions import SchemaVersion
+from forgepilot.schema_versions import CURRENT_SCHEMA_VERSION
 from forgepilot.skill_models import SkillContent
 from forgepilot.sqlite_store import SqliteEventStore
 import forgepilot.sqlite_store as sqlite_store_module
@@ -40,7 +40,7 @@ def test_v11_upgrade_keeps_history_and_backs_up_once(tmp_path):
     path = tmp_path / "upgrade.sqlite3"
     conversation, old_schema = v11_database(path)
     with closing(SqliteEventStore(path)) as store:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == SchemaVersion.SKILL_GENERATION_ATTEMPTS
+        assert store._db.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert store.conversation_detail(conversation)["title"] == "升级前的历史"
         assert_v11(store.migration_backup_path, conversation, old_schema)
     with closing(SqliteEventStore(path)) as reopened:

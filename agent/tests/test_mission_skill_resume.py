@@ -12,7 +12,9 @@ from test_mission_skill_workflow import RecordingAnalyst, create_mission, select
 
 
 @pytest.mark.asyncio
-async def test_resume_after_task_spec_uses_frozen_skills_at_first_dispatch(tmp_path, git_exe, qt_draft, monkeypatch):
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_resume_after_task_spec_uses_frozen_skills_at_first_dispatch(tmp_path, git_exe, qt_draft, monkeypatch,
+                                                                          rollback):
     case = await make_loop_case(tmp_path, git_exe)
     original_provider = RecordingAnalyst(case)
     try:
@@ -44,6 +46,8 @@ async def test_resume_after_task_spec_uses_frozen_skills_at_first_dispatch(tmp_p
             host.store.skills.disable(first["skill_id"], expected_revision=2)
 
         restarted_provider = RecordingAnalyst(case)
+        if rollback:
+            monkeypatch.setenv("FORGEPILOT_DISABLE_SKILL_ENTRIES", "1")
         async with session(case, tmp_path, git_exe, restarted_provider, restart=True) as (client, _):
             mission = (await client.get(path)).json()
             assert mission["recovery_required"]

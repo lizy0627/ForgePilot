@@ -1,5 +1,8 @@
 *.cmd text eol=crlf
 resources/schemas/*.json text eol=lf
+resources/skills/*/SKILL.md -text
+resources/skills/catalog.json text eol=lf
+resources/skills/*/manifest.json text eol=lf
 # lock.json records SHA-256 hashes of these files' working-tree bytes.
 eval/real_tasks/tasks.json text eol=lf
 eval/real_tasks/init/init_repository.py text eol=lf

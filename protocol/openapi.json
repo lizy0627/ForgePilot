@@ -13250,7 +13250,7 @@
                 }
               }
             },
-            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+            "description": "storage_unavailable or storage_busy: the local database is unavailable. skill_entries_disabled: New skill drafts and generation are disabled on this installation."
           }
         },
         "summary": "Create Mission Skill Draft"
@@ -14541,7 +14541,7 @@
                 }
               }
             },
-            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+            "description": "storage_unavailable or storage_busy: the local database is unavailable. skill_entries_disabled: New skill drafts and generation are disabled on this installation."
           }
         },
         "summary": "Regenerate Skill Draft"
@@ -15067,7 +15067,7 @@
                 }
               }
             },
-            "description": "storage_unavailable or storage_busy: the local database is unavailable."
+            "description": "storage_unavailable or storage_busy: the local database is unavailable. skill_entries_disabled: New skill drafts and generation are disabled on this installation."
           }
         },
         "summary": "Create Skill Revision Draft"

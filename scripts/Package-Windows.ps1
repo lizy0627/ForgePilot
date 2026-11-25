@@ -76,6 +76,9 @@ $previousPythonPath = $env:PYTHONPATH
 try {
     $env:UV_PROJECT_ENVIRONMENT = Join-Path $root 'agent.venv'
     $env:PYTHONPATH = Join-Path $root 'agent'
+    $skillData = Join-Path $buildRoot 'skills'
+    & $python -I (Join-Path $PSScriptRoot 'skill_release.py') stage $skillData
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot stage the reviewed skill catalog.' }
     $pyinstallerArgs = @(
         'run', '--project', (Join-Path $root 'agent'), '--no-sync',
         '--with', 'pyinstaller==6.22.3', 'python', '-m', 'PyInstaller',
@@ -84,6 +87,7 @@ try {
         '--paths', (Join-Path $root 'agent'), '--paths', $PSScriptRoot,
         '--collect-submodules', 'forgepilot', '--collect-submodules', 'uvicorn',
         '--add-data', ((Join-Path $root 'agent\forgepilot\protocol_examples.v1.json') + ':forgepilot'),
+        '--add-data', ($skillData + ':resources/skills'),
         '--collect-submodules', 'qdrant_client',
         '--distpath', (Join-Path $buildRoot 'dist'),
         '--workpath', (Join-Path $buildRoot 'work'),
@@ -145,7 +149,7 @@ Get-ChildItem -LiteralPath $clientSource -Directory | Sort-Object Name | ForEach
 $relativeFiles = Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
     (Get-RelativeFilePath $stage $_.FullName).Replace('\', '/')
 }
-$forbiddenNames = '(?i)(^|/)(config\.json|api-key\.dpapi|logs?|__pycache__|\.pytest_cache|uv\.exe|pythonw?\.exe)(/|$)|\.(py|db|sqlite3?|log|pyc|pdb|obj|lib|exp)$'
+$forbiddenNames = '(?i)(^|/)(config\.json|api-key\.dpapi|logs?|drafts?|skill[_-]drafts?|__pycache__|\.pytest_cache|uv\.exe|pythonw?\.exe)(/|$)|\.(db|sqlite3?)(-(journal|shm|wal)|\.lock)?$|\.(py|log|pyc|pdb|obj|lib|exp)$'
 $badNames = @($relativeFiles | Where-Object { $_ -match $forbiddenNames })
 if ($badNames.Count) { throw 'Release staging contains forbidden runtime, secret, log, cache, or build files.' }
 
@@ -199,6 +203,14 @@ function Test-ExtractedRelease([string]$ArchivePath) {
     try {
         [IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $verifyRoot)
         $extracted = Join-Path $verifyRoot $packageName
+        $previousRollbackAgent = $env:FORGEPILOT_VERIFY_FROZEN_AGENT
+        try {
+            $env:FORGEPILOT_VERIFY_FROZEN_AGENT = Join-Path $extracted 'bin\ForgePilotAgent.exe'
+            & $python -I -m pytest -q (Join-Path $root 'agent\tests\test_skill_release_rollback.py') --basetemp (Join-Path $verifyRoot 'rollback')
+            if ($LASTEXITCODE -ne 0) { throw 'Temporary database rollback drill failed.' }
+        } finally {
+            $env:FORGEPILOT_VERIFY_FROZEN_AGENT = $previousRollbackAgent
+        }
         $windows = [Environment]::GetFolderPath('Windows')
         $env:PATH = (Join-Path $windows 'System32') + ';' + (Join-Path $windows 'System32\WindowsPowerShell\v1.0')
         Remove-Item Env:FORGEPILOT_PYTHON -ErrorAction SilentlyContinue
@@ -213,6 +225,8 @@ function Test-ExtractedRelease([string]$ArchivePath) {
         try {
             & '.\scripts\Check-Release.cmd'
             if ($LASTEXITCODE -ne 0) { throw 'Extracted release preflight failed.' }
+            & $python -I (Join-Path $PSScriptRoot 'skill_release.py') verify $extracted
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted skill catalog verification failed.' }
             & '.\Stop-ForgePilot.cmd'
             if ($LASTEXITCODE -ne 0) { throw 'Extracted release stop entrypoint failed.' }
         } finally { Pop-Location }

@@ -3,6 +3,7 @@ from .api_v2_models import MissionErrorResponse
 
 
 SKILL_ERRORS = {
+    "skill_entries_disabled": (503, "New skill drafts and generation are disabled on this installation."),
     "unknown_mission": (404, "The source Mission does not exist."),
     "skill_draft_not_found": (404, "The draft does not exist."),
     "skill_attempt_not_found": (404, "The draft has no generation attempt with this ID."),

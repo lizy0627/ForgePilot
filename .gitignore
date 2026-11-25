@@ -110,6 +110,7 @@ $RECYCLE.BIN/
 # Local project notes, coursework and generated acceptance output
 /docs/*
 *.md
+!/resources/skills/*/SKILL.md
 *.pdf
 /agent/artifacts/
 *.doc

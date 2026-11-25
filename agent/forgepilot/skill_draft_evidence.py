@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import PureWindowsPath
-import re
-from unicodedata import normalize
 
 from .artifacts.models import ChangeSet, DataPolicy, EvidenceBundle, TaskSpec, ValidationReport
 from .errors import ForgePilotError
@@ -15,6 +13,7 @@ from .mission_tools import MissionToolSelection
 from .repository import excluded
 from .skill_evidence_ref import SkillEvidenceRef
 from .skill_mission_drafts import MAX_GENERATION_ARTIFACT_BYTES, _evidence_items, _owned_artifact
+from .skill_prose import contains_private_fragment
 from .skill_suggestion import ModelLesson, SkillSuggestion, SuggestionBasis
 
 
@@ -26,18 +25,6 @@ _SYSTEM = (
     "填写适用现象、优先检查、判断分支、停止条件、边界、结论。逐字引用支持结论的本次 evidence key，"
     "依据不足时使用待确认措辞。目标、变更和开发者观察都不能证明修复有效。公开验证结果只证明所列检查的结果。"
     "失败或取消的任务应着重描述排除路径和仍需核实的判断。"
-)
-# Summary fields can themselves contain pasted logs, code or a prompt. Keep
-# short prose only. Drop the whole field when it contains a private fragment.
-_PRIVATE = re.compile(
-    r"[{}`\\$=]|@@|diff --git|(?<!\w)/\S|[A-Za-z]:/|(?:^|\s)(?:---|\+\+\+|#include)\s|"
-    r"\b(?:raw[_ -]?prompt|system[_ -]?prompt|hidden[_ -]?tests?|protected[_ -]?tests?|"
-    r"oracle|environment[_ -]?variables?|BEGIN .*PRIVATE KEY)\b|原始提示|系统提示|隐藏测试|环境变量|"
-    r"(?:^|\s)(?:system|assistant|user)\s*[:：]|"
-    r"(?:^|\s)(?:def |#include|import \w|from \w+ import |class \w+[:(]|function \w+\()|"
-    r"^\s*(?:#|//|<\w+>|\w+(?:[.:]+\w+)*\([^)]*\)\s*;?\s*$)|"
-    r"\b(?:AWS|FORGEPILOT|OPENAI)_[A-Z_]{2,}|\b(?:key|secret|token|credential)\s*[:：]",
-    re.IGNORECASE,
 )
 
 
@@ -54,7 +41,7 @@ def suggestion_schema():
 
 
 def _prose(value, redactors, limit):
-    if not value or not value.isprintable() or _PRIVATE.search(normalize("NFKC", value)):
+    if not value or not value.isprintable() or contains_private_fragment(value):
         return None
     if any(r.text(value) != value for r in redactors):
         return None

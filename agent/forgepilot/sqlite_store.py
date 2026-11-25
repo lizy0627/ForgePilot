@@ -25,7 +25,9 @@ from .mission_store import (
     create_scope_expansion_schema, recover_graph_runs,
 )
 from .artifacts.sqlite_store import SqliteArtifactStore
-from .skill_schema import create_generation_schema, create_skill_schema
+from .builtin_skills import import_builtin_skills
+from .skill_rollout import skill_entries_enabled
+from .skill_schema import create_generation_schema, create_promotion_schema, create_skill_schema
 from .skill_store import SkillRepository
 from .schema_versions import CURRENT_SCHEMA_VERSION, SchemaVersion, requires_upgrade_backup
 from .history_cursor import encode_cursor, decode_cursor
@@ -89,6 +91,8 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             self.missions = MissionRepository(self)
             self.mission_repository = self.missions
             self.skills = SkillRepository(self)
+            if skill_entries_enabled():
+                import_builtin_skills(self)
             self.skills.interrupt_generations()
             self._recover()
             self.recover_conversations()
@@ -200,6 +204,9 @@ class SqliteEventStore(ConversationStore, MemoryStore):
             if version < SchemaVersion.SKILL_GENERATION_ATTEMPTS:
                 create_generation_schema(self._db)
                 self._db.execute(f'PRAGMA user_version={int(SchemaVersion.SKILL_GENERATION_ATTEMPTS)}')
+            if version < SchemaVersion.BUILTIN_SKILL_PROMOTIONS:
+                create_promotion_schema(self._db)
+                self._db.execute(f'PRAGMA user_version={int(SchemaVersion.BUILTIN_SKILL_PROMOTIONS)}')
             migrated = self._db.execute("PRAGMA user_version").fetchone()[0]
             if migrated != int(CURRENT_SCHEMA_VERSION):
                 raise ForgePilotError(

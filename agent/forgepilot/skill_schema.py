@@ -102,3 +102,17 @@ def create_generation_schema(db: sqlite3.Connection) -> None:
     db.execute("""CREATE UNIQUE INDEX skill_generation_active ON skill_generation_attempts(draft_id)
                   WHERE status='generating'""")
     db.execute("CREATE INDEX skill_generation_latest ON skill_generation_attempts(draft_id,sequence DESC)")
+
+
+def create_promotion_schema(db: sqlite3.Connection) -> None:
+    db.execute("""ALTER TABLE skills ADD COLUMN builtin_withdrawn INTEGER NOT NULL DEFAULT 0
+                  CHECK(builtin_withdrawn IN (0,1) AND (builtin_withdrawn=0 OR (source='builtin' AND enabled=0)))""")
+    # Both sides are immutable. This mapping also finds equivalent versions reviewed
+    # locally after an import without copying any private identifiers into a package.
+    db.execute("CREATE INDEX skill_versions_by_hash ON skill_versions(content_sha256)")
+    db.execute("""CREATE VIEW skill_promotion_sources AS
+                  SELECT b.skill_id AS builtin_id,b.version AS builtin_version,b.content_sha256,
+                         l.skill_id AS local_id,l.version AS local_version
+                  FROM skill_versions b JOIN skills bs ON bs.skill_id=b.skill_id AND bs.source='builtin'
+                  JOIN skill_versions l ON l.content_sha256=b.content_sha256
+                  JOIN skills ls ON ls.skill_id=l.skill_id AND ls.source='local'""")

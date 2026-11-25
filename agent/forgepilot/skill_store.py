@@ -78,7 +78,7 @@ def _version(row: sqlite3.Row) -> SkillVersion:
     )
 
 
-def _read_version(db: sqlite3.Connection, skill_id: str, version: int) -> SkillVersion:
+def read_skill_version(db: sqlite3.Connection, skill_id: str, version: int) -> SkillVersion:
     row = db.execute("SELECT * FROM skill_versions WHERE skill_id=? AND version=?",
                      (skill_id, version)).fetchone()
     if row is None:
@@ -382,7 +382,7 @@ class SkillRepository:
     def draft_from_version(self, skill_id: str, version: int, *, request_id: str) -> SkillDraft:
         """Copy the reusable fields of an exact version into a new private working draft."""
         with self._store.transaction() as db:
-            original = _read_version(db, skill_id, version)
+            original = read_skill_version(db, skill_id, version)
             data = SkillDraftData(name=original.name, content=original.content.model_dump())
             return self._insert_draft(db, request_id, data, base_skill_id=skill_id, base_version=version)
 
@@ -397,7 +397,7 @@ class SkillRepository:
                 if receipt["draft_id"] != draft_id:
                     raise ForgePilotError("skill_request_conflict", "Request ID already identifies another review")
                 _check_revision(receipt["revision"] - 1, expected_revision)
-                return _read_version(db, receipt["result_skill_id"], receipt["result_version"])
+                return read_skill_version(db, receipt["result_skill_id"], receipt["result_version"])
 
             _check_revision(row["revision"], expected_revision)
             if row["result_version"] is not None:
@@ -429,11 +429,11 @@ class SkillRepository:
             db.execute("""UPDATE skill_drafts SET result_skill_id=?,result_version=?,review_request_id=?,
                           revision=revision+1,updated_at=? WHERE draft_id=?""",
                        (skill_id, version, request_id, timestamp, draft_id))
-            return _read_version(db, skill_id, version)
+            return read_skill_version(db, skill_id, version)
 
     def get_version(self, skill_id: str, version: int) -> SkillVersion:
         with self._store.locked_connection() as db:
-            return _read_version(db, skill_id, version)
+            return read_skill_version(db, skill_id, version)
 
     def get_skill(self, skill_id: str) -> SkillIdentity:
         with self._store.locked_connection() as db:
@@ -460,14 +460,26 @@ class SkillRepository:
         with self._store.locked_connection() as db:
             rows = db.execute("""
                 SELECT v.skill_id, v.version, v.content_sha256, v.name,
+                       v.content_sha256 IN (
+                           SELECT bv.content_sha256 FROM skills bs JOIN skill_versions bv ON bs.skill_id=bv.skill_id
+                           WHERE bs.source='builtin'
+                       ) AS promoted,
                        json_extract(v.content_json,'$.summary') AS summary,
                        json_extract(v.content_json,'$.triggers','$.exclusions','$.keyword_groups',
                                     '$.project_tags','$.task_types') AS rules
                 FROM skills s JOIN skill_versions v
                     ON (s.skill_id,s.current_version)=(v.skill_id,v.version)
-                WHERE s.enabled=1""").fetchall()
+                WHERE s.enabled=1 ORDER BY s.source='builtin',v.skill_id""").fetchall()
+        # Prefer the developer's local identity for promoted content. Independent
+        # local-only skills retain their historical ranking and identity.
+        emitted = set()
         result = []
         for row in rows:
+            digest = row["content_sha256"]
+            if row["promoted"]:
+                if digest in emitted:
+                    continue
+                emitted.add(digest)
             triggers, exclusions, groups, tags, types = json.loads(row["rules"])
             summary = row["summary"] or (("适用现象：" + triggers[0])[:256] if triggers else row["name"])
             result.append(SkillMatchMetadata(
@@ -483,6 +495,6 @@ class SkillRepository:
             if not current.enabled and type(expected_revision) is int and current.revision == expected_revision + 1:
                 return current
             _check_revision(current.revision, expected_revision)
-            if current.enabled:
-                db.execute("UPDATE skills SET enabled=0,revision=revision+1 WHERE skill_id=?", (skill_id,))
+            db.execute("""UPDATE skills SET enabled=0,builtin_withdrawn=0,revision=revision+1
+                          WHERE skill_id=? AND (enabled=1 OR builtin_withdrawn=1)""", (skill_id,))
             return _identity(db, skill_id)

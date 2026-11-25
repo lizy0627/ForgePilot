@@ -32,6 +32,9 @@ def test_v12_upgrade_preserves_original_manual_draft(tmp_path):
     with closing(SqliteEventStore(path)) as store:
         draft = store.skills.create_draft(request_id="legacy", data=SkillDraftData(developer_note="Private note"))
     with closing(sqlite3.connect(path)) as db, db:
+        db.execute("DROP VIEW skill_promotion_sources")
+        db.execute("DROP INDEX skill_versions_by_hash")
+        db.execute("ALTER TABLE skills DROP COLUMN builtin_withdrawn")
         db.execute("DROP TABLE skill_generation_attempts")
         db.execute("PRAGMA user_version=12")
     with closing(SqliteEventStore(path)) as store:
