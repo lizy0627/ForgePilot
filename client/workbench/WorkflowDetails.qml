@@ -18,10 +18,11 @@ Item {
     readonly property var result: node.result || ({})
     readonly property var visual: Flow.visualStatus(node, artifacts)
     readonly property string status: visual.status
-    readonly property bool approvalNode: nodeId === "execution_approval"
+    readonly property bool approvalNode: node.pendingAction === "execution"
+        || (node.status !== "awaiting_human" && nodeId === "execution_approval")
     readonly property bool deliveryNode: nodeId === "delivery_bundle" || node.nodeType === "delivery"
-    readonly property bool pausedWriter: mission.status === "awaiting_human" && node.status === "awaiting_human"
-        && (nodeId === "implementer" || /^repair_\d+$/.test(nodeId))
+    readonly property bool pausedNode: mission.status === "awaiting_human" && node.status === "awaiting_human"
+        && !approvalNode
     signal closeRequested()
     signal cancelRequested()
     implicitWidth: 420
@@ -284,7 +285,7 @@ Item {
                     heading: "执行问题"; value: (root.result.failure_kind ? "类型：" + root.result.failure_kind + "\n" : "") + (root.result.error_summary || "")
                 }
                 Label {
-                    visible: !!root.nodeId && !root.artifacts.length && !root.approvalNode && !root.deliveryNode && !root.pausedWriter
+                    visible: !!root.nodeId && !root.artifacts.length && !root.approvalNode && !root.deliveryNode && !root.pausedNode
                     text: root.node.status === "pending" ? "节点尚未开始，完成后可在这里查看本节点的具体结果。"
                         : root.node.status === "running" ? "节点正在执行，产物生成后会自动更新。"
                         : root.node.status === "skipped" ? "当前执行路径已跳过该节点。"
@@ -295,11 +296,11 @@ Item {
                 Controls.Panel {
                     id: scopePanel
                     objectName: "workflowScopePanel"
-                    visible: root.pausedWriter
+                    visible: structured
                     Layout.fillWidth: true
                     readonly property var proposal: {
                         var p = root.mission.approval.scopeExpansion
-                        return root.pausedWriter && p && p.task_id === root.mission.taskId
+                        return root.pausedNode && p && p.task_id === root.mission.taskId
                             && p.node_id === root.nodeId && p.attempt === root.node.attempt ? p : ({})
                     }
                     readonly property bool structured: !!proposal.status
@@ -317,16 +318,15 @@ Item {
                         && (proposedPlan.parentArtifactIds || [])[0] === proposedSpec.artifactId
                         && proposedPlan.content.task_spec_artifact_id === proposedSpec.artifactId
                         && originalPlan.content.task_spec_artifact_id === originalSpec.artifactId
-                    title: structured ? (rejected ? "扩围申请已拒绝" : "文件扩围审批") : "节点暂停"
+                    title: rejected ? "扩围申请已拒绝" : "文件扩围审批"
                     subtitle: structured ? "修订 " + proposal.revision + " · 第 " + proposal.attempt + " 次尝试" : ""
                     function step(id) {
                         return ((originalPlan.content || {}).steps || []).find(function(item) { return item.step_id === id }) || {}
                     }
                     Label {
-                        visible: !scopePanel.structured || scopePanel.rejected || !scopePanel.bundleMatches
+                        visible: scopePanel.rejected || !scopePanel.bundleMatches
                         Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: Theme.warning; textFormat: Text.PlainText
                         text: !root.mission.synchronized ? "正在同步当前节点…"
-                            : !scopePanel.structured ? "此暂停记录缺少结构化扩围申请。可查看节点摘要、已有改动，或取消任务。"
                             : scopePanel.rejected ? "任务保持暂停。可继续查看已保存的改动，或取消任务。"
                             : "原范围或计划尚未核对，请刷新任务后重新审阅。"
                     }
@@ -381,12 +381,12 @@ Item {
                             proposal: scopePanel.proposal; approve: false
                         }
                     }
-                    Controls.ActionButton {
-                        objectName: "workflowScopeCancel"; text: "取消任务"; danger: true
-                        visible: scopePanel.rejected || !scopePanel.structured
-                        enabled: root.mission.synchronized && !root.mission.busy
-                        onClicked: root.cancelRequested()
-                    }
+                }
+                Controls.ActionButton {
+                    objectName: "workflowScopeCancel"; text: "取消任务"; danger: true
+                    visible: root.pausedNode && (!scopePanel.structured || scopePanel.rejected)
+                    enabled: root.mission.synchronized && !root.mission.busy
+                    onClicked: root.cancelRequested()
                 }
                 DeliveryPanel { mission: root.mission; visible: root.deliveryNode; Layout.fillWidth: true }
                 ReadableBlock {

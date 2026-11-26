@@ -22,11 +22,13 @@ QJsonObject mission(const QString &task = A, qint64 revision = 8, const QString 
     auto review = body.value("review").toObject(); review.insert("task_id", task); review.insert("revision", revision);
     body.insert("review", review); return body;
 }
-QJsonObject graph(const QJsonObject &m, const QString &nodeId = "execution_approval")
+QJsonObject graph(const QJsonObject &m, const QString &nodeId = "execution_approval",
+                  QJsonValue action = QJsonValue::Undefined)
 {
     const QString type = nodeId == "execution_approval" ? "human_gate" : "agent";
     QJsonObject node{{"node_id", nodeId}, {"node_type", type},
         {"status", m.value("status")}, {"attempt", 1}, {"result", QJsonValue::Null}};
+    node.insert("pending_action", action);
     QJsonObject definition{{"node_id", nodeId}, {"node_type", type},
         {"handler", nodeId}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
         {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
@@ -410,10 +412,33 @@ private slots:
     {
         QFETCH(bool, approved);
         Fixture f; auto scope = protocolExample("mission_scope_expansion_preview");
+        const QString nodeId = "edit_source";
+        scope["node_id"] = nodeId;
+        QFile artifactFile(QString(FORGEPILOT_SOURCE_DIR) + "/client/tests/fixtures/mission_artifacts.json");
+        QVERIFY(artifactFile.open(QIODevice::ReadOnly));
+        QJsonObject revision;
+        for (const auto &item : QJsonDocument::fromJson(artifactFile.readAll()).object().value("items").toArray())
+            if (item.toObject().value("artifact_type") == "TaskSpec") revision = item.toObject();
+        QVERIFY(!revision.isEmpty());
+        revision["task_id"] = A;
+        revision["artifact_id"] = scope.value("task_spec_artifact_id");
+        revision["producer"] = "orchestrator.v1";
+        revision["producer_node"] = "scope_expansion";
+        revision["content_sha256"] = scope.value("task_spec_hash");
         f.current = mission(A, 42);
+        f.current["recovery_required"] = true;
         QList<Request> decisions;
+        int attempt = 1;
         f.intercept = [&](const Request &r) {
-            if (r.path.endsWith("/graph")) Source::json(r, graph(f.current, "repair_1"));
+            if (r.path.endsWith("/graph")) {
+                auto body = graph(f.current, nodeId,
+                    scope.value("status") == "pending" ? QJsonValue("scope_expansion") : QJsonValue(QJsonValue::Null));
+                auto node = body.value("nodes").toArray().first().toObject();
+                node["attempt"] = attempt;
+                body["nodes"] = QJsonArray{node};
+                Source::json(r, body);
+            }
+            else if (r.path.endsWith("/artifacts")) Source::json(r, {{"task_id", A}, {"items", QJsonArray{revision}}});
             else if (r.path.endsWith("/scope-expansion")) Source::json(r, scope);
             else if (r.path.endsWith("/approvals")) decisions.append(r);
             else return false;
@@ -447,8 +472,19 @@ private slots:
         Source::json(decisions.last(), f.current, 202);
         QTRY_COMPARE(c.revision(), 44); QTRY_VERIFY(c.synchronized()); QCOMPARE(c.taskId(), A);
         QCOMPARE(resumed.count(), approved ? 1 : 0); QVERIFY(!approval->scopeAvailable());
-        if (!approved) QCOMPARE(approval->scopeExpansion().value("status").toString(), "rejected");
+        if (!approved) {
+            QCOMPARE(approval->scopeExpansion().value("status").toString(), "rejected");
+            c.clearSelection(); c.selectMission(A);
+            QTRY_VERIFY(c.synchronized());
+            QCOMPARE(approval->scopeExpansion(), scope.toVariantMap());
+            QVERIFY(!approval->scopeAvailable());
+        }
         QVERIFY(!approval->available()); QCOMPARE(f.posts("/approvals"), 2);
+        ++attempt;
+        f.current = mission(A, 45);
+        scope["revision"] = 45;
+        c.refresh(); QTRY_COMPARE(c.revision(), 45);
+        QVERIFY(approval->scopeExpansion().isEmpty()); QVERIFY(!approval->scopeAvailable());
     }
     void olderProposalCannotAuthorizePausedWriter_data()
     {

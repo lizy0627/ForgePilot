@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -9,8 +10,11 @@ import pytest
 from closed_loop_support import ORIGINAL, create, done, make_loop_case, patch, response
 from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.api import create_app
+from forgepilot.artifacts import create_artifact
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from forgepilot.orchestration.models import GraphDefinition
+from forgepilot.orchestration.scope_expansion import ScopeExpansionStore, _revised_contents
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.validation import ValidationService
 from forgepilot.workspace_manager import WorkspaceManager
@@ -59,11 +63,16 @@ async def scope_app(case, tmp_path, git_exe, *, restart=False, analyst_provider=
 
 
 @asynccontextmanager
+async def client_for(app):
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+            yield client
+
+
+@asynccontextmanager
 async def server(case, tmp_path, git_exe, *, restart=False):
-    async with scope_app(case, tmp_path, git_exe, restart=restart) as app:
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-                yield client
+    async with scope_app(case, tmp_path, git_exe, restart=restart) as app, client_for(app) as client:
+        yield client
 
 
 async def mission_at(client, path, status):
@@ -79,7 +88,9 @@ async def begin_writer(client, case):
         "request": "Clamp negative inputs via a shared header", "task_type": "bug_fix"})
     assert created.status_code == 202, created.text
     path = "/api/v2/missions/" + created.json()["task_id"]
-    mission, _ = await mission_at(client, path, "awaiting_human")
+    mission, nodes = await mission_at(client, path, "awaiting_human")
+    assert {key: node["pending_action"] for key, node in nodes.items() if node["pending_action"]} == {
+        "execution_approval": "execution"}
     review = mission["review"]
     decision = await client.post(path + "/approvals", json={"decision": "approved",
         "expected_revision": mission["current_revision"], **{key: review[key] for key in HASHES}})
@@ -90,6 +101,8 @@ async def begin_writer(client, case):
 async def pending(client, path, writer):
     mission, nodes = await mission_at(client, path, "awaiting_human")
     assert nodes[writer]["status"] == "awaiting_human", nodes[writer]
+    assert {key: node["pending_action"] for key, node in nodes.items() if node["pending_action"]} == {
+        writer: "scope_expansion"}
     result = await client.get(path + "/scope-expansion")
     assert result.status_code == 200, result.text
     preview = result.json()
@@ -118,6 +131,7 @@ async def deliver(client, path, case, preview, original):
         **confirmation, "expected_revision": mission["current_revision"]})
     assert duplicate.status_code == 409, duplicate.text
     assert mission["task_id"] == path.rsplit("/", 1)[1]
+    assert all(node["pending_action"] is None for node in nodes.values())
     assert nodes[preview["node_id"]]["attempt"] == 2
     assert nodes["baseline_capture"]["attempt"] == 1
 
@@ -221,6 +235,7 @@ async def test_reject_preserves_partial_and_cannot_be_confirmed_again(tmp_path, 
             assert rejected.status_code in {200, 202}, rejected.text
             current, nodes = await mission_at(client, path, "awaiting_human")
             assert nodes["implementer"]["attempt"] == 1
+            assert nodes["implementer"]["pending_action"] is None
             retained = (await client.get(path + "/scope-expansion")).json()
             assert retained["status"] == "rejected"
             assert retained["partial_change_set_artifact_id"] == preview["partial_change_set_artifact_id"]
@@ -246,6 +261,7 @@ async def test_only_structured_voluntary_requests_allow_scope_review(tmp_path, g
         async with server(case, tmp_path, git_exe) as client:
             path, review = await begin_writer(client, case)
             mission, nodes = await mission_at(client, path, "awaiting_human" if free_text else "failed")
+            assert all(node["pending_action"] is None for node in nodes.values())
             if free_text:
                 assert nodes["implementer"]["result"]["decision_summary"] == summary
             assert (await client.get(path + "/scope-expansion")).status_code == 404
@@ -255,5 +271,84 @@ async def test_only_structured_voluntary_requests_allow_scope_review(tmp_path, g
             assert refused.status_code in {404, 409}
             worktree = case.manager.record(mission["task_id"])["worktree_path"]
             assert not (Path(worktree) / HELPER).exists()
+    finally:
+        await case.gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scope_action_on_custom_node_matches_the_current_grant_and_attempt(tmp_path, git_exe, monkeypatch):
+    case = await make_loop_case(tmp_path, git_exe, implement=[request_scope(), create(HELPER, HEADER), done()])
+    writer = "apply_changes"
+    original_graph = DeliveryWorkflow.graph
+
+    def custom_graph(service):
+        definition = original_graph(service).to_dict()
+        nodes = {n["node_id"]: n for n in definition["nodes"]}
+        nodes["implementer"]["node_id"] = writer
+        return GraphDefinition.from_dict({**definition, "edges": [], "nodes": [
+            nodes["execution_approval"], nodes["baseline_capture"], nodes["implementer"]]})
+
+    def publish_fixture_proposal(store, context, spec, plan, files, *, repository,
+                                 partial_change_set_artifact_id, checkpoint_id, budget_usage):
+        # Model an already authorized custom writer. The production writers retain
+        # their own admission policy. All reads and decisions use the real store.
+        assert context.node.node_id == writer and partial_change_set_artifact_id is None
+        new_spec_id = str(uuid4())
+        spec_content, plan_content = _revised_contents(spec.content, plan.content, files, repository, new_spec_id)
+        new_spec = store.events.artifacts.revise(spec.artifact_id, content=spec_content,
+            producer="orchestrator.v1", producer_node=writer, artifact_id_override=new_spec_id)
+        new_plan = create_artifact(task_id=context.task_id, producer="orchestrator.v1", producer_node=writer,
+            parent_artifact_ids=(new_spec.artifact_id, plan.artifact_id), content=plan_content)
+        store.events.artifacts.put(new_plan)
+        with store.events.transaction() as db:
+            db.execute("""INSERT INTO writer_scope_expansions(task_id,node_id,attempt,base_spec_id,base_plan_id,
+                spec_id,plan_id,checkpoint_id,budget_json,status) VALUES(?,?,?,?,?,?,?,?,?,'pending')""",
+                (context.task_id, writer, context.attempt, spec.artifact_id, plan.artifact_id,
+                 new_spec.artifact_id, new_plan.artifact_id, checkpoint_id, json.dumps(budget_usage)))
+
+    monkeypatch.setattr(DeliveryWorkflow, "graph", custom_graph)
+    monkeypatch.setattr(ScopeExpansionStore, "propose", publish_fixture_proposal)
+    try:
+        async with scope_app(case, tmp_path, git_exe) as app, client_for(app) as client:
+            path, _ = await begin_writer(client, case)
+            proposal, _ = await pending(client, path, writer)
+            task_id = proposal["task_id"]
+            graph = (await client.get(path + "/graph")).json()
+            original = case.events.missions.get_graph_run(task_id)
+            assert graph["definition"] == json.loads(original["definition_json"])
+            assert graph["definition_hash"] == GraphDefinition.from_dict(graph["definition"]).definition_hash
+            assert all("pending_action" not in n for n in graph["definition"]["nodes"])
+
+            # Project stale records against the same snapshot and undo each fixture
+            # change before checking the original valid approval through HTTP.
+            stale_records = [
+                ("UPDATE graph_node_states SET attempt=2 WHERE task_id=? AND node_id=?", (task_id, writer)),
+                ("UPDATE writer_scope_expansions SET node_id='execution_approval' WHERE task_id=?", (task_id,)),
+                ("UPDATE approvals SET task_id=? WHERE task_id=?", (case.task_id, task_id)),
+                ("UPDATE approvals SET status='invalidated' WHERE task_id=?", (task_id,)),
+            ]
+            for statement, params in stale_records:
+                with case.events.locked_connection() as db:
+                    db.execute("SAVEPOINT stale_fixture")
+                    try:
+                        assert db.execute(statement, params).rowcount == 1
+                        historical = app.state.mission_host.graph(task_id)
+                        assert all(node["pending_action"] is None for node in historical["nodes"]), statement
+                    finally:
+                        db.execute("ROLLBACK TO stale_fixture")
+                        db.execute("RELEASE stale_fixture")
+
+            approval = decide(proposal, "approved")
+            stale = await client.post(path + "/approvals", json={
+                **approval, "expected_revision": proposal["revision"] - 1})
+            assert stale.status_code == 409, stale.text
+            accepted = await client.post(path + "/approvals", json=approval)
+            assert accepted.status_code == 202, accepted.text
+            _, nodes = await mission_at(client, path, "succeeded")
+            assert nodes[writer]["attempt"] == 2 and nodes[writer]["pending_action"] is None
+            assert (await client.get(path + "/scope-expansion")).json()["status"] == "approved"
+            final = case.events.missions.get_graph_run(task_id)
+            assert final["definition_json"] == original["definition_json"]
+            assert final["definition_hash"] == graph["definition_hash"]
     finally:
         await case.gateway.aclose()

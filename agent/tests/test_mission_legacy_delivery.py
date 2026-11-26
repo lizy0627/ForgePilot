@@ -32,6 +32,7 @@ async def test_unfinished_previous_graph_requires_new_mission_and_approval(
         # Model an application upgrade without rewriting the persisted definition.
         workflow._stored_graph = MethodType(DeliveryWorkflow._stored_graph, workflow)
         frozen = missions.graph(task_id)
+        assert all(node["pending_action"] is None for node in frozen["nodes"])
         for control in (
             lambda: missions.approve(task_id, **decision(waiting)),
             lambda: missions.approve(task_id, **decision(waiting, decision="rejected")),

@@ -2875,6 +2875,22 @@
             "title": "Node Type",
             "type": "string"
           },
+          "pending_action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "execution",
+                  "scope_expansion"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Approval available for this node attempt at the graph response's current_revision. Null means no pending approval. Older services may omit this field.",
+            "title": "Pending Action"
+          },
           "result": {
             "anyOf": [
               {

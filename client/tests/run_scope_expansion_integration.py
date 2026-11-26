@@ -82,7 +82,7 @@ async def scenario(mode, root, output):
                         assert len(decisions) == 2 and decisions[1][1]["decision"] == "rejected"
                         assert decisions[1][2] == 202 and 200 in previews
                     else:
-                        assert graph["status"] == "cancelled" and len(decisions) == 1 and 404 in previews
+                        assert graph["status"] == "cancelled" and len(decisions) == 1 and not previews
                 assert (case.root / "src/value.cpp").read_bytes() == ORIGINAL.encode()
             finally:
                 (output / "requests.json").write_text(json.dumps(dict(decisions=decisions, previews=previews),

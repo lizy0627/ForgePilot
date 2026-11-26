@@ -1,16 +1,26 @@
 #include "MissionSnapshotLoader.h"
+#include "MissionProtocol.h"
 #include <QJsonArray>
 #include <algorithm>
 
 namespace {
-bool hasPausedWriter(const QJsonObject &graph)
+bool shouldReadScopeExpansion(const MissionSnapshot &snapshot)
 {
+    const auto &graph = snapshot.graph;
     if (graph.value("status") != "awaiting_human") return false;
+    bool pausedWithoutAction = false;
     for (const auto &entry : graph.value("nodes").toArray()) {
         const auto node = entry.toObject();
-        const auto id = node.value("node_id").toString();
-        if (node.value("status") == "awaiting_human" && (id == "implementer" || id.startsWith("repair_")))
-            return true;
+        if (MissionProtocol::pendingAction(node) == "scope_expansion") return true;
+        if (node.value("status") == "awaiting_human" && node.value("pending_action").isNull())
+            pausedWithoutAction = true;
+    }
+    if (!pausedWithoutAction) return false;
+    // A rejected proposal has no pending action. Its published revision survives restarts.
+    for (const auto &item : snapshot.artifacts.value("items").toArray()) {
+        const auto artifact = item.toObject();
+        if (artifact.value("artifact_type") == "TaskSpec" && artifact.value("producer") == "orchestrator.v1"
+            && artifact.value("producer_node") == "scope_expansion") return true;
     }
     return false;
 }
@@ -116,13 +126,13 @@ void MissionSnapshotLoader::received(quint64 request, const QString &task, const
         emit snapshotReady(snapshot);
         return;
     }
-    if (part == Part::Graph) {
-        m_bundle.graph = body;
-        if (hasPausedWriter(body)) track(m_api->getMissionScopeExpansion(m_task), Part::ScopeExpansion);
-    }
+    if (part == Part::Graph) m_bundle.graph = body;
     if (part == Part::ScopeExpansion) m_bundle.scopeExpansion = body;
     if (part == Part::Artifacts) applyArtifacts(m_bundle, body);
-    if (m_requests.isEmpty()) track(m_api->getMission(m_task), Part::Fence);
+    if (!m_requests.isEmpty()) return;
+    if (part != Part::ScopeExpansion && shouldReadScopeExpansion(m_bundle))
+        track(m_api->getMissionScopeExpansion(m_task), Part::ScopeExpansion);
+    else track(m_api->getMission(m_task), Part::Fence);
 }
 void MissionSnapshotLoader::failed(quint64 request, int status, const QString &code)
 {

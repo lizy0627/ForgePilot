@@ -412,6 +412,18 @@ bool MissionProtocol::validMissionPage(const QJsonObject &o) {
     }
     return o.value("total").toInteger() >= ids.size();
 }
+QString MissionProtocol::pendingAction(const QJsonObject &node, const QString &legacyHandler) {
+    if (node.value("status") != "awaiting_human") return {};
+    const auto action = node.value("pending_action");
+    if (!action.isUndefined()) return action.toString();
+
+    // Older graph responses omitted pending_action. An explicit null means no action.
+    const auto id = node.value("node_id").toString();
+    if (node.value("node_type") == "human_gate"
+        && (legacyHandler.isEmpty() ? id : legacyHandler) == "execution_approval") return "execution";
+    if (id == "implementer" || id.startsWith("repair_")) return "scope_expansion";
+    return {};
+}
 bool MissionProtocol::validGraph(const QJsonObject &o) {
     if (!validId(o.value("task_id").toString()) || !text(o.value("graph_id")) || !integer(o.value("graph_version"), 1)
         || !validHash(o.value("definition_hash")) || !validState(o.value("status").toString())
@@ -422,6 +434,9 @@ bool MissionProtocol::validGraph(const QJsonObject &o) {
         const auto n = v.toObject(); const auto id = n.value("node_id").toString();
         if (id.isEmpty() || ids.contains(id) || !nodeType(n.value("node_type")) || !validState(n.value("status").toString())
             || !integer(n.value("attempt")) || !result(n.value("result"))) return false;
+        const auto action = n.value("pending_action");
+        if (!action.isUndefined() && !action.isNull() && !oneOf(action, {"execution", "scope_expansion"}))
+            return false;
         ids.insert(id);
         nodeTypes.insert(id, n.value("node_type"));
     }

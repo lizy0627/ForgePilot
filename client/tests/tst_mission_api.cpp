@@ -305,6 +305,29 @@ private slots:
         QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/skills");
         QCOMPARE(source.requests.first().method, "GET");
     }
+    void graphPendingActionWireValues() {
+        auto validNode = [](const QJsonObject &node) {
+            auto body = graph();
+            auto definition = body.value("definition").toObject();
+            auto declared = definition.value("nodes").toArray().first().toObject();
+            declared["node_id"] = node.value("node_id");
+            declared["node_type"] = node.value("node_type");
+            definition["nodes"] = QJsonArray{declared};
+            body["definition"] = definition;
+            body["nodes"] = QJsonArray{node};
+            body["status"] = node.value("status");
+            return MissionProtocol::validGraph(body);
+        };
+        for (const auto name : {"mission_execution_pending_node", "mission_scope_pending_node",
+                                "mission_missing_current_evidence_node"})
+            QVERIFY2(validNode(example(name)), name);
+
+        auto node = example("mission_scope_pending_node");
+        node.remove("pending_action");
+        QVERIFY(validNode(node));
+        node["pending_action"] = "retry";
+        QVERIFY(!validNode(node));
+    }
     void scopeExpansionPreviewAndDecision() {
         const auto preview = example("mission_scope_expansion_preview");
         const auto decision = example("mission_scope_approval_request");

@@ -44,6 +44,6 @@ private:
     quint64 m_request = 0;
     quint64 m_generation = 0;
     bool m_enabled = false, m_stale = false;
-    bool m_executionPending = false, m_approvingScope = false;
+    bool m_executionPending = false, m_approvingScope = false, m_scopePending = false;
     QString m_error;
 };

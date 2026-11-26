@@ -1,6 +1,8 @@
 """Mission application boundaries use real Graph transactions and managed Git."""
 import asyncio
+from contextlib import closing
 from dataclasses import asdict
+import sqlite3
 from threading import Event
 from types import SimpleNamespace
 
@@ -14,6 +16,7 @@ from forgepilot.orchestration.analysis_review import AnalysisReviewStore
 from forgepilot.orchestration.models import FailureKind, GraphDefinition, NodeDefinition, NodeResult, NodeStatus, NodeType
 from forgepilot.orchestration.node_handlers import HandlerRegistry
 from forgepilot.orchestration.runner import GraphRunner
+from forgepilot.orchestration.store import GraphStore
 from forgepilot.sqlite_store import SqliteEventStore
 from forgepilot.task_host import TaskHost
 from forgepilot.workspace_manager import WorkspaceManager
@@ -127,6 +130,35 @@ async def test_mission_creation_artifacts_atomic_approval_and_completion(tmp_pat
         assert tasks.store.missions.is_approval_valid(rows[0]["approval_id"])
         with pytest.raises(ForgePilotError, match="mission_revision_conflict"):
             await missions.approve(tid, **decision(mission))
+    finally:
+        await missions.close()
+        await tasks.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_action_and_revision_share_one_read_snapshot(tmp_path, git_exe, committed_repo, monkeypatch):
+    tasks, missions = await setup(tmp_path, git_exe)
+    try:
+        tid = (await create(missions, committed_repo))["task_id"]
+        waiting = await settled(missions, tid)
+        assert waiting["status"] == "awaiting_human"
+        snapshot = GraphStore.snapshot
+
+        def enter_recovery_before_node_read(graphs, task_id):
+            with closing(sqlite3.connect(tasks.store.path)) as writer, writer:
+                writer.execute("""UPDATE task_graph_runs SET recovery_required=1,
+                    current_revision=current_revision+1 WHERE task_id=?""", (task_id,))
+            return snapshot(graphs, task_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(GraphStore, "snapshot", enter_recovery_before_node_read)
+            before = missions.graph(tid)
+        after = missions.graph(tid)
+        assert before["current_revision"] == waiting["current_revision"]
+        assert [(n["node_id"], n["pending_action"]) for n in before["nodes"] if n["pending_action"]] == [
+            ("execution_approval", "execution")]
+        assert after["current_revision"] == before["current_revision"] + 1
+        assert all(n["pending_action"] is None for n in after["nodes"])
     finally:
         await missions.close()
         await tasks.close()

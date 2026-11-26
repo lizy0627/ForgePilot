@@ -2,6 +2,10 @@
 from ..orchestration.models import GraphDefinition, NodeDefinition, NodeType
 
 
+LEGACY_DELIVERY_GRAPH_IDS = frozenset({
+    "validated-delivery.v1", "validated-delivery-single.v1", "task-analysis-delivery.v1",
+    "task-analysis-delivery-locked.v1", "task-analysis-delivery-single-locked.v1",
+})
 ORDINARY_ANALYSIS_DELIVERY_IDS = frozenset(f"task-analysis-delivery.v{v}" for v in (2, 3, 4))
 MULTI_AGENT_DELIVERY_IDS = frozenset(f"validated-delivery.v{v}" for v in (2, 3, 4))
 SINGLE_AGENT_DELIVERY_IDS = frozenset(f"validated-delivery-single.v{v}" for v in (2, 3, 4))

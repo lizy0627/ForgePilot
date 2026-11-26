@@ -2013,6 +2013,64 @@ print(json.dumps(result))
         QCOMPARE(fixture.approvals.size(), 1);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void scopePanelFollowsExplicitActionOnCustomNode()
+    {
+        Fixture fixture;
+        const QString writer = "apply_changes";
+        fixture.nodes.append(QJsonObject{{"node_id", writer}, {"node_type", "agent"},
+            {"pending_action", "scope_expansion"}, {"result", QJsonValue::Null}});
+        fixture.definitions.append(QJsonObject{{"node_id", writer}, {"node_type", "agent"},
+            {"handler", "apply_patch"}, {"dependencies", QJsonArray{}}, {"agent_id", "writer.v1"},
+            {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}});
+        auto proposal = fixtureJson("protocol/examples.json").value("mission_scope_expansion_preview").toObject();
+        proposal["task_id"] = MissionId; proposal["node_id"] = writer;
+        auto items = fixture.artifacts.value("items").toArray();
+        QJsonObject spec, plan;
+        for (const auto &item : items) {
+            const auto artifact = item.toObject();
+            if (artifact.value("artifact_type") == "TaskSpec") spec = artifact;
+            if (artifact.value("artifact_type") == "ExecutionPlan") plan = artifact;
+        }
+        const auto oldSpec = spec.value("artifact_id"), oldPlan = plan.value("artifact_id");
+        spec["artifact_id"] = proposal.value("task_spec_artifact_id");
+        spec["parent_artifact_ids"] = QJsonArray{oldSpec};
+        spec["content_sha256"] = proposal.value("task_spec_hash");
+        plan["artifact_id"] = proposal.value("plan_artifact_id");
+        plan["parent_artifact_ids"] = QJsonArray{spec.value("artifact_id"), oldPlan};
+        plan["content_sha256"] = proposal.value("plan_hash");
+        auto content = plan.value("content").toObject();
+        content["task_spec_artifact_id"] = spec.value("artifact_id");
+        plan["content"] = content;
+        items.append(spec); items.append(plan);
+        fixture.artifacts["items"] = items;
+        fixture.setPhase("awaiting_human", writer, proposal.value("revision").toInteger());
+        fixture.intercept = [&](const Request &r) {
+            if (!r.path.endsWith("/scope-expansion")) return false;
+            Source::json(r, proposal);
+            return true;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.approval()->scopeAvailable());
+        QVERIFY(ui.click("workflowAttentionButton"));
+        QTRY_VERIFY(ui.find("workflowScopePanel") && ui.find("workflowScopePanel")->isVisible());
+        auto *approve = ui.find("workflowScopeApprove");
+        QVERIFY(approve && approve->isEnabled());
+        QSignalSpy accepted(ui.missions.approval(), &ApprovalController::scopeExpansionApproved);
+        QVERIFY(ui.click(approve));
+        QTRY_COMPARE(fixture.approvals.size(), 1);
+        const auto decision = fixture.approvals.first();
+        QCOMPARE(decision.value("decision").toString(), "approved");
+        QCOMPARE(decision.value("approval_type").toString(), "scope_expansion");
+        QCOMPARE(decision.value("expected_revision"), proposal.value("revision"));
+        for (const auto key : {"task_spec_hash", "plan_hash", "scope_hash"})
+            QCOMPARE(decision.value(key), proposal.value(key));
+        QTRY_COMPARE(accepted.size(), 1);
+        QTRY_COMPARE(ui.missions.status(), QString("running"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void missionSkillsFromMain()
     {
         const QString url = qEnvironmentVariable("FORGEPILOT_SKILLS_URL");
@@ -2180,7 +2238,16 @@ print(json.dumps(result))
             // Two physical clicks at the same position before the request resolves.
             auto *action = ui.find(repair ? "workflowScopeApprove" : "workflowScopeReject");
             QVERIFY(action && action->isVisible() && action->isEnabled());
-            ui.reveal(action);
+            // Refresh can reset the details scroll while QML is laying out the new proposal.
+            // Send both clicks only once the button's center is in the actual viewport.
+            auto revealDecision = [&] {
+                ui.reveal(action);
+                const QPointF center(action->width() / 2, action->height() / 2);
+                for (auto *parent = action->parentItem(); parent; parent = parent->parentItem())
+                    if (parent->clip() && !parent->contains(action->mapToItem(parent, center))) return false;
+                return ui.window->contentItem()->contains(action->mapToScene(center));
+            };
+            QTRY_VERIFY(revealDecision());
             const auto point = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
             QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);
             QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, point);

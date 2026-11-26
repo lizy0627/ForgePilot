@@ -119,16 +119,43 @@ class ScopeExpansionStore:
                 AND node_id=? AND attempt=? AND status='approved'""", (task_id, node_id, previous_attempt)).fetchone()
             return json.loads(row[0]) if row else None
 
+    @staticmethod
+    def _published_row(db, task_id):
+        row = db.execute("""SELECT x.*,g.current_revision,g.status AS graph_status,
+                n.status AS node_status,n.attempt AS current_attempt
+            FROM writer_scope_expansions x JOIN task_graph_runs g ON x.task_id=g.task_id
+            JOIN graph_node_states n ON n.task_id=x.task_id AND n.node_id=x.node_id
+            WHERE x.task_id=? ORDER BY x.rowid DESC LIMIT 1""", (task_id,)).fetchone()
+        if row is not None and row["status"] == "pending" and (
+                row["graph_status"] != "awaiting_human" or row["node_status"] != "awaiting_human"
+                or row["current_attempt"] != row["attempt"]):
+            return None
+        return row
+
+    @staticmethod
+    def _has_base_grant(db, task_id, node_id, attempt):
+        grant = db.execute("""SELECT 1 FROM writer_scope_expansions x
+            JOIN task_graph_runs g ON x.task_id=g.task_id AND g.task_spec_artifact_id=x.base_spec_id
+                AND g.plan_artifact_id=x.base_plan_id
+            JOIN approvals a ON a.task_id=x.task_id AND a.task_spec_artifact_id=x.base_spec_id
+                AND a.plan_artifact_id=x.base_plan_id AND a.scope_hash=g.scope_hash
+            WHERE x.task_id=? AND x.node_id=? AND x.attempt=? AND a.status='approved'
+              AND a.approval_type IN ('execution','scope_expansion')""", (task_id, node_id, attempt)).fetchone()
+        return grant is not None
+
+    def pending_node(self, task_id):
+        """Return the published, still actionable proposal without loading its artifacts."""
+        with self.events.locked_connection() as db:
+            row = self._published_row(db, task_id)
+            if row is not None and row["status"] == "pending" and self._has_base_grant(
+                    db, task_id, row["node_id"], row["attempt"]):
+                return row["node_id"]
+            return None
+
     def preview(self, task_id):
         with self.events.locked_connection() as db:
-            row = db.execute("""SELECT x.*,g.current_revision,g.status AS graph_status,
-                    n.status AS node_status,n.attempt AS current_attempt
-                FROM writer_scope_expansions x JOIN task_graph_runs g ON x.task_id=g.task_id
-                JOIN graph_node_states n ON n.task_id=x.task_id AND n.node_id=x.node_id
-                WHERE x.task_id=? ORDER BY x.rowid DESC LIMIT 1""", (task_id,)).fetchone()
-            if (row is None or (row["status"] == "pending" and
-                    (row["graph_status"] != "awaiting_human" or row["node_status"] != "awaiting_human"
-                     or row["current_attempt"] != row["attempt"]))):
+            row = self._published_row(db, task_id)
+            if row is None:
                 raise ForgePilotError("scope_expansion_not_found", "No published scope expansion for this mission")
             spec = self.events.artifacts.get(row["spec_id"])
             plan = self.events.artifacts.get(row["plan_id"])
@@ -170,14 +197,7 @@ class ScopeExpansionStore:
                     ("task_spec_hash", "plan_hash", "scope_hash"))):
                 raise ForgePilotError("mission_approval_conflict", "Review the current pending expansion")
             node_id, attempt = preview["node_id"], preview["attempt"]
-            current = db.execute("""SELECT 1 FROM writer_scope_expansions x
-                    JOIN task_graph_runs g ON x.task_id=g.task_id AND g.task_spec_artifact_id=x.base_spec_id
-                        AND g.plan_artifact_id=x.base_plan_id
-                    JOIN approvals a ON a.task_id=x.task_id AND a.task_spec_artifact_id=x.base_spec_id
-                        AND a.plan_artifact_id=x.base_plan_id AND a.scope_hash=g.scope_hash
-                    WHERE x.task_id=? AND x.node_id=? AND x.attempt=? AND a.status='approved'
-                      AND a.approval_type IN ('execution','scope_expansion')""", (task_id, node_id, attempt)).fetchone()
-            if not current:
+            if not self._has_base_grant(db, task_id, node_id, attempt):
                 raise ForgePilotError("mission_approval_conflict", "Original writer grant has changed")
             if approved:
                 if before_approve is None:

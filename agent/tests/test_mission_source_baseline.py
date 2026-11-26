@@ -261,7 +261,9 @@ async def test_old_delivery_without_frozen_config_is_readable_but_cannot_be_rest
         definition = tasks.store.missions.get_graph_run(task_id)["definition_json"]
         host._services.pop(task_id)
         assert host.get(task_id)["status"] == "awaiting_human"
-        assert host.graph(task_id)["graph_id"] == "task-analysis-delivery.v2"
+        graph = host.graph(task_id)
+        assert graph["graph_id"] == "task-analysis-delivery.v2"
+        assert all(node["pending_action"] is None for node in graph["nodes"])
         with pytest.raises(ForgePilotError, match="mission_frozen_config_missing"):
             host._workflow(task_id)
         assert tasks.store.missions.get_graph_run(task_id)["definition_json"] == definition

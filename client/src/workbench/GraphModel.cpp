@@ -1,4 +1,5 @@
 #include "GraphModel.h"
+#include "MissionProtocol.h"
 #include <QJsonArray>
 #include <QSet>
 #include <QPointer>
@@ -52,12 +53,13 @@ bool GraphModel::setSnapshotNow(const QJsonObject &graph)
         // Affordances only: every command is still revision-checked by the backend.
         QStringList actions;
         const auto handler = definition.value("handler").toString();
+        const auto pendingAction = MissionProtocol::pendingAction(node, handler);
+        row.insert("pendingAction", pendingAction);
         const auto role = definition.value("settings").toObject().value("recovery_role").toString();
         const auto executionName = (agent.isEmpty() ? handler : agent).toLower();
         const bool writer = role == "writer" || type == "delivery" || role == "delivery"
             || (role.isEmpty() && (executionName.contains("implementer") || executionName.contains("repair")));
-        if (status == "awaiting_human" && type == "human_gate" && handler == "execution_approval"
-            && !m_recoveryRequired) actions << "approve" << "reject";
+        if (pendingAction == "execution" && !m_recoveryRequired) actions << "approve" << "reject";
         if (graphStatus != "running" && status == "retryable" && !writer && !m_recoveryRequired) actions << "retry";
         if (graphStatus != "running" && (status == "interrupted" || (status == "retryable" && (writer || m_recoveryRequired))))
             actions << "resume";

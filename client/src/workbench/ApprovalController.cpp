@@ -37,7 +37,8 @@ void ApprovalController::clear()
 {
     ++m_generation;
     if (m_api) m_api->abortRequest(m_request);
-    m_request = 0; m_mission = {}; m_scopeExpansion = {}; m_executionPending = false;
+    m_request = 0; m_mission = {}; m_scopeExpansion = {};
+    m_executionPending = m_scopePending = false;
     m_enabled = false; m_stale = false; m_error.clear(); emit changed();
 }
 void ApprovalController::setSnapshot(const MissionSnapshot &snapshot)
@@ -49,18 +50,24 @@ void ApprovalController::setSnapshot(const MissionSnapshot &snapshot)
         m_request = 0; m_enabled = false; m_error.clear();
     }
     m_mission = mission;
-    m_executionPending = false;
+    m_executionPending = m_scopePending = false;
     m_scopeExpansion = {};
     const auto &scope = snapshot.scopeExpansion;
     for (const auto &entry : snapshot.graph.value("nodes").toArray()) {
         const auto node = entry.toObject();
         if (node.value("status") != "awaiting_human") continue;
-        if (node.value("node_id") == "execution_approval" && node.value("node_type") == "human_gate")
-            m_executionPending = true;
+        const auto action = MissionProtocol::pendingAction(node);
+        if (action == "execution") m_executionPending = true;
         // The endpoint returns the latest proposal even when a later writer pauses without one.
-        if (scope.value("node_id") == node.value("node_id") && scope.value("attempt") == node.value("attempt")
-            && scope.value("task_id") == mission.value("task_id") && scope.value("revision") == mission.value("current_revision"))
+        if (scope.value("task_id") != mission.value("task_id") || scope.value("revision") != mission.value("current_revision")
+            || scope.value("node_id") != node.value("node_id") || scope.value("attempt") != node.value("attempt"))
+            continue;
+        if (action == "scope_expansion") {
             m_scopeExpansion = scope;
+            m_scopePending = node.contains("pending_action") || !mission.value("recovery_required").toBool();
+        } else if (node.value("pending_action").isNull() && scope.value("status") == "rejected") {
+            m_scopeExpansion = scope;
+        }
     }
     m_stale = false; emit changed();
 }
@@ -69,17 +76,17 @@ void ApprovalController::setEnabled(bool enabled)
 bool ApprovalController::canDecide() const
 {
     return m_api && m_enabled && !m_stale && !busy()
-        && m_mission.value("status") == "awaiting_human"
-        && !m_mission.value("recovery_required").toBool();
+        && m_mission.value("status") == "awaiting_human";
 }
 bool ApprovalController::available() const
 {
     const auto review = m_mission.value("review").toObject();
-    return canDecide() && m_executionPending && !review.isEmpty() && review.value("revision") == m_mission.value("current_revision");
+    return canDecide() && m_executionPending && !m_mission.value("recovery_required").toBool()
+        && !review.isEmpty() && review.value("revision") == m_mission.value("current_revision");
 }
 bool ApprovalController::scopeAvailable() const
 {
-    return canDecide() && m_scopeExpansion.value("status") == "pending";
+    return canDecide() && m_scopePending && m_scopeExpansion.value("status") == "pending";
 }
 void ApprovalController::approve() { submitExecution(true); }
 void ApprovalController::reject() { submitExecution(false); }

@@ -20,16 +20,12 @@ from ..orchestration.models import (EdgeCondition, EdgeDefinition, FailureKind, 
                                     NodeDefinition, NodeResult, NodeStatus, NodeType, _plain_json)
 from .implementation import ImplementationService
 from .workflow_graphs import (
-    LOCKED_ANALYSIS_DELIVERY_IDS, MULTI_AGENT_DELIVERY_IDS, ORDINARY_ANALYSIS_DELIVERY_IDS,
-    SINGLE_AGENT_DELIVERY_IDS, analysis_with_approval, execution_approval,
+    LEGACY_DELIVERY_GRAPH_IDS, LOCKED_ANALYSIS_DELIVERY_IDS, MULTI_AGENT_DELIVERY_IDS,
+    ORDINARY_ANALYSIS_DELIVERY_IDS, SINGLE_AGENT_DELIVERY_IDS, analysis_with_approval, execution_approval,
 )
 
 
 MAX_REPAIR_ROUNDS = 3
-LEGACY_DELIVERY_GRAPH_IDS = frozenset({
-    "validated-delivery.v1", "validated-delivery-single.v1", "task-analysis-delivery.v1",
-    "task-analysis-delivery-locked.v1", "task-analysis-delivery-single-locked.v1",
-})
 # Each graph version must opt in to validation without a protected Oracle.
 _PUBLIC_VALIDATION_GRAPH_IDS = frozenset({
     "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",

@@ -534,11 +534,18 @@ class MissionRepository:
                       if run["task_spec_artifact_id"] and run["plan_artifact_id"] else None)
             return metadata, run, sequence, review
 
+    @contextmanager
     def graph_view(self, task_id):
+        """Pin the graph revision and its published approvals to one SQLite read snapshot."""
         from .orchestration.store import GraphStore
-        with self.events._lock:
-            self.metadata(task_id)
-            return GraphStore(self.events).snapshot(task_id), json.loads(self.get_graph_run(task_id)["definition_json"])
+        with self.events.locked_connection() as db:
+            db.execute("SAVEPOINT mission_graph_view")
+            try:
+                metadata = self.metadata(task_id)
+                run = self.get_graph_run(task_id)
+                yield metadata, run, GraphStore(self.events).snapshot(task_id)
+            finally:
+                db.execute("RELEASE mission_graph_view")
 
     def owned_artifact(self, task_id, artifact_id):
         with self.events._lock:

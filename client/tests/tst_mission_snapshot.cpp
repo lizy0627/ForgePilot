@@ -22,11 +22,13 @@ QJsonObject mission(const QString &task = A, qint64 revision = 8)
     body.insert("review", review);
     return body;
 }
-QJsonObject graph(const QJsonObject &m, const QString &id = "execution_approval")
+QJsonObject graph(const QJsonObject &m, const QString &id = "execution_approval",
+                  QJsonValue action = QJsonValue::Undefined)
 {
     const QString type = id == "execution_approval" ? "human_gate" : "agent";
     QJsonObject node{{"node_id", id}, {"node_type", type},
         {"status", m.value("status")}, {"attempt", 1}, {"result", QJsonValue::Null}};
+    node.insert("pending_action", action);
     QJsonObject definition{{"node_id", id}, {"node_type", type},
         {"handler", id}, {"dependencies", QJsonArray{}}, {"agent_id", QJsonValue::Null},
         {"agent_definition_hash", QJsonValue::Null}, {"settings", QJsonObject{}}};
@@ -208,26 +210,30 @@ private slots:
     }
     void pausedWriterReadsOnlyTheCurrentProposal_data()
     {
-        QTest::addColumn<bool>("legacy");
-        QTest::newRow("legacy-pause-without-proposal") << true;
-        QTest::newRow("proposal-changed-during-read") << false;
+        QTest::addColumn<QString>("nodeId");
+        QTest::addColumn<QJsonValue>("action");
+        QTest::addColumn<int>("reads");
+        QTest::newRow("legacy-pause-without-proposal") << QString("implementer") << QJsonValue(QJsonValue::Undefined) << 1;
+        QTest::newRow("proposal-changed-during-read") << QString("edit_source") << QJsonValue("scope_expansion") << 2;
+        QTest::newRow("no-action-on-paused-repair") << QString("repair_1") << QJsonValue(QJsonValue::Null) << 0;
     }
     void pausedWriterReadsOnlyTheCurrentProposal()
     {
-        QFETCH(bool, legacy);
+        QFETCH(QString, nodeId); QFETCH(QJsonValue, action); QFETCH(int, reads);
         Fixture f;
         auto proposal = example("mission_scope_expansion_preview");
+        proposal["node_id"] = nodeId;
         f.current = mission(A, proposal.value("revision").toInteger());
         f.current["review"] = QJsonValue::Null;
         int previewReads = 0;
         f.intercept = [&](const Request &r) {
             if (r.path.endsWith("/graph")) {
-                Source::json(r, graph(f.current, proposal.value("node_id").toString()));
+                Source::json(r, graph(f.current, nodeId, action));
                 return true;
             }
             if (!r.path.endsWith("/scope-expansion")) return false;
             ++previewReads;
-            if (legacy) Source::json(r, error("scope_expansion_not_found"), 404);
+            if (action.isUndefined()) Source::json(r, error("scope_expansion_not_found"), 404);
             else {
                 auto body = proposal;
                 if (previewReads == 1) body["revision"] = proposal.value("revision").toInteger() - 1;
@@ -243,8 +249,8 @@ private slots:
         QTRY_COMPARE(ready.count(), 1);
         QCOMPARE(failed.count(), 0);
         QCOMPARE(bundle(ready).mission, f.current);
-        QCOMPARE(bundle(ready).scopeExpansion, legacy ? QJsonObject{} : proposal);
-        QCOMPARE(previewReads, legacy ? 1 : 2);
+        QCOMPARE(bundle(ready).scopeExpansion, reads == 2 ? proposal : QJsonObject{});
+        QCOMPARE(previewReads, reads);
     }
     void switchingTaskCancelsOldReadsAndResetsTheRevisionFloor()
     {

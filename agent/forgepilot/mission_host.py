@@ -18,12 +18,14 @@ from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
 from .agents.analysis import AnalysisRequest, validate_skill_bindings, validate_skill_routes
-from .agents.workflow_graphs import MULTI_AGENT_DELIVERY_IDS, ORDINARY_ANALYSIS_DELIVERY_IDS
+from .agents.workflow_graphs import (LEGACY_DELIVERY_GRAPH_IDS, MULTI_AGENT_DELIVERY_IDS,
+                                    ORDINARY_ANALYSIS_DELIVERY_IDS)
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
+from .orchestration.analysis_review import AnalysisReviewStore
 from .orchestration.graph import validate_graph
-from .orchestration.models import NodeStatus, TERMINAL_NODE_STATUSES
+from .orchestration.models import NodeStatus, NodeType, TERMINAL_NODE_STATUSES
 from .orchestration.recovery import recovery_role
 from .orchestration.scope_expansion import ScopeExpansionStore
 from .orchestration.store import GraphStore
@@ -42,6 +44,16 @@ def _revision_conflict():
 def _approval_conflict():
     return ForgePilotError("mission_approval_conflict",
         "TaskSpec, Plan or Scope changed; review the current approval package")
+
+
+def _missing_frozen_config(metadata, snapshot):
+    if (metadata.get("source_baseline") is None
+            and snapshot.graph_id in ORDINARY_ANALYSIS_DELIVERY_IDS | MULTI_AGENT_DELIVERY_IDS):
+        return ("This historical task has no frozen source/build selection; it remains readable, "
+                "but must be recreated before execution or recovery")
+    if snapshot.graph_version >= 4 and metadata.get("tool_selection") is None:
+        return "Frozen Mission tool selection is missing"
+    return None
 
 
 @dataclass(frozen=True)
@@ -122,12 +134,9 @@ class MissionHost:
             if mcp_server_ids is None:
                 metadata = self._metadata(task_id)
                 snapshot = self.graphs.snapshot(task_id)
-                if (metadata.get("source_baseline") is None
-                        and snapshot.graph_id in ORDINARY_ANALYSIS_DELIVERY_IDS | MULTI_AGENT_DELIVERY_IDS):
-                    raise ForgePilotError("mission_frozen_config_missing",
-                        "This historical task has no frozen source/build selection; it remains readable, but must be recreated before execution or recovery")
-                if snapshot.graph_version >= 4 and metadata.get("tool_selection") is None:
-                    raise ForgePilotError("mission_frozen_config_missing", "Frozen Mission tool selection is missing")
+                missing = _missing_frozen_config(metadata, snapshot)
+                if missing:
+                    raise ForgePilotError("mission_frozen_config_missing", missing)
                 mcp_server_ids = metadata.get("mcp_server_ids", ())
                 expected_revisions = metadata.get("mcp_server_revisions")
                 if mcp_server_ids and expected_revisions is None:
@@ -281,13 +290,34 @@ class MissionHost:
                 return
             self.store.missions.record_delivery_outcome(task_id, intent["mode"], result=result, recovered=True)
 
+    def _pending_actions(self, snapshot, run, metadata):
+        if (snapshot.status is not NodeStatus.AWAITING_HUMAN or snapshot.graph_id in LEGACY_DELIVERY_GRAPH_IDS
+                or _missing_frozen_config(metadata, snapshot)):
+            return {}
+        # A published expansion can be decided after restart. Execution approval
+        # requires recovery confirmation first.
+        scope_node = self.scope_expansions.pending_node(snapshot.task_id)
+        if scope_node is not None:
+            return {scope_node: "scope_expansion"}
+        if run["recovery_required"] or not run["scope_hash"]:
+            return {}
+        gate = next((node for node in snapshot.nodes if node.node_id == AnalysisReviewStore.gate_id), None)
+        if (gate and gate.node_type is NodeType.HUMAN_GATE and gate.status is NodeStatus.AWAITING_HUMAN
+                and gate.result and gate.result.status is NodeStatus.AWAITING_HUMAN
+                and run["task_spec_artifact_id"] in gate.result.output_artifact_ids
+                and run["plan_artifact_id"] in gate.result.output_artifact_ids):
+            return {gate.node_id: "execution"}
+        return {}
+
     def graph(self, task_id):
-        snapshot, definition = self.store.missions.graph_view(task_id)
+        with self.store.missions.graph_view(task_id) as (metadata, run, snapshot):
+            actions = self._pending_actions(snapshot, run, metadata)
         result = dict(task_id=task_id, graph_id=snapshot.graph_id, graph_version=snapshot.graph_version,
             definition_hash=snapshot.definition_hash, status=snapshot.status.value,
-            current_revision=snapshot.revision, definition=definition, nodes=[{
+            current_revision=snapshot.revision, definition=json.loads(run["definition_json"]), nodes=[{
                 "node_id": n.node_id, "node_type": n.node_type.value, "status": n.status.value,
                 "attempt": n.attempt, "result": n.result.to_dict() if n.result else None,
+                "pending_action": actions.get(n.node_id),
             } for n in snapshot.nodes])
         return safe_event_data(self.store.redactor, result)
 

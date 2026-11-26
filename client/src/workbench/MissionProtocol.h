@@ -16,6 +16,7 @@ bool terminal(const QString &state);
 bool validMission(const QJsonObject &body);
 bool validMissionPage(const QJsonObject &body);
 bool validGraph(const QJsonObject &body);
+QString pendingAction(const QJsonObject &node, const QString &legacyHandler = {});
 bool validArtifact(const QJsonObject &body);
 bool validArtifacts(const QJsonObject &body);
 bool validDiff(const QJsonObject &body);

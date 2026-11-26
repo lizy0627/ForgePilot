@@ -348,6 +348,9 @@ class MissionNode(BaseModel):
     status: str
     attempt: int
     result: dict[str, Any] | None
+    pending_action: Literal["execution", "scope_expansion"] | None = Field(
+        default=None, description="Approval available for this node attempt at the graph response's current_revision. "
+                                  "Null means no pending approval. Older services may omit this field.")
 
 
 class MissionSummary(BaseModel):

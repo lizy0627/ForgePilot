@@ -114,6 +114,8 @@ def test_v2_request_examples_match_strict_transport_schemas():
         ("mission_skills_response", MissionSkills),
         ("mission_skills_empty_response", MissionSkills),
         ("mission_missing_current_evidence_node", MissionNode),
+        ("mission_execution_pending_node", MissionNode),
+        ("mission_scope_pending_node", MissionNode),
         ("mission_approve_request", MissionApproval),
         ("mission_reject_request", MissionApproval),
         ("mission_scope_approval_request", MissionApproval),

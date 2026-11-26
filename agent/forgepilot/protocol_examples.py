@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .artifacts.canonical import content_sha256
+from .orchestration.models import NodeResult, NodeStatus
 from .skill_models import SkillContent, SkillDraftContent
 
 
@@ -184,6 +185,18 @@ def examples():
             "task_spec_hash": "e" * 64, "plan_hash": "f" * 64,
             "scope_hash": "a" * 64, "decision": "approved",
         },
+        "mission_execution_pending_node": {
+            "node_id": "execution_approval", "node_type": "human_gate", "status": "awaiting_human",
+            "attempt": 1, "pending_action": "execution",
+            "result": NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary="Approve the frozen execution plan",
+                                 output_artifact_ids=("22222222-2222-4222-8222-222222222222",
+                                                      "33333333-3333-4333-8333-333333333333")).to_dict(),
+        },
+        "mission_scope_pending_node": {
+            "node_id": "repair_1", "node_type": "agent", "status": "awaiting_human",
+            "attempt": 1, "pending_action": "scope_expansion",
+            "result": NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary="Review the requested files").to_dict(),
+        },
         "mission_scope_expansion_preview": {
             "task_id": TASK_ID, "revision": 42, "node_id": "repair_1",
             "attempt": 1, "status": "pending",
@@ -236,6 +249,7 @@ def examples():
     result["mission_skills_empty_response"] = {"task_id": TASK_ID, "selected_skills": [], "injections": []}
     result["mission_missing_current_evidence_node"] = {
         "node_id": "root_cause_analysis", "node_type": "agent", "status": "failed", "attempt": 1,
+        "pending_action": None,
         "result": {"status": "failed", "output_artifact_ids": [], "decision_summary": "",
                    "next_route": None, "retryable": False, "failure_kind": "model_contract_violation",
                    "error_summary": "evidence_location",
