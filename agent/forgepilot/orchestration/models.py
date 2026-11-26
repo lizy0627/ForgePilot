@@ -1,7 +1,7 @@
 """Immutable graph protocol, state machine, results, and event projections."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from hashlib import sha256
 import json
@@ -259,6 +259,9 @@ class NodeDefinition:
             raise ValueError("Node settings must be canonical JSON") from None
         object.__setattr__(self, "settings", _freeze_json(frozen_settings))
 
+    def with_dependencies(self, dependencies: tuple[str, ...]) -> "NodeDefinition":
+        return replace(self, dependencies=dependencies, settings=_plain_json(self.settings))
+
     @property
     def definition_hash(self) -> str:
         return sha256(_canonical({
@@ -285,6 +288,9 @@ class GraphDefinition:
             raise ValueError("Graph version must be a positive integer")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         object.__setattr__(self, "edges", tuple(self.edges))
+
+    def node(self, node_id: str) -> NodeDefinition:
+        return next(node for node in self.nodes if node.node_id == node_id)
 
     def to_dict(self) -> dict[str, Any]:
         return {"graph_id": self.graph_id, "version": self.version,

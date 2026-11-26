@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import CancelledError as FutureCancelledError
-from dataclasses import replace
 import json
 from uuid import uuid4
 
@@ -20,12 +19,20 @@ from ..models.accounting import ModelBudget
 from ..orchestration.models import (EdgeCondition, EdgeDefinition, FailureKind, GraphDefinition,
                                     NodeDefinition, NodeResult, NodeStatus, NodeType, _plain_json)
 from .implementation import ImplementationService
+from .workflow_graphs import (
+    LOCKED_ANALYSIS_DELIVERY_IDS, MULTI_AGENT_DELIVERY_IDS, ORDINARY_ANALYSIS_DELIVERY_IDS,
+    SINGLE_AGENT_DELIVERY_IDS, analysis_with_approval, execution_approval,
+)
 
 
 MAX_REPAIR_ROUNDS = 3
 LEGACY_DELIVERY_GRAPH_IDS = frozenset({
     "validated-delivery.v1", "validated-delivery-single.v1", "task-analysis-delivery.v1",
     "task-analysis-delivery-locked.v1", "task-analysis-delivery-single-locked.v1",
+})
+# Each graph version must opt in to validation without a protected Oracle.
+_PUBLIC_VALIDATION_GRAPH_IDS = frozenset({
+    "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",
 })
 
 
@@ -73,21 +80,19 @@ class DeliveryWorkflow(ImplementationService):
         self.runner.handlers.register("delivery_bundle.v1", self._delivery_handler)
 
     def graph(self):
-        gate, implementer = super().graph().nodes
-        gate = replace(gate, settings={**_plain_json(gate.settings),
-            "model_configuration_hash": content_sha256(self.gateway.router.configuration)})
+        version = 2
+        settings = {"model_configuration_hash": content_sha256(self.gateway.router.configuration)}
         if getattr(self, "mission_source_baseline", None) is not None:
-            gate = replace(gate, settings={**_plain_json(gate.settings),
-                "source_baseline_hash": content_sha256(self.mission_source_baseline),
-                "build_selection_hash": content_sha256(self.mission_build_selection)})
+            version = 3
+            settings["source_baseline_hash"] = content_sha256(self.mission_source_baseline)
+            settings["build_selection_hash"] = content_sha256(self.mission_build_selection)
         if getattr(self, "mission_tool_selection", None) is not None:
-            gate = replace(gate, settings={**_plain_json(gate.settings),
-                "tool_selection_hash": content_sha256(self.mission_tool_selection)})
+            version = 4
+            settings["tool_selection_hash"] = content_sha256(self.mission_tool_selection)
         baseline = NodeDefinition("baseline_capture", NodeType.DETERMINISTIC, "baseline_capture.v1",
             dependencies=("execution_approval",), settings={"recovery_role": "deterministic"})
-        implementer = replace(implementer, dependencies=("execution_approval", "baseline_capture"),
-                              settings=_plain_json(implementer.settings))
-        nodes, edges = [gate, baseline, implementer], []
+        nodes = [execution_approval(**settings), baseline, self._implementer_node("baseline_capture")]
+        edges = []
         for round_number in range(MAX_REPAIR_ROUNDS + 1):
             writer = "implementer" if round_number == 0 else f"repair_{round_number}"
             validation, review = f"validation_{round_number}", f"reviewer_{round_number}"
@@ -112,8 +117,6 @@ class DeliveryWorkflow(ImplementationService):
         nodes.append(NodeDefinition("delivery_bundle", NodeType.DELIVERY, "delivery_bundle.v1",
             dependencies=("execution_approval", *reviews), settings={"recovery_role": "deterministic"}))
         edges.extend(EdgeDefinition(review, "delivery_bundle", EdgeCondition(route="deliver")) for review in reviews)
-        version = (4 if getattr(self, "mission_tool_selection", None) is not None else
-                   3 if getattr(self, "mission_source_baseline", None) is not None else 2)
         return GraphDefinition(f"validated-delivery-single.v{version}" if self.single_agent
                                else f"validated-delivery.v{version}", version, tuple(nodes), tuple(edges))
 
@@ -124,12 +127,14 @@ class DeliveryWorkflow(ImplementationService):
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec,
             allow_locked_test_scope=allow_locked_test_scope, skills=skills)
         execution = self.graph()
-        gate = replace(execution.nodes[0], dependencies=analysis.nodes[-1].dependencies,
-                       settings=_plain_json(execution.nodes[0].settings))
-        graph_id = ("task-analysis-delivery-single-locked.v2" if self.single_agent else
-                    "task-analysis-delivery-locked.v2") if locked_task_spec is not None else f"task-analysis-delivery.v{execution.version}"
-        return GraphDefinition(graph_id, execution.version,
-            (*analysis.nodes[:-1], gate, *execution.nodes[1:]), execution.edges)
+        gate = execution.node("execution_approval")
+        graph_id = f"task-analysis-delivery.v{execution.version}"
+        if locked_task_spec is not None:
+            graph_id = "task-analysis-delivery-single-locked.v2" if self.single_agent else "task-analysis-delivery-locked.v2"
+        return GraphDefinition(graph_id, execution.version, (
+            *analysis_with_approval(analysis, gate),
+            *(node for node in execution.nodes if node.node_id != gate.node_id),
+        ), (*analysis.edges, *execution.edges))
 
     def _stored_graph(self, task_id):
         run = self.events.missions.get_graph_run(task_id)
@@ -138,14 +143,12 @@ class DeliveryWorkflow(ImplementationService):
             raise ForgePilotError("graph_definition",
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
                 "(请重新创建任务并审批执行方案)")
-        if graph.graph_id in {"validated-delivery.v2", "validated-delivery-single.v2",
-                              "validated-delivery.v3", "validated-delivery-single.v3", "validated-delivery.v4", "validated-delivery-single.v4"}:
+        if graph.graph_id in MULTI_AGENT_DELIVERY_IDS | SINGLE_AGENT_DELIVERY_IDS:
             expected = self.graph()
-        elif graph.graph_id in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4", "task-analysis-delivery-locked.v2",
-                               "task-analysis-delivery-single-locked.v2"}:
+        elif graph.graph_id in ORDINARY_ANALYSIS_DELIVERY_IDS | LOCKED_ANALYSIS_DELIVERY_IDS:
             from .analysis import AnalysisRequest, stored_graph_skills, validate_skill_routes
-            draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
-            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v2") else None
+            draft = graph.node("draft_task_spec")
+            locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id in LOCKED_ANALYSIS_DELIVERY_IDS else None
             request = AnalysisRequest.model_validate(_plain_json(draft.settings["request"]))
             skills = stored_graph_skills(self.events, task_id, graph)
             validate_skill_routes(self, skills, request.data_policy)
@@ -171,7 +174,7 @@ class DeliveryWorkflow(ImplementationService):
     def _requires_oracle(self, task_id, spec, plan):
         # Only ordinary HTTP missions may use the public validation path.
         # A frozen criterion or plan that asks for protected tests stays strict.
-        if self._stored_graph(task_id).graph_id not in {"task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4"}:
+        if self._stored_graph(task_id).graph_id not in _PUBLIC_VALIDATION_GRAPH_IDS:
             return True
         return (any(item.verification == "protected_test" for item in spec.content.acceptance_criteria)
             or any("protected_test" in step.verification for step in plan.content.steps))

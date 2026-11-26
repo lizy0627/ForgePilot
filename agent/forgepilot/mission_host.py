@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
 from .agents.analysis import AnalysisRequest, validate_skill_bindings, validate_skill_routes
+from .agents.workflow_graphs import MULTI_AGENT_DELIVERY_IDS, ORDINARY_ANALYSIS_DELIVERY_IDS
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
@@ -120,12 +121,12 @@ class MissionHost:
             metadata = None
             if mcp_server_ids is None:
                 metadata = self._metadata(task_id)
-                if (metadata.get("source_baseline") is None and self.graphs.snapshot(task_id).graph_id in {
-                        "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",
-                        "validated-delivery.v2", "validated-delivery.v3", "validated-delivery.v4"}):
+                snapshot = self.graphs.snapshot(task_id)
+                if (metadata.get("source_baseline") is None
+                        and snapshot.graph_id in ORDINARY_ANALYSIS_DELIVERY_IDS | MULTI_AGENT_DELIVERY_IDS):
                     raise ForgePilotError("mission_frozen_config_missing",
                         "This historical task has no frozen source/build selection; it remains readable, but must be recreated before execution or recovery")
-                if self.graphs.snapshot(task_id).graph_version >= 4 and metadata.get("tool_selection") is None:
+                if snapshot.graph_version >= 4 and metadata.get("tool_selection") is None:
                     raise ForgePilotError("mission_frozen_config_missing", "Frozen Mission tool selection is missing")
                 mcp_server_ids = metadata.get("mcp_server_ids", ())
                 expected_revisions = metadata.get("mcp_server_revisions")

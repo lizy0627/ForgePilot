@@ -38,6 +38,7 @@ from .analysis_tools import validate_evidence
 from .implementation_tools import ImplementationTools
 from .prompts import get_prompt
 from .registry import AgentRegistry
+from .workflow_graphs import analysis_with_approval, execution_approval
 
 
 class ScopeExpansion(ArtifactModel):
@@ -109,16 +110,15 @@ class ImplementationService:
         self._cancel_requested = set()
         self._budgets = {}
 
+    def _implementer_node(self, *additional_dependencies):
+        return NodeDefinition("implementer", NodeType.AGENT, self.definition.agent_id,
+                              dependencies=("execution_approval", *additional_dependencies),
+                              agent_id=self.definition.agent_id,
+                              agent_definition_hash=self.definition.definition_hash,
+                              settings={"limits": self.limits.model_dump(mode="json")})
+
     def graph(self):
-        return GraphDefinition("controlled-implementation.v1", 1, (
-            NodeDefinition("execution_approval", NodeType.HUMAN_GATE, "execution_approval",
-                           settings={"checkpoint_type": "plan_approved"}),
-            NodeDefinition("implementer", NodeType.AGENT, self.definition.agent_id,
-                           dependencies=("execution_approval",),
-                           agent_id=self.definition.agent_id,
-                           agent_definition_hash=self.definition.definition_hash,
-                           settings={"limits": self.limits.model_dump(mode="json")}),
-        ))
+        return GraphDefinition("controlled-implementation.v1", 1, (execution_approval(), self._implementer_node()))
 
     def _analysis_for(self, task_id):
         with self.events.missions.consistent_view():
@@ -147,7 +147,7 @@ class ImplementationService:
             expected = self.graph()
         elif graph.graph_id in {"task-analysis-implementation.v1", "task-analysis-implementation-locked.v1"}:
             from .analysis import AnalysisRequest
-            draft = next(node for node in graph.nodes if node.node_id == "draft_task_spec")
+            draft = graph.node("draft_task_spec")
             from ..orchestration.models import _plain_json
             locked = _plain_json(draft.settings["task_spec"]) if graph.graph_id.endswith("-locked.v1") else None
             expected = self._analysis_graph(task_id,
@@ -161,17 +161,11 @@ class ImplementationService:
 
     def _analysis_graph(self, task_id, request, *, locked_task_spec=None):
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec)
-        gate, implementer = self.graph().nodes
-        from dataclasses import replace
-        from ..orchestration.models import _plain_json
-        original_gate = analysis.nodes[-1]
-        return GraphDefinition("task-analysis-implementation-locked.v1" if locked_task_spec is not None
-                               else "task-analysis-implementation.v1", 1, (
-            *analysis.nodes[:-1], replace(gate, dependencies=original_gate.dependencies,
-                                          settings=_plain_json(gate.settings)),
-            replace(implementer, dependencies=("execution_approval", "join_evidence"),
-                    settings=_plain_json(implementer.settings)),
-        ))
+        graph_id = "task-analysis-implementation-locked.v1" if locked_task_spec is not None else "task-analysis-implementation.v1"
+        return GraphDefinition(graph_id, 1, (
+            *analysis_with_approval(analysis, execution_approval()),
+            self._implementer_node("join_evidence"),
+        ), analysis.edges)
 
     async def prepare_analysis(self, task_id, request, *, locked_task_spec=None):
         """Analyze inside the managed Worktree, then stop at execution approval.
