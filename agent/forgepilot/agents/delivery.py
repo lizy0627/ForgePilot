@@ -18,6 +18,7 @@ from ..errors import ForgePilotError
 from ..models.accounting import ModelBudget
 from ..orchestration.models import (EdgeCondition, EdgeDefinition, FailureKind, GraphDefinition,
                                     NodeDefinition, NodeResult, NodeStatus, NodeType, _plain_json)
+from ..repair import MAX_REPAIR_ROUNDS
 from .implementation import ImplementationService
 from .workflow_graphs import (
     LEGACY_DELIVERY_GRAPH_IDS, LOCKED_ANALYSIS_DELIVERY_IDS, MULTI_AGENT_DELIVERY_IDS,
@@ -25,7 +26,6 @@ from .workflow_graphs import (
 )
 
 
-MAX_REPAIR_ROUNDS = 3
 # Each graph version must opt in to validation without a protected Oracle.
 _PUBLIC_VALIDATION_GRAPH_IDS = frozenset({
     "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",
