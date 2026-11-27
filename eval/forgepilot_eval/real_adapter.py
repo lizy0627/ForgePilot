@@ -280,13 +280,13 @@ async def run_offline_locked_arm(arm: LockedMissionArm, *, gateway, isolation: I
     AppContainers so fake-provider integration cannot inspect Oracle sources.
     """
     from datetime import datetime, timezone
-    from forgepilot.agents.delivery import validation_passed
     from forgepilot.artifacts.models import ValidationReport
     from forgepilot.mission_host import MissionHost
     from forgepilot.presets import BuildConfig
     from forgepilot.sqlite_store import SqliteEventStore
     from forgepilot.task_host import TaskHost
     from forgepilot.task_service import TaskService
+    from forgepilot.validation_evidence import validation_passed
 
     validate_fair_gateway_routes(gateway.router.configuration)
     provider_factory = getattr(gateway, "_provider_factory", None)

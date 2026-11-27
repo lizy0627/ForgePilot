@@ -13,6 +13,7 @@ from ..artifacts.models import ChangeSet, EvidenceBundle, ReviewReport, TaskSpec
 from ..artifacts.validation import validate_artifact, validate_review_coverage
 from ..errors import ForgePilotError
 from ..models.accounting import ModelBudget
+from ..validation_evidence import validation_passed
 from ..workspace_safety import validate_relative
 from .prompts import get_prompt
 from .registry import AgentRegistry
@@ -53,23 +54,7 @@ def validate_review(task_spec: TaskSpec, review: ReviewReport) -> ReviewReport:
 
 
 def require_complete_validation(validation: ValidationReport, *, require_oracle=True) -> None:
-    if not require_oracle:
-        from .delivery import validation_passed
-        if not validation_passed(validation, require_oracle=False):
-            raise ForgePilotError("review_validation", "Independent review requires complete deterministic validation")
-        return
-    kinds = {command.kind for command in validation.commands if command.exit_code == 0}
-    oracle_ok = (validation.hidden_oracle == "passed" if require_oracle else
-                 validation.hidden_oracle in {"passed", "not_run"})
-    required_kinds = {"configure", "build", "test", "integrity"}
-    if validation.hidden_oracle == "passed":
-        required_kinds.add("protected_test")
-    if (validation.status != "passed" or validation.failure_classification != "none"
-            or validation.tests_failed or validation.tests_passed < 1
-            or not oracle_ok or validation.test_integrity != "passed"
-            or any(command.exit_code for command in validation.commands)
-            or not required_kinds <= kinds
-            or (validation.hidden_oracle == "not_run" and "protected_test" in kinds)):
+    if not validation_passed(validation, require_oracle=require_oracle):
         raise ForgePilotError("review_validation", "Independent review requires complete deterministic validation")
 
 

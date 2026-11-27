@@ -29,14 +29,10 @@ from .presets import MissionBuildSelection
 from .repository import Repository
 from .security import Redactor
 from .toolchain import ToolchainProfile
+from .validation_evidence import PIPELINE_STAGES, PUBLIC_PIPELINE_STAGES
 from .workspace_safety import Guard, manifest, validate_relative, _exists
 
 
-PIPELINE_STAGES = (
-    "Workspace Integrity", "Test Integrity", "CMake Configure", "Build", "CTest",
-    "Protected Oracle", "Diff Scope Check", "ValidationReport",
-)
-PUBLIC_PIPELINE_STAGES = (*PIPELINE_STAGES[:5], "Protected Oracle (not run)", *PIPELINE_STAGES[6:])
 _INFRASTRUCTURE = re.compile(
     r"command not found|not recognized as an internal|unable to find executable|"
     r"could not find.*(?:compiler|ninja|cmake|package)|no cmake_cxx_compiler|"

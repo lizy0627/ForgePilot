@@ -19,6 +19,7 @@ from ..models.accounting import ModelBudget
 from ..orchestration.models import (EdgeCondition, EdgeDefinition, FailureKind, GraphDefinition,
                                     NodeDefinition, NodeResult, NodeStatus, NodeType, _plain_json)
 from ..repair import MAX_REPAIR_ROUNDS
+from ..validation_evidence import validation_passed
 from .implementation import ImplementationService
 from .workflow_graphs import (
     LEGACY_DELIVERY_GRAPH_IDS, LOCKED_ANALYSIS_DELIVERY_IDS, MULTI_AGENT_DELIVERY_IDS,
@@ -30,25 +31,6 @@ from .workflow_graphs import (
 _PUBLIC_VALIDATION_GRAPH_IDS = frozenset({
     "task-analysis-delivery.v2", "task-analysis-delivery.v3", "task-analysis-delivery.v4",
 })
-
-
-def validation_passed(report, *, require_oracle=True):
-    """The sole success predicate used before independent review and delivery."""
-    from ..validation import PIPELINE_STAGES, PUBLIC_PIPELINE_STAGES
-    oracle_state = report.hidden_oracle
-    if require_oracle:
-        oracle_passed = oracle_state == "passed"
-    else:
-        oracle_passed = oracle_state in {"passed", "not_run"}
-    expected_stages = PIPELINE_STAGES if oracle_state == "passed" else PUBLIC_PIPELINE_STAGES
-    kinds = {item.kind for item in report.commands}
-    return (report.status == "passed" and report.failure_classification == "none"
-        and report.workspace_integrity == report.test_integrity == report.diff_scope == "passed"
-        and oracle_passed and report.tests_passed > 0 and report.tests_failed == 0
-        and tuple(report.pipeline_stages) == tuple(expected_stages)
-        and kinds >= {"configure", "build", "test", "integrity"}
-        and ("protected_test" in kinds) == (oracle_state == "passed")
-        and all(item.exit_code == 0 for item in report.commands))
 
 
 class DeliveryWorkflow(ImplementationService):
