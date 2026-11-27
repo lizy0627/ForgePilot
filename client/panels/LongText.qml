@@ -17,7 +17,8 @@ ColumnLayout {
         spacing: Theme.spaceXs
         ActionButton {
             objectName: root.objectName ? root.objectName + "Toggle" : "detailsToggle"
-            text: (root.expanded ? "▾  收起 · " : "▸  查看全文 · ") + root.title
+            icon.source: Theme.icon(root.expanded ? "chevron-down" : "chevron-right")
+            text: (root.expanded ? "收起 · " : "查看全文 · ") + root.title
             flat: true; enabled: root.text.length > 0; Layout.fillWidth: true
             onClicked: root.expanded = !root.expanded
             Accessible.name: text

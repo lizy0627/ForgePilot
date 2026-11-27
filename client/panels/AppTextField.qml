@@ -22,7 +22,7 @@ TextField {
         radius: Theme.radiusMd
         color: control.enabled ? Theme.input : Theme.disabled
         border.width: control.activeFocus ? 2 : 1
-        border.color: control.activeFocus ? Theme.focusRing
+        border.color: !control.enabled ? Theme.disabled : control.activeFocus ? Theme.focusRing
             : control.hovered ? Theme.accentBorder : Theme.border
     }
 }

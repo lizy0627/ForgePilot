@@ -7,9 +7,13 @@ ScrollBar {
     hoverEnabled: true
     padding: Theme.spaceXs / 2
     contentItem: Rectangle {
-        implicitWidth: Theme.spaceSm; implicitHeight: Theme.spaceSm; radius: Theme.radiusSm
+        implicitWidth: 6; implicitHeight: 6; radius: Theme.radiusSm
         color: !control.enabled ? Theme.disabledText : control.pressed ? Theme.accent : control.hovered ? Theme.silver : Theme.scroll
         opacity: control.size < 1 ? 1 : 0
     }
-    background: Rectangle { color: Theme.input; radius: Theme.radiusSm; visible: control.size < 1 }
+    background: Rectangle {
+        color: control.enabled && (control.hovered || control.pressed) ? Theme.input : Theme.transparent
+        radius: Theme.radiusSm
+        visible: control.size < 1
+    }
 }

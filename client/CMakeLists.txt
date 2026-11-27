@@ -69,6 +69,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/DiffPanel.qml panels/RepositoryPanel.qml panels/TaskHistoryPanel.qml panels/SettingsPanel.qml panels/RuntimeConfigDialog.qml
     panels/McpSettingsPanel.qml panels/McpServerDialog.qml panels/McpToolsDialog.qml
     panels/Panel.qml panels/StatusBadge.qml panels/LongText.qml panels/Ui.js panels/RagUi.js
+    panels/AppCheckBox.qml panels/AppDialog.qml panels/AppSwitch.qml panels/AppMenuItem.qml
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppTextField.qml panels/AppTextArea.qml panels/AppComboBox.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
     workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHistory.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
     workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js workbench/WorkflowTheme.js
@@ -76,7 +77,14 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
     workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml
     workbench/ValidationPanel.qml workbench/ReviewPanel.qml workbench/DeliveryPanel.qml
-    workbench/StateNotice.qml workbench/NodeStatusBadge.qml workbench/WorkbenchUi.js)
+    workbench/StateNotice.qml workbench/NodeStatusBadge.qml workbench/WorkbenchUi.js
+    RESOURCES assets/forge-mark.svg assets/fluent/LICENSE
+    assets/fluent/add.svg assets/fluent/arrow-right.svg assets/fluent/brain.svg assets/fluent/chat.svg
+    assets/fluent/check.svg assets/fluent/chevron-down.svg assets/fluent/chevron-right.svg assets/fluent/code.svg
+    assets/fluent/copy.svg assets/fluent/delete.svg assets/fluent/dismiss.svg assets/fluent/document.svg
+    assets/fluent/edit.svg assets/fluent/flow.svg assets/fluent/folder.svg assets/fluent/history.svg
+    assets/fluent/library.svg assets/fluent/more.svg assets/fluent/refresh.svg assets/fluent/send.svg
+    assets/fluent/settings.svg assets/fluent/sidebar.svg assets/fluent/stop.svg)
 
 # Ship the existing Qt Chinese catalogs inside the executables, independent of OS locale.
 get_target_property(qmake_path Qt6::qmake IMPORTED_LOCATION)

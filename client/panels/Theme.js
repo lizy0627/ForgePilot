@@ -1,38 +1,38 @@
 .pragma library
 // Shared color, type and geometry values. Text tokens meet at least 4.5:1
 // against the principal dark surfaces.
-var background = "#090d0c";
-var panel = "#111816";
-var sidebar = "#0d1412";
-var raised = "#1b2621";
-var input = "#16211b";
-var border = "#375044";
-var text = "#f2f6f3";
-var secondary = "#c8d3cb";
-var muted = "#a4b8aa";
-var disabledText = "#8ea394";
-var disabled = "#29352e";
-var hover = "#26392d";
-var pressed = "#314a39";
-var accent = "#a9dfb9";
-var accentFill = "#2d6847";
-var accentHover = "#387b55";
-var accentPressed = "#24543a";
-var accentSubtle = "#1d3025";
-var accentBorder = "#4f8060";
-var onAccent = "#ffffff";
-var selection = "#315941";
-var success = "#a9dfb9";
-var danger = "#ffaaaa";
-var dangerFill = "#3b2228";
-var dangerHover = "#512b32";
-var warning = "#f0cd92";
-var purple = "#c8b6f1";
-var silver = "#d4ddd7";
-var greenMuted = "#a4cbb0";
-var focusRing = "#d1baf7";
-var shadow = "#050807";
-var scroll = "#7b9986";
+var background = "#1a1c1e";
+var panel = "#232628";
+var sidebar = "#151719";
+var raised = "#303436";
+var input = "#1c1f21";
+var border = "#44494c";
+var text = "#edf1ef";
+var secondary = "#c3cbc8";
+var muted = "#9da8a4";
+var disabledText = "#8e9994";
+var disabled = "#292d2e";
+var hover = "#41494a";
+var pressed = "#222728";
+var accent = "#9ed7bd";
+var accentFill = "#99d2b7";
+var accentHover = "#b9efd3";
+var accentPressed = "#76b396";
+var accentSubtle = "#2b4038";
+var accentBorder = "#638976";
+var onAccent = "#122b20";
+var selection = "#385546";
+var success = "#9fd4b5";
+var danger = "#f4b3ab";
+var dangerFill = "#442d2c";
+var dangerHover = "#5d3b36";
+var warning = "#eac690";
+var purple = "#c4b6dc";
+var silver = "#d7dedb";
+var greenMuted = "#adcbbd";
+var focusRing = "#bcf1db";
+var shadow = "#0c0d0e";
+var scroll = "#697570";
 var transparent = "transparent";
 
 var fontFamily = "Microsoft YaHei UI";
@@ -49,6 +49,37 @@ var spaceMd = 12;
 var spaceLg = 16;
 var spaceXl = 24;
 var radiusSm = 6;
-var radiusMd = 10;
-var radiusLg = 14;
+var radiusMd = 7;
+var radiusLg = 12;
 var controlHeight = 38;
+
+var dangerPressed = "#392321";
+var dangerBorder = "#935f58";
+var selectedHover = "#39564a";
+var selectedPressed = "#23372e";
+var controlEdge = "#58615f";
+var brandMark = Qt.resolvedUrl("../assets/forge-mark.svg");
+
+function icon(name) {
+    return Qt.resolvedUrl("../assets/fluent/" + name + ".svg");
+}
+
+function buttonFill(control, role) {
+    if (!control.enabled) return disabled;
+    if (role === "primary") return control.down ? accentPressed : control.hovered ? accentHover : accentFill;
+    if (role === "danger") return control.down ? dangerPressed : control.hovered ? dangerHover : dangerFill;
+    if (role === "selected") return control.down ? selectedPressed : control.hovered ? selectedHover : accentSubtle;
+    if (control.down) return pressed;
+    if (control.hovered) return hover;
+    return role === "flat" ? transparent : raised;
+}
+
+function buttonBorder(control, role) {
+    if (!control.enabled) return transparent;
+    if (control.visualFocus) return focusRing;
+    if (control.down) return role === "danger" ? danger : accent;
+    if (role === "selected") return accentBorder;
+    if (role === "danger") return dangerBorder;
+    if (control.hovered) return role === "primary" ? focusRing : controlEdge;
+    return role === "secondary" ? border : transparent;
+}

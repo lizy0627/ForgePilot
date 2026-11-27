@@ -9,7 +9,7 @@ Rectangle {
     property string subtitle
     default property alias content: body.data
     implicitHeight: layout.implicitHeight + Theme.spaceLg * 2
-    color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border
+    color: Theme.panel; radius: Theme.radiusMd
     ColumnLayout {
         id: layout
         anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.spaceLg }

@@ -20,21 +20,21 @@ ComboBox {
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
     }
-    indicator: Label {
+    indicator: Image {
         x: control.width - width - Theme.spaceMd
         y: (control.height - height) / 2
-        text: "⌄"
-        font.family: Theme.fontFamily
-        font.pixelSize: Theme.fontSizeLg
-        color: control.enabled ? Theme.silver : Theme.disabledText
+        width: 16
+        height: 16
+        opacity: control.enabled ? 1 : 0.45
+        source: Theme.icon("chevron-down")
     }
     background: Rectangle {
         implicitWidth: 180
         implicitHeight: Theme.controlHeight
         radius: Theme.radiusMd
-        color: control.enabled ? Theme.input : Theme.disabled
+        color: !control.enabled ? Theme.disabled : control.down ? Theme.pressed : control.hovered ? Theme.raised : Theme.input
         border.width: control.activeFocus ? 2 : 1
-        border.color: control.activeFocus ? Theme.focusRing
+        border.color: !control.enabled ? Theme.disabled : control.activeFocus ? Theme.focusRing
             : control.hovered ? Theme.accentBorder : Theme.border
     }
     delegate: ItemDelegate {
@@ -45,16 +45,16 @@ ComboBox {
         font.family: Theme.fontFamily
         font.pixelSize: Theme.fontSizeMd
         palette.text: Theme.text
+        hoverEnabled: true
         highlighted: control.highlightedIndex === index
+        readonly property string styleRole: control.currentIndex === index ? "selected" : "flat"
         background: Rectangle {
             radius: Theme.radiusSm
-            color: option.highlighted ? Theme.accentSubtle : option.hovered ? Theme.hover : Theme.transparent
+            color: option.highlighted && !option.hovered && !option.down ? Theme.accentSubtle : Theme.buttonFill(option, option.styleRole)
+            border.width: option.visualFocus || option.down ? 2 : 1
+            border.color: Theme.buttonBorder(option, option.styleRole)
         }
-        onClicked: {
-            control.currentIndex = index
-            control.activated(index)
-            control.popup.close()
-        }
+
     }
     popup: Popup {
         y: control.height + Theme.spaceXs
@@ -66,7 +66,7 @@ ComboBox {
             implicitHeight: contentHeight
             model: control.delegateModel
             currentIndex: control.highlightedIndex
-            ScrollIndicator.vertical: ScrollIndicator {}
+            ScrollBar.vertical: AppScrollBar {}
         }
         background: Rectangle {
             color: Theme.raised
