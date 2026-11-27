@@ -6,12 +6,12 @@ import "WorkbenchUi.js" as W
 Rectangle {
     id: root
     required property string status
-    readonly property string statusText: W.icon(status) + " " + W.label(status)
+    readonly property string statusText: W.label(status)
     implicitWidth: Math.min(180, label.implicitWidth + Theme.spaceSm * 2)
     implicitHeight: Theme.controlHeight - Theme.spaceMd
     radius: implicitHeight / 2
     color: Theme.raised
-    border.color: W.color(status)
+    border.width: 0
     Accessible.role: Accessible.StaticText
     Accessible.name: "节点状态：" + W.label(status)
     Label {

@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
-import "WorkflowTheme.js" as Theme
+import "../panels/Theme.js" as Theme
 import "WorkbenchUi.js" as W
 import "WorkflowUi.js" as Flow
 
@@ -114,58 +114,6 @@ Item {
         if (detailsScroll && detailsScroll.contentItem) detailsScroll.contentItem.contentY = 0;
     }
 
-    component DetailTextArea: TextArea {
-        id: textControl
-        font.family: Theme.fontFamily; font.pixelSize: Theme.fontSizeMd
-        color: Theme.text; selectionColor: Theme.selection; selectedTextColor: Theme.text
-        leftPadding: Theme.spaceMd; rightPadding: Theme.spaceMd
-        topPadding: Theme.spaceSm; bottomPadding: Theme.spaceSm
-        background: Rectangle {
-            implicitHeight: 72; radius: Theme.radiusMd; color: Theme.input
-            border.width: textControl.activeFocus ? 2 : 1
-            border.color: textControl.activeFocus ? Theme.focusRing : Theme.border
-        }
-    }
-
-    component DetailSelector: ComboBox {
-        id: selector
-        hoverEnabled: true
-        font.family: Theme.fontFamily; font.pixelSize: Theme.fontSizeSm
-        leftPadding: Theme.spaceSm; rightPadding: Theme.spaceLg * 2
-        topPadding: Theme.spaceSm; bottomPadding: Theme.spaceSm
-        contentItem: Label {
-            text: selector.displayText; color: Theme.text; font: selector.font
-            elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter
-        }
-        indicator: Label {
-            anchors.right: parent.right; anchors.rightMargin: Theme.spaceSm; anchors.verticalCenter: parent.verticalCenter
-            text: "▾"; color: Theme.secondary
-        }
-        background: Rectangle {
-            implicitWidth: 180; implicitHeight: Theme.controlHeight; radius: Theme.radiusMd; color: Theme.input
-            border.width: selector.activeFocus ? 2 : 1
-            border.color: selector.activeFocus ? Theme.focusRing : selector.hovered ? Theme.accentBorder : Theme.border
-        }
-        delegate: ItemDelegate {
-            id: option
-            required property int index
-            width: selector.width - Theme.spaceXs * 2
-            text: selector.textAt(index); highlighted: selector.highlightedIndex === index
-            contentItem: Label { text: option.text; color: Theme.text; font: selector.font; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
-            background: Rectangle { color: option.highlighted ? Theme.accentSubtle : option.hovered ? Theme.hover : Theme.raised; radius: Theme.radiusSm }
-            onClicked: { selector.currentIndex = index; selector.activated(index); selector.popup.close() }
-        }
-        popup: Popup {
-            y: selector.height + Theme.spaceXs; width: selector.width; padding: Theme.spaceXs
-            implicitHeight: Math.min(280, contentItem.implicitHeight + topPadding + bottomPadding)
-            contentItem: ListView {
-                implicitHeight: contentHeight; clip: true; model: selector.delegateModel; currentIndex: selector.highlightedIndex
-                ScrollBar.vertical: Controls.AppScrollBar {}
-            }
-            background: Rectangle { color: Theme.raised; border.color: Theme.accentBorder; radius: Theme.radiusMd }
-        }
-    }
-
     component ReadableBlock: ColumnLayout {
         id: block
         property string heading: ""
@@ -177,7 +125,7 @@ Item {
             Layout.fillWidth: true
             Label { text: block.heading; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.WrapAnywhere; color: Theme.secondary; font.weight: Font.DemiBold; textFormat: Text.PlainText }
             Controls.ActionButton {
-                text: "复制"; flat: true; enabled: !!block.value
+                text: "复制"; flat: true; icon.source: Theme.icon("copy"); enabled: !!block.value
                 Accessible.name: "复制" + block.heading
                 onClicked: { readableText.selectAll(); readableText.copy(); readableText.deselect() }
             }
@@ -185,15 +133,23 @@ Item {
         Controls.AppScrollView {
             id: textScroll
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(block.maximumHeight, Math.max(56, readableText.implicitHeight))
+            Layout.preferredHeight: Math.min(block.maximumHeight, Math.max(36, readableText.implicitHeight))
             clip: true; contentWidth: availableWidth
-            DetailTextArea {
+            Controls.AppTextArea {
                 id: readableText
                 objectName: "workflowReadableText"
                 width: textScroll.availableWidth
                 text: block.value; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText
                 wrapMode: TextEdit.WrapAnywhere; font.family: block.monospace ? Theme.fontMono : Theme.fontFamily
-                font.pixelSize: Theme.fontSizeSm
+                font.pixelSize: Theme.fontSizeMd
+                leftPadding: block.monospace ? Theme.spaceMd : Theme.spaceXs
+                rightPadding: leftPadding
+                background: Rectangle {
+                    radius: Theme.radiusSm
+                    color: block.monospace ? Theme.input : Theme.transparent
+                    border.width: readableText.activeFocus ? 2 : 1
+                    border.color: readableText.activeFocus ? Theme.focusRing : readableText.hovered ? Theme.controlEdge : Theme.transparent
+                }
                 Accessible.name: block.heading
             }
         }
@@ -211,7 +167,7 @@ Item {
         Controls.AppScrollView {
             id: outputScroll
             Layout.fillWidth: true; Layout.preferredHeight: 280; clip: true
-            DetailTextArea {
+            Controls.AppTextArea {
                 id: pagedOutput; objectName: "workflowPagedOutput"
                 text: paged.value.substring(paged.offset, paged.offset + paged.pageSize)
                 readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.NoWrap
@@ -245,9 +201,9 @@ Item {
         }
     }
 
-    Rectangle { anchors.fill: parent; color: Theme.sidebar; border.color: Theme.border }
+    Rectangle { anchors.fill: parent; color: Theme.panel }
     ColumnLayout {
-        anchors.fill: parent; anchors.margins: Theme.spaceMd; spacing: Theme.spaceSm
+        anchors.fill: parent; anchors.margins: Theme.spaceLg; spacing: Theme.spaceMd
         RowLayout {
             Layout.fillWidth: true
             Label {
@@ -268,6 +224,7 @@ Item {
                 Label {
                     visible: !!root.nodeId
                     text: root.visual.label
+                        + (root.node.status === "awaiting_human" ? " · 等待你处理" : root.node.agentId ? " · " + root.node.agentId : "")
                         + (root.node.attempt ? " · 第 " + root.node.attempt + " 次尝试" : " · 尚未执行")
                     color: root.visual.needsRepair ? Theme.warning : W.color(root.status); font.weight: Font.DemiBold
                     Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
@@ -426,7 +383,7 @@ Item {
                         }
                         ColumnLayout {
                             visible: artifactPanel.evidence.length > 0; Layout.fillWidth: true; spacing: Theme.spaceSm
-                            DetailSelector {
+                            Controls.AppComboBox {
                                 objectName: "workflowEvidenceSelect"
                                 Layout.fillWidth: true; model: artifactPanel.evidence.map(function(item) { return item.evidence_id + " · " + (item.path || item.source) })
                                 Accessible.name: "选择本节点证据"
@@ -443,7 +400,7 @@ Item {
                         ColumnLayout {
                             visible: artifactPanel.files.length > 0; Layout.fillWidth: true; spacing: Theme.spaceSm
                             Label { text: "本节点修改 · " + artifactPanel.files.length + " 个文件"; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
-                            DetailSelector {
+                            Controls.AppComboBox {
                                 objectName: "workflowFileSelect"
                                 Layout.fillWidth: true; model: artifactPanel.files.map(function(file) { return file.path })
                                 Accessible.name: "选择本节点修改文件"
@@ -458,9 +415,9 @@ Item {
                         }
                         ColumnLayout {
                             visible: artifactPanel.commands.length > 0; Layout.fillWidth: true; spacing: Theme.spaceSm
-                            DetailSelector {
+                            Controls.AppComboBox {
                                 objectName: "workflowCommandSelect"
-                                Layout.fillWidth: true; model: artifactPanel.commands.map(function(command) { return (command.exit_code === 0 ? "✓ " : "! ") + command.command_summary })
+                                Layout.fillWidth: true; model: artifactPanel.commands.map(function(command) { return (command.exit_code === 0 ? "通过 · " : "失败 · ") + command.command_summary })
                                 Accessible.name: "选择本节点验证命令"
                                 onActivated: artifactPanel.selectedCommand = currentIndex
                             }

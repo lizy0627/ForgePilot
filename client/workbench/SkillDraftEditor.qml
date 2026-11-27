@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
-import "WorkflowTheme.js" as Theme
+import "../panels/Theme.js" as Theme
 import "WorkflowUi.js" as Flow
 
 ColumnLayout {
@@ -177,11 +177,13 @@ ColumnLayout {
     Caption { text: "适用边界 · 每行一项" }
     Input { id: boundaries; objectName: "skillDraftBoundaries" }
     Caption { text: "适用阶段" }
-    RowLayout {
+    GridLayout {
+        Layout.fillWidth: true
+        columns: width > 500 ? 3 : 2
         enabled: !editor.draft.result_version
         Repeater {
             model: editor.selectableStages
-            delegate: CheckBox {
+            delegate: Controls.AppCheckBox {
                 required property string modelData
                 readonly property var presentation: ({
                     root_cause_analysis: {label: "根因分析", name: "skillDraftRootStage"},
@@ -195,5 +197,5 @@ ColumnLayout {
             }
         }
     }
-    CheckBox { id: policyScope; enabled: !editor.draft.result_version; text: "允许在任务数据策略许可的模型上复用（默认仅限本机）" }
+    Controls.AppCheckBox { id: policyScope; Layout.fillWidth: true; enabled: !editor.draft.result_version; text: "允许在任务数据策略许可的模型上复用（默认仅限本机）" }
 }

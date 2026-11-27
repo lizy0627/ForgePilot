@@ -1,13 +1,17 @@
 .pragma library
 .import "../panels/Theme.js" as Theme
-var labels = {pending:"待执行", running:"执行中", awaiting_human:"等待确认", succeeded:"已成功", failed:"失败", interrupted:"已中断", skipped:"已跳过", retryable:"可重试", cancelled:"已取消"};
-var icons = {pending:"○", running:"▶", awaiting_human:"!", succeeded:"✓", failed:"×", interrupted:"!", skipped:"–", retryable:"↻", cancelled:"–"};
-var colors = {pending:Theme.muted, running:Theme.accent, awaiting_human:Theme.warning,
+var labels = {ready:"已就绪", pending:"待执行", running:"执行中", awaiting_human:"等待确认", succeeded:"已成功", failed:"失败", interrupted:"已中断", skipped:"已跳过", retryable:"可重试", cancelled:"已取消"};
+var colors = {ready:Theme.muted, pending:Theme.muted, running:Theme.accent, awaiting_human:Theme.warning,
               succeeded:Theme.success, failed:Theme.danger, interrupted:Theme.warning,
               skipped:Theme.disabledText, retryable:Theme.purple, cancelled:Theme.muted};
 function label(status) { return labels[status] || (status ? "状态：" + status : "未开始"); }
-function icon(status) { return icons[status] || "•"; }
 function color(status) { return colors[status] || Theme.secondary; }
+function appendActivity(events, event) {
+    return events.slice(-19).concat([{
+        event_type: event.event_type, node_id: event.node_id, timestamp: event.timestamp,
+        state: (event.data && event.data.state) || event.state || ""
+    }]);
+}
 function artifact(model, type) {
     if (!model) return {};
     var count = model.count;

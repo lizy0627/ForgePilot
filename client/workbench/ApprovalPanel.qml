@@ -16,7 +16,7 @@ Controls.Panel {
     readonly property bool bundleMatches: !!review.review_hash && taskArtifact.contentHash === review.task_spec_hash && planArtifact.contentHash === review.plan_hash
     property var seenReviews: ({})
     property string changeNotice: ""
-    title: "Approval · 执行审批"
+    title: "执行审批"
     subtitle: root.review.revision ? "修订 " + root.review.revision : ""
     objectName: "approvalPanel"
     function noticeReview() {
@@ -84,12 +84,11 @@ Controls.Panel {
         Controls.ActionButton { objectName: "missionApproveButton"; text: "批准当前修订"; highlighted: true; enabled: root.bundleMatches && root.mission.approval.available; onClicked: root.mission.approval.approve() }
         Controls.ActionButton { objectName: "missionRejectButton"; text: "拒绝"; danger: true; enabled: root.bundleMatches && root.mission.approval.available; onClicked: rejectDialog.open() }
     }
-    Dialog {
+    Controls.AppDialog {
         id: rejectDialog; title: "拒绝执行审批"; modal: true; anchors.centerIn: Overlay.overlay; width: 420; implicitWidth: 420
         padding: Theme.spaceLg
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
         contentItem: Label { wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText; text: "将拒绝任务 " + root.mission.taskId + " 的修订 " + root.review.revision + " 并取消本次执行。该决定不可撤回。" }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             Controls.ActionButton { text: "确认拒绝"; danger: true; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.approval.reject() }
         }

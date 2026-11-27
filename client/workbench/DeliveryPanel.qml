@@ -53,7 +53,7 @@ Controls.Panel {
         + "\n目标：" + (preview.target_branch || mission.delivery.previewTarget || "默认")
         + "\n" + (mission.delivery.previewMode === "abandon" ? "隔离工作区将被丢弃，未交付改动无法从该工作区恢复。"
             : mission.delivery.previewMode === "squash" ? "目标分支引用会改变，并创建合并提交。" : "将执行已预览的交付操作。")
-    title: "Delivery · 交付"
+    title: "任务交付"
     subtitle: mission.status === "succeeded" ? "可预览交付" : ""
     objectName: "deliveryPanel"
     StateNotice { mission: root.mission; hasData: !!root.artifact.artifactId; emptyText: "尚无交付包。"; Layout.fillWidth: true }
@@ -81,7 +81,7 @@ Controls.Panel {
         }
     }
     Controls.ActionButton {
-        objectName: "missionDeliveryPreviewButton"; Layout.fillWidth: true
+        objectName: "missionDeliveryPreviewButton"; Layout.fillWidth: true; highlighted: !root.preview.token && !abandoning
         readonly property bool abandoning: root.modes[mode.currentIndex] === "abandon"
         text: root.recovering ? "核验目标分支现状" : abandoning && root.mission.delivery.abandonBlockReason ? root.mission.delivery.abandonBlockReason : "预览交付操作"
         enabled: root.mission.delivery.canPreview && (abandoning ? !root.mission.delivery.abandonBlockReason : root.mission.status === "succeeded")
@@ -112,11 +112,10 @@ Controls.Panel {
             if (!root.mission.delivery.canConfirm) confirmDialog.close()
         }
     }
-    Dialog {
+    Controls.AppDialog {
         id: confirmDialog; objectName: "missionDeliveryConfirmDialog"; title: root.recovering ? "确认核验结果" : "确认交付操作"; modal: true; anchors.centerIn: Overlay.overlay
         width: Math.min(440, Math.max(240, Overlay.overlay ? Overlay.overlay.width - Theme.spaceLg * 2 : 440))
         padding: Theme.spaceLg
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
         contentItem: ColumnLayout {
             spacing: Theme.spaceSm
             Controls.AppScrollView {
@@ -135,7 +134,7 @@ Controls.Panel {
                 onClicked: { confirmText.selectAll(); confirmText.copy(); confirmText.deselect() }
             }
         }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             Controls.ActionButton { objectName: "missionDeliveryDialogConfirmButton"; enabled: root.mission.delivery.canConfirm; text: root.recovering ? "确认" + root.outcomeText(root.preview.outcome) : "确认交付"; danger: root.mission.delivery.previewMode === "abandon" || root.mission.delivery.previewMode === "squash"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.delivery.confirm() }
         }

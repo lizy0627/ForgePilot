@@ -17,7 +17,7 @@ Controls.Panel {
         delegate: Rectangle {
             required property var record
             Layout.fillWidth: true; implicitHeight: nodeLayout.implicitHeight + Theme.spaceSm * 2
-            color: Theme.raised; radius: Theme.radiusMd; border.color: Theme.border
+            color: Theme.panel; radius: Theme.radiusMd
             Accessible.role: Accessible.StaticText
             Accessible.name: record.nodeId + "，" + W.label(record.status) + "，执行者 " + (record.agentId || "系统")
             ColumnLayout {
@@ -25,7 +25,7 @@ Controls.Panel {
                 Label {
                     id: nodeName
                     objectName: "missionGraphNodePreview"
-                    text: record.nodeId; font.weight: Font.DemiBold; textFormat: Text.PlainText
+                    text: record.nodeId; font.family: Theme.fontMono; font.weight: Font.DemiBold; textFormat: Text.PlainText
                     Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
                     maximumLineCount: 2; elide: Text.ElideRight
                 }
@@ -38,7 +38,7 @@ Controls.Panel {
                 Label {
                     id: statusLabel
                     objectName: "missionGraphStatusPreview"
-                    text: W.icon(record.status) + " " + W.label(record.status)
+                    text: W.label(record.status)
                     color: W.color(record.status); font.pixelSize: Theme.fontSizeSm; font.weight: Font.DemiBold
                     textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere
                     maximumLineCount: 2; elide: Text.ElideRight

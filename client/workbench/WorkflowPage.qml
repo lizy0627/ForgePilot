@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
-import "WorkflowTheme.js" as Theme
+import "../panels/Theme.js" as Theme
 import "WorkbenchUi.js" as W
 import "WorkflowUi.js" as Flow
 
@@ -21,6 +21,9 @@ Item {
     property string currentTaskId: ""
     property var stages: []
     property var nodeRecords: []
+    property var activityEvents: []
+    readonly property var activeRecord: Flow.currentRecord(nodeRecords) || ({})
+    readonly property int completedStages: stages.filter(function(stage) { return stage.status === "succeeded" }).length
     property var nodeArtifacts: []
     property var selectedNode: ({})
     readonly property bool hasTask: !!mission.taskId
@@ -44,6 +47,7 @@ Item {
     onVisibleChanged: if (!visible) {
         if (historyDrawer) historyDrawer.close()
         if (skillHistory) skillHistory.close()
+        if (activityDialog) activityDialog.close()
         if (draftPanel) draftPanel.close()
     }
     readonly property string attentionNodeId: {
@@ -78,6 +82,8 @@ Item {
     function refreshView() {
         if (currentTaskId !== mission.taskId) {
             currentTaskId = mission.taskId
+            activityEvents = []
+            activityDialog.close()
             skillHistory.close()
             selectionPinned = false; selectedNodeId = ""; detailsVisible = false
             toolsExpanded = false
@@ -140,7 +146,14 @@ Item {
         historyDrawer.close()
     }
     Component.onCompleted: refreshView()
-    Connections { target: root.mission; function onMissionChanged() { Qt.callLater(root.refreshView) } }
+    Connections {
+        target: root.mission
+        function onMissionChanged() { Qt.callLater(root.refreshView) }
+        function onEventReceived(id, event) {
+            if (event.task_id !== root.mission.taskId) return
+            root.activityEvents = W.appendActivity(root.activityEvents, event)
+        }
+    }
     Connections {
         target: root.mission.approval
         function onScopeExpansionApproved(taskId) {
@@ -218,7 +231,9 @@ Item {
                     }
                     Label { text: "·"; color: Theme.muted }
                     Label {
-                        text: Flow.statusLabels[root.mission.status] || W.label(root.mission.status)
+                        text: (root.mission.status === "awaiting_human" ? "等待你处理" : Flow.statusLabels[root.mission.status] || W.label(root.mission.status))
+                            + (root.activeRecord.nodeId && ["running", "awaiting_human"].indexOf(root.mission.status) >= 0 ? " · " + Flow.nodeTitle(root.activeRecord) : "")
+                        Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                         color: W.color(root.mission.status); font.pixelSize: Theme.fontSizeSm
                     }
                 }
@@ -252,6 +267,7 @@ Item {
             Controls.ActionButton {
                 objectName: "workflowDemandToggle"
                 text: root.demandCollapsed ? "新建任务" : "返回当前任务"
+                icon.source: Theme.icon(root.demandCollapsed ? "add" : "flow")
                 onClicked: {
                     root.detailsVisible = false
                     root.taskCenterExpanded = !root.taskCenterExpanded
@@ -259,14 +275,16 @@ Item {
             }
             Controls.ActionButton {
                 objectName: "workflowMoreButton"; visible: root.demandCollapsed
-                text: "···"; flat: true; Layout.preferredWidth: Theme.controlHeight
+                text: "任务操作"; icon.source: Theme.icon("more"); display: AbstractButton.IconOnly; flat: true; Layout.preferredWidth: Theme.controlHeight
                 horizontalPadding: 0; Accessible.name: "任务操作"
                 onClicked: taskMenu.open()
                 Menu {
                     id: taskMenu
                     y: parent.height
-                    MenuItem { text: "刷新任务"; enabled: !root.mission.busy; onTriggered: root.mission.refresh() }
-                    MenuItem {
+                    padding: Theme.spaceXs
+                    background: Rectangle { radius: Theme.radiusMd; color: Theme.raised; border.color: Theme.controlEdge }
+                    Controls.AppMenuItem { text: "刷新任务"; enabled: !root.mission.busy; onTriggered: root.mission.refresh() }
+                    Controls.AppMenuItem {
                         text: "取消任务"
                         visible: ["succeeded", "failed", "cancelled"].indexOf(root.mission.status) < 0
                         enabled: visible && root.mission.synchronized && !root.mission.busy
@@ -318,7 +336,7 @@ Item {
             Layout.fillWidth: true; implicitHeight: attentionRow.implicitHeight + Theme.spaceSm * 2; color: Theme.accentSubtle
             RowLayout { id: attentionRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: Theme.spaceLg
                 Label { Layout.fillWidth: true; text: root.mission.status === "awaiting_human" && root.attentionNodeId === "execution_approval" && !root.mission.snapshot.recovery_required ? "方案已准备好，请查看并确认后继续。" : "任务需要处理，请查看对应步骤。"; color: Theme.warning; wrapMode: Text.WrapAnywhere }
-                Controls.ActionButton { objectName: "workflowAttentionButton"; text: "查看"; onClicked: root.selectNode(root.attentionNodeId) }
+                Controls.ActionButton { objectName: "workflowAttentionButton"; text: root.mission.status === "awaiting_human" ? "查看待确认事项" : "查看待处理步骤"; highlighted: true; onClicked: root.selectNode(root.attentionNodeId) }
             }
         }
         TaskCenter {
@@ -337,9 +355,32 @@ Item {
                 visible: !root.compactLayout || !root.detailsVisible
                 Layout.fillWidth: true; Layout.fillHeight: true
                 Layout.minimumWidth: 0; Layout.minimumHeight: 0
+                RowLayout {
+                    id: graphHeading
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                    anchors.leftMargin: Theme.spaceXl; anchors.rightMargin: Theme.spaceLg
+                    height: Theme.controlHeight + Theme.spaceMd
+                    Label {
+                        text: "任务流程"
+                        font.weight: Font.DemiBold; font.pixelSize: Theme.fontSizeLg
+                        color: Theme.text
+                    }
+                    Label {
+                        Layout.fillWidth: true; Layout.minimumWidth: 0
+                        text: root.stages.length ? root.completedStages + " / " + root.stages.length + " 阶段完成" : ""
+                        color: Theme.muted; elide: Text.ElideRight
+                        font.pixelSize: Theme.fontSizeSm
+                    }
+                    Controls.ActionButton {
+                        text: "活动"; icon.source: Theme.icon("history"); flat: true
+                        Accessible.name: "查看活动时间线"
+                        onClicked: activityDialog.open()
+                    }
+                }
                 WorkflowGraph {
                     id: graph
-                    visible: root.stages.length > 0; anchors.fill: parent
+                    visible: root.stages.length > 0
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: graphHeading.bottom; anchors.bottom: parent.bottom
                     stages: root.stages; selectedNodeId: root.selectedNodeId; artifactModel: root.mission.artifacts
                     onNodeSelected: function(nodeId) { root.selectNode(nodeId) }
                 }
@@ -375,13 +416,34 @@ Item {
         width: Math.min(740, root.width - Theme.spaceLg * 2)
         height: Math.min(800, root.height - Theme.spaceLg * 2)
     }
-    Dialog {
+    Controls.AppDialog {
+        id: activityDialog
+        title: "任务活动"; modal: true; anchors.centerIn: Overlay.overlay
+        width: Math.min(540, root.width - Theme.spaceXl * 2)
+        height: Math.min(560, root.height - Theme.spaceXl * 2)
+        contentItem: Controls.AppScrollView {
+            id: activityScroll
+            contentWidth: availableWidth
+            clip: true
+            Loader {
+                width: activityScroll.availableWidth
+                active: activityDialog.visible
+                sourceComponent: ActivityTimeline {
+                    mission: root.mission
+                    events: root.activityEvents
+                }
+            }
+        }
+        footer: Controls.AppDialogButtonBox {
+            Controls.ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
+    }
+    Controls.AppDialog {
         id: skillHistory; objectName: "missionSkillHistoryDialog"
         title: "已选择的技能"; modal: true; anchors.centerIn: Overlay.overlay
         width: Math.min(620, root.width - 2 * Theme.spaceLg)
         height: Math.min(360, root.height - 2 * Theme.spaceLg)
         onAboutToShow: root.mission.loadMissionSkills()
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
         contentItem: Controls.AppScrollView {
             clip: true
             Controls.AppTextArea {
@@ -390,7 +452,7 @@ Item {
                 text: root.skillHistoryText()
             }
         }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton {
                 text: "刷新"; flat: true; enabled: !root.mission.missionSkillsLoading
                 onClicked: root.mission.loadMissionSkills()
@@ -398,26 +460,24 @@ Item {
             Controls.ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
         }
     }
-    Dialog {
+    Controls.AppDialog {
         id: errorDialog; title: "任务连接信息"; modal: true; anchors.centerIn: Overlay.overlay
         width: Math.min(640, root.width - Theme.spaceLg * 2); height: Math.min(420, root.height - Theme.spaceLg * 2)
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
         contentItem: Controls.AppScrollView {
             clip: true
-            TextArea { id: errorText; text: root.mission.error; color: Theme.text; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText; background: Rectangle { color: Theme.input } }
+            Controls.AppTextArea { id: errorText; text: root.mission.error; color: Theme.text; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText }
         }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "复制"; onClicked: { errorText.selectAll(); errorText.copy(); errorText.deselect() } }
             Controls.ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
         }
     }
-    Dialog {
+    Controls.AppDialog {
         id: cancelDialog; title: "取消当前任务"; modal: true; anchors.centerIn: Overlay.overlay
         width: Math.min(420, root.width - Theme.spaceLg * 2)
         padding: Theme.spaceLg
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
         contentItem: Label { text: "取消后停止继续执行，隔离工作区保留已完成的改动。"; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             Controls.ActionButton { objectName: "workflowCancelConfirm"; text: "确认取消"; danger: true; enabled: root.mission.synchronized && !root.mission.busy; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.cancel() }
         }

@@ -72,7 +72,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     panels/AppCheckBox.qml panels/AppDialog.qml panels/AppDialogButtonBox.qml panels/AppItemDelegate.qml panels/AppSwitch.qml panels/AppMenuItem.qml
     panels/Theme.js panels/DarkPalette.qml panels/ActionButton.qml panels/AppTextField.qml panels/AppTextArea.qml panels/AppComboBox.qml panels/AppScrollBar.qml panels/AppScrollView.qml panels/TextMenu.qml panels/NavigationTab.qml panels/MemoryDialog.qml
     workbench/WorkbenchPage.qml workbench/TaskCenter.qml workbench/MissionHistory.qml workbench/MissionHeader.qml workbench/TaskGraphView.qml
-    workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js workbench/WorkflowTheme.js
+    workbench/WorkflowPage.qml workbench/WorkflowGraph.qml workbench/WorkflowDetails.qml workbench/WorkflowUi.js
     workbench/SkillDraftPanel.qml workbench/SkillDraftEditor.qml
     workbench/ActivityTimeline.qml workbench/TaskSpecPanel.qml workbench/EvidencePanel.qml
     workbench/ExecutionPlanPanel.qml workbench/ApprovalPanel.qml workbench/MissionDiffPanel.qml

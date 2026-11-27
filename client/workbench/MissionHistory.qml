@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
 import "../panels/Theme.js" as Theme
-import "WorkflowTheme.js" as Palette
 import "WorkbenchUi.js" as W
 
 ColumnLayout {
@@ -30,7 +29,7 @@ ColumnLayout {
             text: "任务历史"
             Layout.fillWidth: true
             font.weight: Font.DemiBold
-            color: root.navMode ? Palette.secondary : Theme.text
+            color: root.navMode ? Theme.secondary : Theme.text
         }
         Controls.ActionButton {
             objectName: "missionHistoryFiltersToggle"
@@ -100,12 +99,13 @@ ColumnLayout {
     }
     Label {
         objectName: "missionHistoryStatus"
-        color: root.navMode ? Palette.muted : Theme.secondary
+        color: root.navMode ? Theme.muted : Theme.secondary
         Layout.fillWidth: true; wrapMode: Text.Wrap
         visible: !root.navMode || root.filtersExpanded || root.mission.historyLoading || !root.mission.missions.count
         text: root.mission.historyLoading ? "正在读取任务历史…"
             : root.mission.missions.count ? "已显示 " + root.mission.missions.count + " / " + root.mission.historyTotal + " 个任务"
-            : root.mission.historyError ? "读取失败，请刷新重试。" : "没有匹配的任务"
+            : root.mission.historyError ? "读取失败，请刷新重试。"
+            : root.mission.repositoryFilter || root.mission.statusFilter ? "没有匹配的任务" : "暂无任务历史"
     }
     ListView {
         id: taskList; objectName: "missionTaskList"
@@ -130,15 +130,6 @@ ColumnLayout {
                 Accessible.name: "选择任务：" + (taskEntry.record.request || taskEntry.record.taskId) + "，" + W.label(taskEntry.record.status)
                 flat: root.navMode
                 horizontalPadding: root.navMode ? Theme.spaceSm : Theme.spaceLg
-                background: Rectangle {
-                    radius: Theme.radiusMd
-                    color: root.navMode
-                        ? (selectTask.checked ? Palette.raised : selectTask.hovered ? Palette.hover : "transparent")
-                        : (selectTask.checked ? Theme.accentFill : selectTask.hovered ? Theme.hover : Theme.raised)
-                    border.width: selectTask.activeFocus ? 2 : 1
-                    border.color: selectTask.activeFocus ? Palette.focusRing
-                        : root.navMode || selectTask.checked ? "transparent" : Theme.border
-                }
                 onClicked: root.openTask(taskEntry.taskId)
                 contentItem: Column {
                     spacing: Theme.spaceXs
@@ -153,9 +144,9 @@ ColumnLayout {
                         id: taskMetadata
                         objectName: "missionTaskMetadataPreview"
                         width: parent.width
-                        text: W.icon(taskEntry.record.status) + " " + W.label(taskEntry.record.status) + " · " + (taskEntry.record.repositoryPath || "")
+                        text: W.label(taskEntry.record.status) + " · " + (taskEntry.record.repositoryPath || "")
                         wrapMode: Text.WrapAnywhere; maximumLineCount: root.navMode ? 1 : 2; elide: Text.ElideRight
-                        textFormat: Text.PlainText; color: root.navMode ? Palette.muted : W.color(taskEntry.record.status); font.pixelSize: Theme.fontSizeSm
+                        textFormat: Text.PlainText; color: W.color(taskEntry.record.status); font.pixelSize: Theme.fontSizeSm
                     }
                 }
             }

@@ -3,10 +3,10 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
-import "WorkflowTheme.js" as Theme
+import "../panels/Theme.js" as Theme
 import "WorkflowUi.js" as Flow
 
-Dialog {
+Controls.AppDialog {
     id: panel
     objectName: "skillDraftDialog"
     required property var mission
@@ -39,7 +39,6 @@ Dialog {
     closePolicy: dirty ? Popup.NoAutoClose : Popup.CloseOnEscape
     title: view === "source" ? "提炼为技能" : view === "editor" ? "编辑技能草稿"
            : view === "version" ? "已收录版本" : view === "revisions" ? "找回修订草稿" : "本机技能库"
-    background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
 
     function clearSession() {
         serial = 0; operation = ""; retryKey = ""; retryToken = ""
@@ -200,7 +199,7 @@ Dialog {
                     }
                     RowLayout {
                         enabled: (!panel.busy || panel.operation === "listDrafts") && !panel.unsupported
-                        Controls.ActionButton { objectName: "skillDraftCreateModel"; text: "请模型起草"; onClicked: panel.create("model") }
+                        Controls.ActionButton { objectName: "skillDraftCreateModel"; highlighted: true; text: "请模型起草"; onClicked: panel.create("model") }
                         Controls.ActionButton { objectName: "skillDraftCreateManual"; text: "创建手动草稿"; onClicked: panel.create("manual") }
                     }
                     Caption { visible: panel.busy && panel.operation === "create"; text: "正在创建草稿…" }
@@ -313,7 +312,7 @@ Dialog {
                         }
                         Controls.ActionButton {
                             visible: !!panel.identity.revision; enabled: !!panel.identity.enabled
-                            text: panel.identity.enabled ? "停用技能" : "已停用"
+                            danger: true; text: panel.identity.enabled ? "停用技能" : "已停用"
                             onClicked: panel.send("disable", panel.api.disable(panel.identity.skill_id, panel.identity.revision))
                         }
                     }
@@ -321,43 +320,47 @@ Dialog {
             }
         }
     }
-    footer: RowLayout {
-        Controls.ActionButton {
-            visible: panel.view === "editor" && !!panel.draft.result_version; text: "查看已收录版本"; enabled: !panel.busy
-            onClicked: panel.openVersion(panel.draft.result_skill_id, panel.draft.result_version)
+    footer: Pane {
+        padding: Theme.spaceMd
+        background: Rectangle { color: Theme.sidebar }
+        contentItem: RowLayout {
+            Controls.ActionButton {
+                visible: panel.view === "editor" && !!panel.draft.result_version; text: "查看已收录版本"; enabled: !panel.busy
+                onClicked: panel.openVersion(panel.draft.result_skill_id, panel.draft.result_version)
+            }
+            Controls.ActionButton {
+                objectName: "skillDraftSave"; text: "保存草稿"; visible: panel.view === "editor" && !panel.draft.result_version
+                enabled: panel.dirty && !panel.busy && !panel.conflict
+                onClicked: panel.send("save", panel.api.saveDraft(panel.draft.draft_id, panel.draft.revision, editor.edits))
+            }
+            Controls.ActionButton {
+                objectName: "skillDraftPublish"; highlighted: true; text: "加入本机技能库"; visible: panel.view === "editor" && !panel.draft.result_version
+                enabled: !panel.dirty && !panel.busy && !panel.conflict && editor.complete
+                onClicked: panel.send("publish", panel.api.publish(panel.draft.draft_id, panel.draft.revision,
+                            panel.requestId("publish/" + panel.draft.draft_id + "/" + panel.draft.revision)))
+            }
+            Controls.ActionButton {
+                visible: panel.view === "version" || panel.view === "revisions"; text: "返回技能库"; enabled: !panel.busy
+                onClicked: panel.gotoList("library")
+            }
+            Item { Layout.fillWidth: true }
+            Controls.ActionButton { text: "关闭"; onClicked: panel.dirty ? discardDialog.open() : panel.close() }
         }
-        Controls.ActionButton {
-            objectName: "skillDraftSave"; text: "保存草稿"; visible: panel.view === "editor" && !panel.draft.result_version
-            enabled: panel.dirty && !panel.busy && !panel.conflict
-            onClicked: panel.send("save", panel.api.saveDraft(panel.draft.draft_id, panel.draft.revision, editor.edits))
-        }
-        Controls.ActionButton {
-            objectName: "skillDraftPublish"; text: "加入本机技能库"; visible: panel.view === "editor" && !panel.draft.result_version
-            enabled: !panel.dirty && !panel.busy && !panel.conflict && editor.complete
-            onClicked: panel.send("publish", panel.api.publish(panel.draft.draft_id, panel.draft.revision,
-                        panel.requestId("publish/" + panel.draft.draft_id + "/" + panel.draft.revision)))
-        }
-        Controls.ActionButton {
-            visible: panel.view === "version" || panel.view === "revisions"; text: "返回技能库"; enabled: !panel.busy
-            onClicked: panel.gotoList("library")
-        }
-        Item { Layout.fillWidth: true }
-        Controls.ActionButton { text: "关闭"; onClicked: panel.dirty ? discardDialog.open() : panel.close() }
     }
-    Dialog {
+    Controls.AppDialog {
         id: discardDialog; modal: true; title: "放弃尚未保存的编辑？"; anchors.centerIn: Overlay.overlay
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "继续编辑"; onClicked: discardDialog.close() }
-            Controls.ActionButton { text: "放弃编辑"; onClicked: { discardDialog.close(); panel.close() } }
+            Controls.ActionButton { text: "放弃编辑"; danger: true; onClicked: { discardDialog.close(); panel.close() } }
         }
     }
-    Dialog {
+    Controls.AppDialog {
         id: evidenceDialog; objectName: "skillDraftEvidenceDialog"; modal: true; title: "本机来源记录"; anchors.centerIn: Overlay.overlay
         width: panel.width * 0.9; height: panel.height * 0.65
         contentItem: Controls.AppScrollView {
             clip: true
             Controls.AppTextArea { id: evidenceText; objectName: "skillDraftSourceRecord"; readOnly: true; wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText }
         }
-        standardButtons: Dialog.Close
+        footer: Controls.AppDialogButtonBox { Controls.ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole } }
     }
 }

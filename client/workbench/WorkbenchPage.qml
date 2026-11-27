@@ -45,9 +45,7 @@ Item {
         }
         function onEventReceived(id, event) {
             if (event.task_id !== root.mission.taskId) return;
-            var next = root.activityEvents.slice(-99);
-            next.push({event_type:event.event_type, node_id:event.node_id, timestamp:event.timestamp, state:event.state});
-            root.activityEvents = next;
+            root.activityEvents = W.appendActivity(root.activityEvents, event)
         }
     }
     property string currentTaskId: ""
@@ -96,7 +94,7 @@ Item {
                 anchors.margins: Theme.spaceLg
                 MissionHeader { mission: root.mission; Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg; Layout.topMargin: Theme.spaceLg }
                 RowLayout { Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg
-                    Label { text: "工作台"; color: Theme.text; font.pixelSize: Theme.fontSizeXl; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                    Label { text: "任务进度"; color: Theme.text; font.pixelSize: Theme.fontSizeXl; font.weight: Font.DemiBold; Layout.fillWidth: true }
                     Controls.ActionButton { objectName: "workbenchDetailsToggle"; text: root.detailsExpanded ? "收起详情" : "展开详情"; onClicked: root.detailsExpanded = !root.detailsExpanded }
                 }
                 Rectangle { visible: root.mission.connectionState === "reconnecting" || root.mission.connectionState === "recovering" || root.mission.connectionState === "error"; Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg; implicitHeight: Math.max(40, connectionNotice.implicitHeight + Theme.spaceSm * 2); radius: Theme.radiusMd; color: Theme.dangerFill; border.color: Theme.warning
@@ -107,7 +105,7 @@ Item {
                 Controls.Panel {
                     title: "恢复任务"; visible: !!root.mission.taskId && (root.mission.graph.hasResumeAction || root.mission.snapshot.recovery_required || !!root.mission.recovery.token)
                     Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg
-                    Label { text: "先生成恢复预览，核对检查和动作后再确认。"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Theme.warning }
+                    Label { text: "先生成恢复预览，核对检查和动作后再确认。"; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: Theme.warning }
                     Controls.ActionButton { objectName: "missionRecoveryButton"; text: "检查恢复方案"; enabled: root.mission.synchronized && !root.mission.busy; onClicked: root.mission.prepareRecovery() }
                     Label { visible: !!root.mission.recovery.revision; text: "修订 " + (root.mission.recovery.revision || "") + " · 检查：" + W.lines(root.mission.recovery.checks) + "\n阻塞原因：" + (root.mission.recovery.blocked_reason || "无")
                         + "\n动作：" + (root.mission.recovery.actions || []).map(function(a) { return a.action || a.kind || a.type || "检查" }).join("、"); Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
@@ -121,7 +119,7 @@ Item {
             Layout.preferredWidth: root.compactDetails ? -1 : Math.min(420, Math.max(340, root.width * 0.34))
             Layout.fillWidth: root.compactDetails; Layout.fillHeight: true
             Layout.minimumWidth: 0; Layout.minimumHeight: 0
-            color: Theme.sidebar; border.color: Theme.border; border.width: 1
+            color: Theme.sidebar; border.width: 0
             ColumnLayout {
                 anchors.fill: parent; anchors.margins: Theme.spaceMd; spacing: Theme.spaceSm
                 RowLayout { Layout.fillWidth: true
@@ -149,12 +147,12 @@ Item {
                         spacing: Theme.spaceXs
                         width: count * tabWidth + Math.max(0, count - 1) * spacing
                         onCurrentIndexChanged: Qt.callLater(function() { tabStripScroll.showCurrentTab() })
-                        background: Rectangle { color: Theme.sidebar; radius: Theme.radiusMd; border.color: Theme.border }
+                        background: Item {}
                         Controls.NavigationTab { text: "任务"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "证据"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "计划"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "审批"; width: detailTabs.tabWidth }
-                        Controls.NavigationTab { text: "Diff"; width: detailTabs.tabWidth }
+                        Controls.NavigationTab { text: "差异"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "验证"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "审查"; width: detailTabs.tabWidth }
                         Controls.NavigationTab { text: "交付"; width: detailTabs.tabWidth }

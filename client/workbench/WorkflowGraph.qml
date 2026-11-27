@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../panels" as Controls
-import "WorkflowTheme.js" as Theme
+import "../panels/Theme.js" as Theme
 import "WorkbenchUi.js" as W
 import "WorkflowUi.js" as Flow
 
@@ -87,6 +87,7 @@ Item {
     }
     function stageColor(status) {
         if (status === "needs_repair" || status === "awaiting_human" || status === "interrupted") return Theme.warning
+        if (status === "succeeded") return Theme.secondary
         if (status === "pending" || status === "ready" || status === "skipped" || status === "cancelled") return Theme.muted
         return W.color(status)
     }
@@ -175,9 +176,17 @@ Item {
                     x: root.stageX(index); y: root.stageY(index)
                     width: root.tileWidth; height: root.stageHeight(index)
                     radius: Theme.radiusMd
-                    color: selected ? Theme.accentSubtle : Theme.panel
+                    color: modelData.status === "running" ? Theme.accentSubtle : selected ? Theme.raised : Theme.panel
                     border.width: 1
-                    border.color: selected ? Theme.accentBorder : Theme.border
+                    border.color: modelData.status === "awaiting_human" ? Theme.warning
+                        : modelData.status === "running" ? Theme.accentBorder : selected ? Theme.controlEdge : Theme.border
+                    Rectangle {
+                        anchors.left: parent.left; anchors.top: parent.top
+                        anchors.leftMargin: Theme.spaceSm; anchors.topMargin: Theme.spaceSm
+                        width: 3; height: root.headerHeight - 2 * Theme.spaceSm
+                        radius: 1.5; visible: tile.selected
+                        color: Theme.accent
+                    }
                     Controls.ActionButton {
                         id: stageButton
                         objectName: "workflowStage"
@@ -189,18 +198,13 @@ Item {
                         flat: true
                         horizontalPadding: 10
                         enabled: tile.modelData.nodes.length > 0
+                        Accessible.selected: tile.selected
                         Accessible.name: tile.modelData.title + "，" + (tile.modelData.summary || W.label(tile.modelData.status)) + "，查看步骤详情"
                         onActiveFocusChanged: if (activeFocus) root.revealStage(tile.modelData.id)
                         onClicked: root.nodeSelected(tile.modelData.currentNodeId || tile.modelData.nodes[0].nodeId)
                         ToolTip.visible: hovered && !!tile.modelData.summary
                         ToolTip.delay: 650
                         ToolTip.text: tile.modelData.summary
-                        background: Rectangle {
-                            radius: Theme.radiusSm
-                            color: stageButton.hovered ? Theme.hover : "transparent"
-                            border.width: stageButton.activeFocus ? 2 : 0
-                            border.color: Theme.focusRing
-                        }
                         contentItem: RowLayout {
                             spacing: 6
                             Label {
@@ -208,13 +212,22 @@ Item {
                                 text: tile.modelData.title
                                 font.pixelSize: Theme.fontSizeLg
                                 font.weight: Font.DemiBold
-                                color: Theme.text
+                                color: stageButton.enabled ? Theme.text : Theme.disabledText
                                 elide: Text.ElideRight
                             }
                             Rectangle {
-                                width: 6; height: 6; radius: 3
-                                color: tile.modelData.status === "pending" || tile.modelData.status === "ready" ? "transparent" : tile.statusColor
-                                border.color: tile.statusColor
+                                readonly property bool complete: tile.modelData.status === "succeeded"
+                                implicitWidth: complete ? 13 : 7
+                                implicitHeight: implicitWidth
+                                radius: width / 2
+                                color: complete ? Theme.muted : tile.modelData.status === "pending" || tile.modelData.status === "ready" ? Theme.transparent : tile.statusColor
+                                border.color: complete ? Theme.muted : tile.statusColor
+                                Image {
+                                    anchors.centerIn: parent
+                                    width: 12; height: width
+                                    visible: parent.complete
+                                    source: Theme.icon("check")
+                                }
                             }
                             Label {
                                 text: tile.statusLabel
@@ -231,18 +244,14 @@ Item {
                         height: root.toggleHeight; flat: true; horizontalPadding: 10
                         enabled: tile.modelData.nodes.length > 0
                         text: tile.modelData.nodes.length + " 个步骤"
+                        Accessible.checkable: true
+                        Accessible.checked: tile.expanded
                         Accessible.name: (tile.expanded ? "收起" : "展开") + text + "，" + tile.modelData.title
                         onActiveFocusChanged: if (activeFocus) root.revealStage(tile.modelData.id)
                         onClicked: root.toggleStage(tile.modelData.id)
-                        background: Rectangle {
-                            radius: Theme.radiusSm
-                            color: expandButton.hovered ? Theme.hover : "transparent"
-                            border.width: expandButton.activeFocus ? 2 : 0
-                            border.color: Theme.focusRing
-                        }
                         contentItem: RowLayout {
                             Label { text: expandButton.text; Layout.fillWidth: true; color: Theme.muted; font.pixelSize: Theme.fontSizeSm }
-                            Label { text: "›"; rotation: tile.expanded ? 90 : 0; color: Theme.muted; font.pixelSize: Theme.fontSizeLg }
+                            Image { source: Theme.icon("chevron-right"); sourceSize.width: 16; sourceSize.height: 16; rotation: tile.expanded ? 90 : 0; opacity: expandButton.enabled ? 0.9 : 0.4 }
                         }
                     }
                     ListView {
@@ -265,12 +274,6 @@ Item {
                             Accessible.name: Flow.nodeTitle(modelData) + "，" + visual.label + "，查看详情"
                             onActiveFocusChanged: if (activeFocus) root.revealNode(nodeId)
                             onClicked: root.nodeSelected(nodeId)
-                            background: Rectangle {
-                                radius: Theme.radiusSm
-                                color: nodeButton.checked ? Theme.accentSubtle : nodeButton.hovered ? Theme.hover : "transparent"
-                                border.width: nodeButton.activeFocus ? 2 : 0
-                                border.color: Theme.focusRing
-                            }
                             contentItem: Column {
                                 spacing: 2
                                 Label { text: Flow.nodeTitle(nodeButton.modelData); width: parent.width; elide: Text.ElideRight; color: Theme.text; font.pixelSize: Theme.fontSizeSm }

@@ -14,7 +14,7 @@ Controls.Panel {
     readonly property string fileDetails: "路径：" + (file.path || "—")
         + "\n变更前：" + (file.beforeHash || "无")
         + "\n变更后：" + (file.afterHash || "无")
-    title: "Diff · 文件差异"
+    title: "文件差异"
     subtitle: mission.diff.count + " 个文件"
     objectName: "missionDiffPanel"
     onMissionChanged: { selectedFile = -1; offset = 0 }
@@ -31,10 +31,10 @@ Controls.Panel {
             text: record.changeType + " · " + record.path; flat: true
             checked: root.selectedFile === index; Accessible.name: "查看差异 " + record.path
             contentItem: Label {
-                text: fileButton.text; textFormat: Text.PlainText
+                text: fileButton.text; font.family: Theme.fontMono; font.pixelSize: Theme.fontSizeSm; textFormat: Text.PlainText
                 wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
-                color: fileButton.checked ? Theme.onAccent : Theme.text
+                color: fileButton.checked ? Theme.accent : Theme.text
             }
             onClicked: { root.selectedFile = index; root.offset = 0 }
         }

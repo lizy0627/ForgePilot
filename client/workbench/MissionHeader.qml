@@ -56,13 +56,11 @@ Controls.Panel {
         Layout.fillWidth: true; title: "连接状态"; text: root.connectionSummary; monospace: false
     }
     StateNotice { mission: root.mission; hasData: !!root.mission.snapshot.request; emptyText: "选择左侧任务或创建新任务。"; Layout.fillWidth: true }
-    Dialog {
+    Controls.AppDialog {
         id: cancelDialog; title: "取消当前任务"; modal: true; anchors.centerIn: Overlay.overlay; width: 420; implicitWidth: 420
         padding: Theme.spaceLg
-        background: Rectangle { color: Theme.panel; radius: Theme.radiusLg; border.color: Theme.border }
-        standardButtons: Dialog.Cancel
         contentItem: Label { text: "将取消任务 " + root.mission.taskId + "。执行中的操作可能已经修改隔离工作区。"; wrapMode: Text.Wrap }
-        footer: DialogButtonBox {
+        footer: Controls.AppDialogButtonBox {
             Controls.ActionButton { text: "返回"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             Controls.ActionButton { text: "确认取消"; danger: true; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: root.mission.cancel() }
         }

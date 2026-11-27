@@ -4,7 +4,6 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import "../panels" as Controls
 import "../panels/Theme.js" as Theme
-import "WorkflowTheme.js" as Palette
 
 Rectangle {
     id: root
@@ -66,7 +65,7 @@ Rectangle {
         target: root.mcp
         function onMissionChoicesChanged() { if (root.mcp.missionLoading || !root.mcp.missionChoices.length) root.selectedMcpIds = [] }
     }
-    color: composerMode ? Palette.background : Theme.sidebar
+    color: composerMode ? Theme.background : Theme.sidebar
     border.color: Theme.border
     border.width: composerMode ? 0 : 1
     implicitWidth: 244
@@ -116,22 +115,24 @@ Rectangle {
         ColumnLayout {
             id: sidebarLayout
             readonly property int margin: root.composerMode && sidebarScroll.availableWidth > 480 ? 32 : Theme.spaceMd
-            width: Math.min(root.composerMode ? 660 : sidebarScroll.availableWidth, Math.max(0, sidebarScroll.availableWidth - 2 * margin))
+            width: Math.min(root.composerMode ? 710 : sidebarScroll.availableWidth, Math.max(0, sidebarScroll.availableWidth - 2 * margin))
             x: (sidebarScroll.availableWidth - width) / 2
-            y: root.composerMode && !root.advancedExpanded && !root.mission.creationReady
-               && !root.selectedContext && !root.mission.creationError
-                ? Math.max(margin, (root.height - 340) * 0.42) : margin
-            spacing: root.composerMode ? Theme.spaceMd : Theme.spaceSm
+            y: root.composerMode ? Math.min(56, Math.max(margin, root.height * 0.06)) : margin
+            spacing: root.composerMode ? Theme.spaceLg : Theme.spaceSm
 
             Label {
-                text: root.composerMode ? "你想让 Agent 完成什么？" : "任务中心"
+                text: root.composerMode ? "新建任务" : "任务中心"
                 Layout.fillWidth: true
-                Layout.bottomMargin: root.composerMode ? Theme.spaceSm : 0
-                horizontalAlignment: root.composerMode ? Text.AlignHCenter : Text.AlignLeft
-                wrapMode: Text.Wrap
-                font.pixelSize: root.composerMode ? (sidebarLayout.width < 400 ? 23 : 30) : Theme.fontSizeLg
+                color: Theme.text
+                font.pixelSize: root.composerMode ? 28 : Theme.fontSizeLg
                 font.weight: Font.DemiBold
-                color: root.composerMode ? Palette.text : Theme.text
+            }
+            Label {
+                visible: root.composerMode
+                Layout.fillWidth: true
+                text: "描述目标并选择工作仓库，预览基线后即可创建任务。"
+                color: Theme.secondary
+                wrapMode: Text.WrapAnywhere
             }
             Label {
                 id: contextPreview
@@ -152,17 +153,22 @@ Rectangle {
                 id: draftCard
                 Layout.fillWidth: true
                 implicitHeight: draftFields.implicitHeight + 2 * inset
-                readonly property int inset: root.composerMode ? Theme.spaceMd : 0
+                readonly property int inset: root.composerMode ? Theme.spaceLg : 0
                 radius: Theme.radiusLg
-                color: root.composerMode ? Palette.panel : "transparent"
-                border.width: root.composerMode ? 1 : 0
-                border.color: requestInput.activeFocus || repositoryInput.activeFocus ? Palette.accentBorder : Palette.border
+                color: root.composerMode ? Theme.panel : "transparent"
+                border.width: 0
 
                 ColumnLayout {
                     id: draftFields
                     anchors.fill: parent; anchors.margins: draftCard.inset
                     spacing: Theme.spaceSm
 
+                    Label {
+                        visible: root.composerMode
+                        text: "任务目标"
+                        color: Theme.text
+                        font.weight: Font.DemiBold
+                    }
                     Controls.AppScrollView {
                         objectName: "missionRequestScroll"
                         Layout.fillWidth: true
@@ -171,17 +177,18 @@ Rectangle {
                         Controls.AppTextArea {
                             id: requestInput; objectName: "missionRequestInput"
                             wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
-                            placeholderText: root.composerMode ? "描述任务目标…" : "描述 Agent 任务"
+                            placeholderText: "描述预期结果、约束或验收条件…"
                             Accessible.name: "任务目标"
                             onTextChanged: root.updateRecommendations()
                             font.pixelSize: root.composerMode ? 16 : Theme.fontSizeMd
-                            background: Rectangle {
-                                implicitHeight: 94; radius: Theme.radiusMd
-                                color: root.composerMode ? "transparent" : Theme.input
-                                border.width: root.composerMode ? 0 : 1
-                                border.color: requestInput.activeFocus ? Theme.focusRing : Theme.border
-                            }
                         }
+                    }
+                    Label {
+                        visible: root.composerMode
+                        Layout.topMargin: Theme.spaceXs
+                        text: "工作仓库"
+                        color: Theme.text
+                        font.weight: Font.DemiBold
                     }
                     GridLayout {
                         Layout.fillWidth: true
@@ -192,12 +199,6 @@ Rectangle {
                             Layout.fillWidth: true; Layout.minimumWidth: 0
                             placeholderText: "本地仓库绝对路径"
                             Accessible.name: "仓库路径"
-                            background: Rectangle {
-                                implicitHeight: Theme.controlHeight
-                                radius: Theme.radiusMd
-                                color: root.composerMode ? Palette.input : Theme.input
-                                border.color: repositoryInput.activeFocus ? Theme.focusRing : (root.composerMode ? Palette.border : Theme.border)
-                            }
                             onTextChanged: {
                                 root.resetBaseline()
                                 if (!activeFocus) root.commitRepository(text.trim())
@@ -206,7 +207,7 @@ Rectangle {
                         }
                         Controls.ActionButton {
                             objectName: "missionBrowseRepository"
-                            text: "选择仓库…"; Layout.fillWidth: !root.composerMode
+                            text: "选择仓库"; icon.source: Theme.icon("folder"); Layout.fillWidth: !root.composerMode
                             flat: root.composerMode; horizontalPadding: Theme.spaceSm
                             onClicked: folder.open()
                         }
@@ -246,23 +247,18 @@ Rectangle {
                         anchors.fill: parent; anchors.margins: Theme.spaceSm; spacing: Theme.spaceXs
                         RowLayout {
                             Layout.fillWidth: true
-                            CheckBox {
+                            Controls.AppCheckBox {
                                 id: skillChoice; objectName: "missionSkillChoice"
                                 readonly property string skillId: skillCard.modelData.skill_id
                                 Layout.fillWidth: true; Layout.minimumWidth: 0
                                 text: skillCard.modelData.name + " · v" + skillCard.modelData.version
                                 checked: root.mission.selectedSkillIds.indexOf(skillId) >= 0
                                 enabled: !root.mission.busy && (checked || root.mission.selectedSkillIds.length < root.mission.maxSelectedSkills)
-                                contentItem: Label {
-                                    text: skillChoice.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
-                                    color: skillChoice.enabled ? Theme.text : Theme.disabledText
-                                    leftPadding: skillChoice.indicator.width + skillChoice.spacing
-                                }
                                 onToggled: root.mission.setSkillSelected(skillId, checked)
                             }
                             Controls.ActionButton {
                                 objectName: "missionSkillSummaryToggle"
-                                text: skillCard.expanded ? "收起摘要" : "查看摘要"; flat: true
+                                text: skillCard.expanded ? "收起摘要" : "查看摘要"; flat: true; checked: skillCard.expanded
                                 Accessible.name: text + " · " + skillCard.modelData.name
                                 onClicked: skillCard.expanded = !skillCard.expanded
                             }
@@ -296,6 +292,7 @@ Rectangle {
                     visible: root.composerMode
                     text: root.advancedExpanded ? "收起高级选项" : "高级选项"
                     Accessible.checkable: true
+                    checked: root.advancedExpanded
                     Accessible.checked: root.advancedExpanded
                     flat: true; horizontalPadding: Theme.spaceSm
                     onClicked: root.advancedExpanded = !root.advancedExpanded
@@ -307,12 +304,12 @@ Rectangle {
                     spacing: Theme.spaceSm
                     Label {
                         visible: root.composerMode
-                        text: "任务类型"; color: Palette.secondary; font.pixelSize: Theme.fontSizeSm
+                        text: "任务类型"; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm
                     }
                     Controls.AppComboBox {
                         id: kind; objectName: "missionTaskType"; Layout.fillWidth: true; model: ["自动判断", "修复缺陷", "实现功能"]; Accessible.name: "任务类型"
                     }
-                    CheckBox {
+                    Controls.AppCheckBox {
                         id: useRag; objectName: "missionUseRag"; text: "本次任务使用代码索引（RAG）"
                         Layout.fillWidth: true
                         checked: root.ragOverride === null ? !!root.rag && root.rag.useForTasks : root.ragOverride
@@ -320,8 +317,8 @@ Rectangle {
                     }
                     Label {
                         text: "索引不可用时，任务会自动使用文件检索。"
-                        color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
-                        font.pixelSize: 12
+                        color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
+                        font.pixelSize: Theme.fontSizeSm
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -333,25 +330,21 @@ Rectangle {
                         }
                     }
                     Label {
-                        objectName: "missionMcpAvailability"; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                        objectName: "missionMcpAvailability"; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
                         text: !root.mcp ? "MCP 控制器不可用，仍可使用文件检索。"
                             : root.mcp.missionLoading ? "正在读取已保存的工具配置…"
                             : root.mcp.missionError || (!root.mcp.missionChoices.length ? "没有已配置的兼容任务只读工具。" : "仅本次勾选的服务可被 Analyst 使用，最多 4 个。")
                         color: root.mcp && root.mcp.missionError ? Theme.warning : Theme.secondary
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.fontSizeSm
                     }
                     Repeater {
                         model: root.mcp ? root.mcp.missionChoices : []
-                        delegate: CheckBox {
+                        delegate: Controls.AppCheckBox {
                             id: mcpChoice; objectName: "missionMcpChoice"; required property var modelData
                             property string serverId: modelData.server_id
                             Layout.fillWidth: true; text: modelData.name + " · " + modelData.tools.join("、")
                             checked: root.selectedMcpIds.indexOf(serverId) >= 0
                             enabled: !root.mcp.missionLoading && (checked || root.selectedMcpIds.length < 4)
-                            contentItem: Label {
-                                text: mcpChoice.text; textFormat: Text.PlainText; color: Theme.text
-                                wrapMode: Text.WrapAnywhere; leftPadding: mcpChoice.indicator.width + mcpChoice.spacing
-                            }
                             onToggled: {
                                 var ids = root.selectedMcpIds.slice()
                                 if (checked) ids.push(serverId)
@@ -360,7 +353,7 @@ Rectangle {
                             }
                         }
                     }
-                    CheckBox {
+                    Controls.AppCheckBox {
                         id: presetSelection; objectName: "missionUsePresets"; text: "选择 CMake presets"
                         onToggled: root.mission.invalidateCreationPreview()
                     }
@@ -407,13 +400,9 @@ Rectangle {
                     }
                     Repeater {
                         model: root.mission.creationPreview.changed_files || []
-                        delegate: CheckBox {
+                        delegate: Controls.AppCheckBox {
                             id: baselineFile; objectName: "missionBaselineFile"; required property string modelData
                             Layout.fillWidth: true; text: modelData; checked: root.baselinePaths.indexOf(modelData) >= 0
-                            contentItem: Label {
-                                text: baselineFile.text; textFormat: Text.PlainText; color: Theme.text
-                                wrapMode: Text.WrapAnywhere; leftPadding: baselineFile.indicator.width + baselineFile.spacing
-                            }
                             onToggled: {
                                 var paths = root.baselinePaths.slice()
                                 if (checked) paths.push(modelData)
@@ -436,14 +425,10 @@ Rectangle {
                         Layout.fillWidth: true; title: "冻结的构建配置"; text: JSON.stringify(root.mission.creationPreview.build || {}, null, 2)
                         maximumHeight: 180
                     }
-                    CheckBox {
+                    Controls.AppCheckBox {
                         id: baselineConfirmation; objectName: "missionBaselineConfirmation"; text: "确认将上述补丁纳入任务基线"
                         Layout.fillWidth: true; Layout.minimumWidth: 0
                         visible: root.baselinePaths.length > 0; enabled: root.mission.creationReady
-                        contentItem: Label {
-                            text: baselineConfirmation.text; textFormat: Text.PlainText; color: Theme.text
-                            wrapMode: Text.WrapAnywhere; leftPadding: baselineConfirmation.indicator.width + baselineConfirmation.spacing
-                        }
                     }
                 }
                 GridLayout {

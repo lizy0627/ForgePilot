@@ -12,7 +12,7 @@ Controls.Panel {
     readonly property var command: selectedCommand >= 0 ? mission.validation.get(selectedCommand) : ({})
     readonly property string output: command.output || ""
     readonly property var report: mission.validation.latest.content || ({})
-    title: "Validation · 构建与测试"
+    title: "构建与测试"
     subtitle: mission.validation.status || "未运行"
     objectName: "validationPanel"
     StateNotice { mission: root.mission; hasData: !!root.mission.validation.latest.artifact_id; emptyText: "验证尚未运行。"; Layout.fillWidth: true }
@@ -36,14 +36,14 @@ Controls.Panel {
                 id: commandButton
                 Layout.fillWidth: true
                 implicitHeight: Math.max(Theme.controlHeight, commandPreview.implicitHeight + Theme.spaceSm * 2)
-                text: (commandEntry.record.exitCode === 0 ? "✓ " : "! ") + commandEntry.record.command
+                text: (commandEntry.record.exitCode === 0 ? "通过 · " : "失败 · ") + commandEntry.record.command
                 flat: true; checked: root.selectedCommand === commandEntry.index
                 Accessible.name: "查看命令结果 " + commandEntry.record.command
                 onClicked: { root.selectedCommand = commandEntry.index; root.offset = 0 }
                 contentItem: Label {
                     id: commandPreview
-                    text: commandButton.text; color: commandButton.checked ? Theme.onAccent : Theme.text
-                    font: commandButton.font; verticalAlignment: Text.AlignVCenter
+                    text: commandButton.text; color: commandButton.checked ? Theme.accent : Theme.text
+                    font.family: Theme.fontMono; font.pixelSize: Theme.fontSizeSm; verticalAlignment: Text.AlignVCenter
                     textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
                     maximumLineCount: 2; elide: Text.ElideRight
                 }
