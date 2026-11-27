@@ -25,11 +25,8 @@ Dialog {
         radius: Theme.radiusLg
         border.color: Theme.controlEdge
     }
-    footer: DialogButtonBox {
+    footer: AppDialogButtonBox {
         visible: count > 0
-        delegate: ActionButton {}
-        padding: Theme.spaceMd
-        background: Item {}
     }
     Overlay.modal: Rectangle { color: "#a0090b0d" }
 }
