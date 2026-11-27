@@ -121,27 +121,17 @@ class AnalysisReviewStore:
 
     @_storage_boundary
     def replace(self, review, spec, plan, gate_definition, policy_hash):
-        """New immutable package and attempt; changes invalidate previous approvals."""
-        stamp = _now()
-        with self.events._transaction():
+        """Publish both artifacts and a new gate attempt if the reviewed package is current."""
+        with self.events.artifacts.write_transaction() as register:
             db = self.events._db
-            current = self.get(review.task_id)
-            if current != review:
-                # Publishing these two immutable artifacts advances an admitted
-                # Mission's revision. Accept only those exact outbox receipts.
-                receipts = db.execute("""SELECT revision,event_type,json_extract(payload_json,'$.artifact_id')
-                    FROM graph_events WHERE task_id=? AND revision>? ORDER BY revision LIMIT 3""",
-                    (review.task_id, review.revision)).fetchall()
-                if (current.revision != review.revision + 2
-                        or current.task_spec_artifact_id != review.task_spec_artifact_id
-                        or current.plan_artifact_id != review.plan_artifact_id
-                        or [tuple(row) for row in receipts] != [
-                            (review.revision + 1, "artifact.created", spec.artifact_id),
-                            (review.revision + 2, "artifact.created", plan.artifact_id)]):
-                    raise ForgePilotError("approval_stale", "Review changed during revision")
+            if self.get(review.task_id) != review:
+                raise ForgePilotError("approval_stale", "Review changed during revision")
             run = self.events.missions.get_graph_run(review.task_id)
             if run["status"] not in {"awaiting_human", "succeeded"} or run["recovery_required"]:
                 raise ForgePilotError("invalid_state", "Cannot revise an active or cancelled analysis")
+            register(spec)
+            register(plan)
+            stamp = _now()
             row = db.execute("SELECT * FROM graph_node_states WHERE task_id=? AND node_id=?",
                              (review.task_id, self.gate_id)).fetchone()
             attempt = row["attempt"] + 1
@@ -163,10 +153,11 @@ class AnalysisReviewStore:
             db.execute("""UPDATE task_graph_runs SET task_spec_artifact_id=?,plan_artifact_id=?,scope_hash=?,
                 status='awaiting_human',current_revision=current_revision+1,updated_at=?,finished_at=NULL WHERE task_id=?""",
                 (spec.artifact_id, plan.artifact_id, content_sha256(scope_content(spec.content)), stamp, review.task_id))
-            self._event(db, review.task_id, current.revision + 1, attempt, "execution_review_revised",
+            revised = self.get(review.task_id)
+            self._event(db, review.task_id, revised.revision, attempt, "execution_review_revised",
                         "awaiting_human", {"task_spec_artifact_id": spec.artifact_id,
                         "plan_artifact_id": plan.artifact_id}, stamp)
-        return self.get(review.task_id)
+            return revised
 
     def _event(self, db, task_id, revision, attempt, kind, state, payload, stamp):
         sequence = db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM graph_events WHERE task_id=?", (task_id,)).fetchone()[0]

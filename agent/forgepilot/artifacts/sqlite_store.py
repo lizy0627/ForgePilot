@@ -1,7 +1,9 @@
 """Durable SQLite metadata plus integrity-checked external Artifact payloads."""
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from hashlib import sha256
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -243,6 +245,49 @@ class SqliteArtifactStore:
         self._put(artifact)
 
     def _put(self, artifact: ArtifactEnvelopeBase, *, relation: str = "derived_from") -> None:
+        try:
+            with self.write_transaction() as register:
+                register(artifact, relation=relation)
+        except sqlite3.Error:
+            raise ArtifactStorageError("Artifact metadata could not be saved") from None
+
+    @contextmanager
+    def write_transaction(self):
+        """Register artifacts alongside other writes in one event-store transaction.
+
+        The registrar is scoped to this transaction. Each registration validates
+        its parents against the current transaction, including earlier members.
+        """
+        created_files: list[tuple[str, str, Path]] = []
+        try:
+            with self.events.transaction() as db, closing(db.cursor()) as cursor:
+                yield partial(self._register, cursor, created_files)
+        except BaseException:
+            if created_files:
+                self._discard_uncommitted_files(created_files)
+            raise
+
+    def _discard_uncommitted_files(self, created_files: list[tuple[str, str, Path]]) -> None:
+        # COMMIT can become durable before its caller observes an error. Keep
+        # files with an unknown outcome for an explicit exact-payload retry.
+        try:
+            with self.events.locked_connection() as db:
+                if db is None or db.in_transaction:
+                    return
+                for artifact_id, relative_path, target in created_files:
+                    referenced = db.execute("""SELECT 1 FROM artifacts
+                        WHERE artifact_id=? OR (storage_kind='external' AND relative_path=?)
+                        LIMIT 1""", (artifact_id, relative_path)).fetchone()
+                    if referenced is None:
+                        try:
+                            target.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+        except sqlite3.Error:
+            pass
+
+    def _register(self, cursor: sqlite3.Cursor, created_files: list[tuple[str, str, Path]],
+                  artifact: ArtifactEnvelopeBase, *, relation: str = "derived_from") -> None:
         artifact = validate_artifact(artifact)
         # Artifacts are immutable and content-addressed. Silently replacing a
         # secret here would invalidate their hash and any parent references, so
@@ -258,74 +303,50 @@ class SqliteArtifactStore:
         target = (self._checked_path(relative_path, task_id=artifact.task_id,
                                      artifact_id=artifact.artifact_id, require_file=False)
                   if relative_path else None)
-        created_external = False
-        try:
-            with self.events._transaction():
-                if self.events._db.execute(
-                        "SELECT 1 FROM artifacts WHERE artifact_id=?", (artifact.artifact_id,)).fetchone():
-                    raise DuplicateArtifactError(f"Artifact already exists: {artifact.artifact_id}")
-                parents = []
-                for parent_id in artifact.parent_artifact_ids:
-                    row = self.events._db.execute(
-                        "SELECT * FROM artifacts WHERE artifact_id=?", (parent_id,)).fetchone()
-                    if row is None:
-                        raise ArtifactNotFoundError(parent_id)
-                    parents.append(self._artifact_from_row(row))
-                validate_relationships(artifact, parents)
-                if target is not None:
-                    if target.exists():
-                        # A hard process exit may leave the atomic file rename durable
-                        # while SQLite rolls its transaction back. Only the exact
-                        # immutable payload may adopt that orphan on an explicit retry.
-                        checked = self._checked_path(
-                            relative_path, task_id=artifact.task_id,
-                            artifact_id=artifact.artifact_id, require_file=True,
-                        )
-                        self._read_external(checked, len(payload), payload_hash)
-                    else:
-                        self._atomic_write(target, payload)
-                        created_external = True
-                self.events._db.execute("""INSERT INTO artifacts(
-                    artifact_id,task_id,artifact_type,schema_version,producer,producer_node,created_at,
-                    content_sha256,payload_sha256,storage_kind,inline_json,relative_path,size_bytes)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    artifact.artifact_id, artifact.task_id, artifact.artifact_type,
-                    artifact.schema_version, artifact.producer, artifact.producer_node,
-                    artifact.created_at, artifact.content_sha256, payload_hash,
-                    "external" if external else "inline", None if external else payload,
-                    relative_path, len(payload),
-                ))
-                stamp = artifact.created_at
-                self.events._db.executemany("""INSERT INTO artifact_relations(
-                    parent_artifact_id,child_artifact_id,relation,created_at) VALUES(?,?,?,?)""",
-                    ((parent.artifact_id, artifact.artifact_id, relation, stamp) for parent in parents),
+        if cursor.execute(
+                "SELECT 1 FROM artifacts WHERE artifact_id=?", (artifact.artifact_id,)).fetchone():
+            raise DuplicateArtifactError(f"Artifact already exists: {artifact.artifact_id}")
+        parents = []
+        for parent_id in artifact.parent_artifact_ids:
+            row = cursor.execute(
+                "SELECT * FROM artifacts WHERE artifact_id=?", (parent_id,)).fetchone()
+            if row is None:
+                raise ArtifactNotFoundError(parent_id)
+            parents.append(self._artifact_from_row(row))
+        validate_relationships(artifact, parents)
+        if target is not None:
+            if target.exists():
+                # A hard process exit may leave the atomic file rename durable
+                # while SQLite rolls its transaction back. Only the exact
+                # immutable payload may adopt that orphan on an explicit retry.
+                checked = self._checked_path(
+                    relative_path, task_id=artifact.task_id,
+                    artifact_id=artifact.artifact_id, require_file=True,
                 )
-                from ..mission_events import append_record_event
-                append_record_event(self.events, artifact.task_id, "artifact.created", {
-                    "artifact_id": artifact.artifact_id, "artifact_type": artifact.artifact_type,
-                    "content_sha256": artifact.content_sha256, "size_bytes": len(payload),
-                }, node_id=artifact.producer_node, actor=artifact.producer)
-        except BaseException as exc:
-            if created_external and target is not None:
-                try:
-                    # COMMIT can become durable before its caller observes an
-                    # error. Remove a new file only after proving that no
-                    # committed metadata references it. An open/unreadable
-                    # transaction has an uncertain outcome: retain the orphan
-                    # so a later explicit exact-payload retry can reconcile it.
-                    with self.events._lock:
-                        db = self.events._db
-                        if db is not None and not db.in_transaction:
-                            referenced = db.execute("""SELECT 1 FROM artifacts
-                                WHERE artifact_id=? OR (storage_kind='external' AND relative_path=?)
-                                LIMIT 1""", (artifact.artifact_id, relative_path)).fetchone()
-                            if referenced is None:
-                                target.unlink(missing_ok=True)
-                except (sqlite3.Error, OSError):
-                    pass
-            if isinstance(exc, sqlite3.Error):
-                raise ArtifactStorageError("Artifact metadata could not be saved") from None
-            raise
+                self._read_external(checked, len(payload), payload_hash)
+            else:
+                self._atomic_write(target, payload)
+                created_files.append((artifact.artifact_id, relative_path, target))
+        cursor.execute("""INSERT INTO artifacts(
+            artifact_id,task_id,artifact_type,schema_version,producer,producer_node,created_at,
+            content_sha256,payload_sha256,storage_kind,inline_json,relative_path,size_bytes)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            artifact.artifact_id, artifact.task_id, artifact.artifact_type,
+            artifact.schema_version, artifact.producer, artifact.producer_node,
+            artifact.created_at, artifact.content_sha256, payload_hash,
+            "external" if external else "inline", None if external else payload,
+            relative_path, len(payload),
+        ))
+        stamp = artifact.created_at
+        cursor.executemany("""INSERT INTO artifact_relations(
+            parent_artifact_id,child_artifact_id,relation,created_at) VALUES(?,?,?,?)""",
+            ((parent.artifact_id, artifact.artifact_id, relation, stamp) for parent in parents),
+        )
+        from ..mission_events import append_record_event
+        append_record_event(self.events, artifact.task_id, "artifact.created", {
+            "artifact_id": artifact.artifact_id, "artifact_type": artifact.artifact_type,
+            "content_sha256": artifact.content_sha256, "size_bytes": len(payload),
+        }, node_id=artifact.producer_node, actor=artifact.producer)
 
     def reconcile_for_task(self, task_id: str) -> tuple[ArtifactEnvelope, ...]:
         """Verify immutable payloads and rebuild only provable missing parent edges.

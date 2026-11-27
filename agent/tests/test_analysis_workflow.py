@@ -1,8 +1,12 @@
 """Offline provider contracts across the real gateway, graph, artifacts and approval."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from hashlib import sha256
 import json
+import sqlite3
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -10,10 +14,14 @@ import pytest
 from forgepilot.agents.analysis import AnalysisRequest, AnalysisService
 from forgepilot.agents.contracts import validate_task_spec
 from forgepilot.artifacts.models import DataPolicy, RepositorySpec
+from forgepilot.artifacts.store import ArtifactStorageError
 from forgepilot.errors import ForgePilotError
+from forgepilot.mission_events import append_mission_event
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.models.profiles import ModelConfiguration, ModelProfile, ModelRoute
+from forgepilot.orchestration.graph import validate_graph
 from forgepilot.orchestration.models import NodeStatus
+from forgepilot.orchestration.workspace import StrictFakeWorkspaceBackend, WorkspaceSnapshot
 from forgepilot.repository import Repository
 from forgepilot.sqlite_store import SqliteEventStore
 from conftest import call, reply
@@ -104,7 +112,7 @@ class AnalysisProvider:
         pass
 
 
-async def service_for(root, tmp_path, *, provider=None):
+async def service_for(root, tmp_path, *, provider=None, workspace_backend=None):
     repository = await Repository.open(str(root), rg_executable="rg", git_executable="git")
     provider = provider or AnalysisProvider(root)
     configuration = ModelConfiguration(profiles=(ModelProfile(profile_id="fake", base_url="https://offline.test/v1",
@@ -112,7 +120,8 @@ async def service_for(root, tmp_path, *, provider=None):
         routes=(ModelRoute(route_id="orchestration", primary="fake"), ModelRoute(route_id="analysis", primary="fake")),
         enforce_review_family_separation=False)
     gateway = ModelGateway(configuration, secret_resolver=lambda _: "fake-only-key", provider_factory=lambda *_: provider)
-    events = SqliteEventStore(tmp_path / "analysis.sqlite3")
+    events = SqliteEventStore(tmp_path / "analysis.sqlite3", artifact_root=tmp_path / "tasks",
+                              workspace_backend=workspace_backend)
     service = AnalysisService(events, repository, gateway)
     return service, provider, events, gateway
 
@@ -204,7 +213,10 @@ async def test_approval_revision_changes_hash_and_rejects_old_review(cpp_repo, t
         spec = events.artifacts.get(current.task_spec_artifact_id).content.model_dump(mode="json")
         spec["allowed_scope"]["max_changed_files"] = 3
         plan = events.artifacts.get(current.plan_artifact_id).content
+        last_event = service.runner.events(task_id)[-1]
         revised = service.revise(current, task_spec=spec, plan=plan)
+        assert [(e.revision, e.event_type) for e in service.runner.events(task_id, after_sequence=last_event.sequence)] == [
+            (current.revision + 1, "execution_review_revised")]
         assert revised.scope_hash != first.scope_hash and revised.task_spec_hash != first.task_spec_hash
         assert not events.missions.is_approval_valid(approval["approval_id"])
         with pytest.raises(ForgePilotError, match="approval_stale"):
@@ -212,6 +224,152 @@ async def test_approval_revision_changes_hash_and_rejects_old_review(cpp_repo, t
         assert service.approve(revised)["valid"]
         attempts = events._db.execute("SELECT attempt FROM task_node_attempts WHERE task_id=? AND node_id='execution_approval' ORDER BY attempt", (task_id,)).fetchall()
         assert [r[0] for r in attempts] == [1, 2]
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+async def run_admitted_analysis(service, task_id, root):
+    analysis_request = request()
+    graph = validate_graph(service.graph(analysis_request))
+    service.runner.store.create_run(task_id, graph, policy_hash=service.runner.policy.definition_hash)
+    workspace = WorkspaceSnapshot(str(uuid4()), task_id, "a" * 40, {})
+    record = {"task_id": task_id, "workspace_id": workspace.workspace_id, "repository_path": str(root),
+              "worktree_path": str(root), "base_ref": "HEAD", "head_commit": workspace.head_commit, "status": "active"}
+    service.events.workspace_backend.register(workspace, record)
+    service.events.missions.admit_mission(task_id, record, {"repository_path": str(root), "request": analysis_request.request})
+    assert (await service.run(task_id, analysis_request)).status is NodeStatus.AWAITING_HUMAN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    "BEFORE INSERT ON artifacts WHEN NEW.artifact_type='ExecutionPlan' AND NEW.producer_node='review_revision'",
+    "BEFORE UPDATE OF scope_hash ON task_graph_runs",
+], ids=["second-artifact", "gate-update"])
+async def test_failed_revision_preserves_approved_package_across_restart(cpp_repo, tmp_path, monkeypatch, failure):
+    workspace = StrictFakeWorkspaceBackend()
+    service, _, events, gateway = await service_for(cpp_repo, tmp_path, workspace_backend=workspace)
+    task_id = str(uuid4())
+    try:
+        await run_admitted_analysis(service, task_id, cpp_repo)
+        approval = service.approve(service.review(task_id))
+        old = service.review(task_id)
+        spec = events.artifacts.get(old.task_spec_artifact_id).content
+        plan = events.artifacts.get(old.plan_artifact_id).content
+        trace = service.runner.events(task_id)
+        graph = service.runner.store.snapshot(task_id)
+        artifacts = events.artifacts.list_for_task(task_id)
+        # Exercise rollback of both external payloads, including the first registration.
+        monkeypatch.setattr("forgepilot.artifacts.sqlite_store.INLINE_LIMIT_BYTES", 1)
+        events._db.execute(f"""CREATE TEMP TRIGGER reject_revision {failure}
+            BEGIN SELECT RAISE(ABORT, 'injected revision failure'); END""")
+        with pytest.raises(ArtifactStorageError):
+            service.revise(old, task_spec=spec, plan=plan)
+
+        def assert_original_package():
+            assert service.review(task_id) == old
+            assert service.runner.store.snapshot(task_id) == graph
+            assert service.runner.events(task_id) == trace
+            assert events.artifacts.list_for_task(task_id) == artifacts
+            assert events.missions.is_approval_valid(approval["approval_id"])
+            assert not list((events.artifacts.root / task_id / "artifacts").glob("*.json"))
+
+        assert_original_package()
+        events.close()  # The connection-scoped injection disappears on restart.
+        events = SqliteEventStore(tmp_path / "analysis.sqlite3", artifact_root=tmp_path / "tasks", workspace_backend=workspace)
+        service = AnalysisService(events, service.repository, gateway)
+        assert_original_package()
+        revised = service.revise(old, task_spec=spec, plan=plan)
+        assert service.approve(revised)["valid"]
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_revision_uses_actual_mission_revision_when_an_event_intervenes(cpp_repo, tmp_path):
+    service, _, events, gateway = await service_for(cpp_repo, tmp_path, workspace_backend=StrictFakeWorkspaceBackend())
+    task_id = str(uuid4())
+    try:
+        await run_admitted_analysis(service, task_id, cpp_repo)
+        old = service.review(task_id)
+        last_sequence = service.runner.events(task_id)[-1].sequence
+        events._db.create_function("append_audit_event", 0,
+            lambda: append_mission_event(events, task_id, "task.audit", {}))
+        events._db.execute("""CREATE TEMP TRIGGER extra_revision_event BEFORE INSERT ON artifacts
+            WHEN NEW.artifact_type='ExecutionPlan' AND NEW.producer_node='review_revision'
+            BEGIN SELECT append_audit_event(); END""")
+        revised = service.revise(old, task_spec=events.artifacts.get(old.task_spec_artifact_id).content,
+                                 plan=events.artifacts.get(old.plan_artifact_id).content)
+        trace = service.runner.events(task_id, after_sequence=last_sequence)
+        assert [e.event_type for e in trace] == ["artifact.created", "task.audit", "artifact.created", "execution_review_revised"]
+        assert [e.revision for e in trace] == list(range(old.revision + 1, revised.revision + 1))
+        assert service.approve(revised)["valid"]
+    finally:
+        await gateway.aclose()
+        events.close()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_mission_revisions_publish_only_one_complete_package(cpp_repo, tmp_path):
+    service, _, events, gateway = await service_for(cpp_repo, tmp_path, workspace_backend=StrictFakeWorkspaceBackend())
+    task_id = str(uuid4())
+    try:
+        await run_admitted_analysis(service, task_id, cpp_repo)
+        old = service.review(task_id)
+        spec = events.artifacts.get(old.task_spec_artifact_id).content
+        plan = events.artifacts.get(old.plan_artifact_id).content
+        start, at_gate, release = Barrier(2), Event(), Event()
+        last_sequence = service.runner.events(task_id)[-1].sequence
+
+        def pause_gate_update():
+            at_gate.set()
+            if not release.wait(10):
+                raise RuntimeError("Gate update was not released")
+            return 0
+
+        def revise(summary):
+            start.wait(timeout=10)
+            return service.revise(old, task_spec=spec, plan=plan.model_copy(update={"summary": summary}))
+
+        events._db.create_function("pause_gate_update", 0, pause_gate_update)
+        events._db.execute("""CREATE TEMP TRIGGER pause_revision BEFORE UPDATE OF scope_hash ON task_graph_runs
+            BEGIN SELECT pause_gate_update(); END""")
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            writers = [workers.submit(revise, summary) for summary in ("First revision", "Other revision")]
+            try:
+                assert at_gate.wait(10)
+                # A WAL reader bypasses the process-local lock while the writer is inside the gate update.
+                with closing(sqlite3.connect(events.path)) as reader:
+                    assert reader.execute("SELECT task_spec_artifact_id,plan_artifact_id,current_revision "
+                        "FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone() == (
+                        old.task_spec_artifact_id, old.plan_artifact_id, old.revision)
+                    assert not reader.execute("SELECT 1 FROM artifacts WHERE producer_node='review_revision'").fetchone()
+                    assert not reader.execute("SELECT 1 FROM graph_events WHERE task_id=? AND sequence>?",
+                                              (task_id, last_sequence)).fetchone()
+            finally:
+                release.set()
+        winner, = [writer.result() for writer in writers if writer.exception() is None]
+        error, = [writer.exception() for writer in writers if writer.exception() is not None]
+        assert isinstance(error, ForgePilotError) and error.code == "approval_stale"
+        assert service.review(task_id) == winner
+        new_spec = events.artifacts.get(winner.task_spec_artifact_id)
+        new_plan = events.artifacts.get(winner.plan_artifact_id)
+        assert {a.artifact_id for a in events.artifacts.list_for_task(task_id) if a.producer_node == "review_revision"} == {
+            new_spec.artifact_id, new_plan.artifact_id}
+        assert (new_spec.content_sha256, new_plan.content_sha256) == (winner.task_spec_hash, winner.plan_hash)
+        assert new_plan.content.task_spec_artifact_id == new_spec.artifact_id
+        assert {r.parent_artifact_id for r in events.artifacts.parents_of(new_spec.artifact_id)} == {old.task_spec_artifact_id}
+        assert {r.parent_artifact_id for r in events.artifacts.parents_of(new_plan.artifact_id)} == set(new_plan.parent_artifact_ids)
+        created_spec, created_plan, gate = service.runner.events(task_id, after_sequence=last_sequence)
+        for offset, (event, artifact) in enumerate(((created_spec, new_spec), (created_plan, new_plan)), start=1):
+            assert (event.revision, event.event_type) == (old.revision + offset, "artifact.created")
+            assert event.payload["artifact_id"] == artifact.artifact_id
+            assert event.payload["content_sha256"] == artifact.content_sha256
+        assert (gate.revision, gate.event_type) == (winner.revision, "execution_review_revised")
+        assert gate.revision == created_plan.revision + 1
+        assert gate.payload == {"task_spec_artifact_id": new_spec.artifact_id, "plan_artifact_id": new_plan.artifact_id}
+        assert service.approve(winner)["valid"]
     finally:
         await gateway.aclose()
         events.close()
@@ -318,7 +476,6 @@ async def test_cancel_waits_for_asynchronous_provider_cleanup(cpp_repo, tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["bind", "approve", "revise"])
 async def test_review_storage_failure_is_atomic_and_never_retryable(cpp_repo, tmp_path, operation):
-    from forgepilot.artifacts.sqlite_store import ArtifactStorageError
     service, _, events, gateway = await service_for(cpp_repo, tmp_path)
     task_id = str(uuid4())
     try:

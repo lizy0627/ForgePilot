@@ -261,6 +261,57 @@ def test_external_artifact_is_retained_when_transaction_outcome_is_unknown(tmp_p
         reopened.close()
 
 
+@pytest.mark.parametrize("committed", [True, False], ids=["lost_commit_ack", "open_transaction"])
+def test_external_package_survives_uncertain_commit_and_restart(tmp_path, monkeypatch, committed):
+    monkeypatch.setattr("forgepilot.artifacts.sqlite_store.INLINE_LIMIT_BYTES", 0)
+    database, root = tmp_path / "package.sqlite3", tmp_path / "tasks"
+    store = SqliteEventStore(database, artifact_root=root)
+    task_id = str(uuid4())
+    spec = _spec(task_id)
+    plan = _plan(task_id, spec.artifact_id)
+
+    @contextmanager
+    def fail_at_commit():
+        with store._lock:
+            store._db.execute("BEGIN IMMEDIATE")
+            yield
+            if committed:
+                store._db.execute("COMMIT")
+            raise sqlite3.OperationalError("injected uncertain COMMIT")
+
+    monkeypatch.setattr(store, "_transaction", fail_at_commit)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="uncertain COMMIT"):
+            with store.artifacts.write_transaction() as register:
+                register(spec)
+                register(plan)
+        assert store._db.in_transaction == (not committed)
+    finally:
+        store.close()
+
+    reopened = SqliteEventStore(database, artifact_root=root)
+    try:
+        for artifact in (spec, plan):
+            path = root / task_id / "artifacts" / f"{artifact.artifact_id}.json"
+            assert path.read_bytes() == canonical_json_bytes(artifact)
+        if not committed:
+            assert reopened.artifacts.reconcile_for_task(task_id) == ()
+
+            def unexpected_write(target, payload):
+                pytest.fail(f"Retry rewrote existing payload {target.name}")
+
+            monkeypatch.setattr(reopened.artifacts, "_atomic_write", unexpected_write)
+            with reopened.artifacts.write_transaction() as register:
+                register(spec)
+                register(plan)
+        assert reopened.artifacts.get(spec.artifact_id) == spec
+        assert reopened.artifacts.get(plan.artifact_id) == plan
+        assert [edge.parent_artifact_id for edge in reopened.artifacts.parents_of(plan.artifact_id)] == [
+            spec.artifact_id]
+    finally:
+        reopened.close()
+
+
 def test_reconciliation_rejects_undeclared_and_cross_task_relations(tmp_path):
     store = SqliteEventStore(tmp_path / "artifacts.sqlite3", artifact_root=tmp_path / "tasks")
     task_id = str(uuid4())

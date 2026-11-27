@@ -623,20 +623,15 @@ class AnalysisService:
         self._validate_test_policy(spec)
         proposed = create_artifact(task_id=review.task_id, producer="orchestrator.v1", producer_node="review_revision",
             parent_artifact_ids=(revised.artifact_id, *evidence_ids, review.plan_artifact_id), content=revised_plan)
-        with self.events.missions.consistent_view():
-            if self.reviews.get(review.task_id) != review:
-                raise ForgePilotError("approval_stale", "Review changed during revision")
-            run = self.events.missions.get_graph_run(review.task_id)
-            graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
-            skills = stored_graph_skills(self.events, review.task_id, graph)
-            if skills:
-                if graph.definition_hash != run["definition_hash"]:
-                    raise ForgePilotError("graph_definition", "Frozen graph changed before review revision")
-                validate_skill_routes(self, skills, spec.data_policy)
-            self.events.artifacts.put(revised)
-            self.events.artifacts.put(proposed)
-            gate = next(n for n in graph.nodes if n.node_id == "execution_approval")
-            return self.reviews.replace(review, revised, proposed, gate, self.runner.policy.definition_hash)
+        run = self.events.missions.get_graph_run(review.task_id)
+        graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
+        skills = stored_graph_skills(self.events, review.task_id, graph)
+        if skills:
+            if graph.definition_hash != run["definition_hash"]:
+                raise ForgePilotError("graph_definition", "Frozen graph changed before review revision")
+            validate_skill_routes(self, skills, spec.data_policy)
+        gate = next(n for n in graph.nodes if n.node_id == "execution_approval")
+        return self.reviews.replace(review, revised, proposed, gate, self.runner.policy.definition_hash)
 
     def _validate_plan_paths(self, spec, plan):
         from fnmatch import fnmatchcase
