@@ -14,11 +14,11 @@ AppScrollView {
         spacing: Theme.spaceMd
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "MCP 工具"; font.pixelSize: Theme.fontSizeLg; font.bold: true; Layout.fillWidth: true }
-            ActionButton { objectName: "refreshMcpButton"; text: "刷新"; enabled: !mcp.loading && !mcp.busy; onClicked: mcp.refresh() }
-            ActionButton { objectName: "addMcpButton"; text: "添加服务"; highlighted: true; enabled: mcp.statusKnown && !mcp.disabled && !mcp.loading && !mcp.busy && !mcp.pendingSave; onClicked: mcp.edit() }
+            Label { text: "已配置的服务"; font.pixelSize: Theme.fontSizeLg; font.bold: true; Layout.fillWidth: true }
+            ActionButton { objectName: "refreshMcpButton"; text: "刷新"; icon.source: Theme.icon("refresh"); enabled: !mcp.loading && !mcp.busy; onClicked: mcp.refresh() }
+            ActionButton { objectName: "addMcpButton"; text: "添加服务"; icon.source: Theme.icon("add"); highlighted: true; enabled: mcp.statusKnown && !mcp.disabled && !mcp.loading && !mcp.busy && !mcp.pendingSave; onClicked: mcp.edit() }
         }
-        Label { text: "配置修改对新请求生效，正在运行的请求继续使用原配置。"; color: Theme.secondary; wrapMode: Text.Wrap; Layout.fillWidth: true }
+        Label { text: "为新请求配置可使用的外部工具。内置聊天和工作任务可独立使用。"; color: Theme.secondary; wrapMode: Text.Wrap; Layout.fillWidth: true }
         Label {
             objectName: "mcpAvailabilityMessage"
             visible: !mcp.loading && (!mcp.statusKnown || mcp.disabled)
@@ -28,7 +28,6 @@ AppScrollView {
                 : "本机后端已禁用 MCP；外部服务不可用。已有配置可查看、停用或删除。"
             color: Theme.warning; wrapMode: Text.Wrap; Layout.fillWidth: true
         }
-        Label { text: "内置聊天和工作任务无需配置外部 MCP 服务。"; color: Theme.secondary; wrapMode: Text.Wrap; Layout.fillWidth: true }
         Label {
             objectName: "mcpPageError"; visible: !!mcp.error; text: mcp.error
             textFormat: Text.PlainText; color: Theme.danger; wrapMode: Text.WrapAnywhere
@@ -50,7 +49,7 @@ AppScrollView {
                 model: mcp.items
                 delegate: Rectangle {
                     required property var modelData
-                    Layout.fillWidth: true; implicitHeight: row.implicitHeight + 24; color: Theme.panel; border.color: Theme.border; radius: Theme.radiusMd
+                    Layout.fillWidth: true; implicitHeight: row.implicitHeight + Theme.spaceMd * 2; color: Theme.raised; radius: Theme.radiusMd
                     ColumnLayout {
                         id: row; anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.spaceMd } spacing: Theme.spaceSm
                         RowLayout {
@@ -62,7 +61,7 @@ AppScrollView {
                                 Layout.fillWidth: true
                             }
                             Label { text: modelData.transport === "stdio" ? "本地程序" : "远程服务"; color: Theme.muted }
-                            Switch { objectName: "mcpEnabled_" + modelData.server_id; text: checked ? "启用" : "停用"; checked: modelData.enabled; enabled: mcp.statusKnown && !mcp.busy && !mcp.loading && (!mcp.disabled || modelData.enabled); onClicked: mcp.setEnabled(modelData.server_id, modelData.revision, !modelData.enabled) }
+                            AppSwitch { objectName: "mcpEnabled_" + modelData.server_id; text: checked ? "启用" : "停用"; checked: modelData.enabled; enabled: mcp.statusKnown && !mcp.busy && !mcp.loading && (!mcp.disabled || modelData.enabled); onClicked: mcp.setEnabled(modelData.server_id, modelData.revision, !modelData.enabled) }
                         }
                         LongText {
                             visible: namePreview.truncated || String(modelData.name || "").length > 60
@@ -84,11 +83,11 @@ AppScrollView {
             }
         }
         Label { text: "检查结果是历史记录，不表示服务常驻在线。仅接入可信服务；工具说明不能授予源码修改权限。"; color: Theme.muted; font.pixelSize: Theme.fontSizeSm; wrapMode: Text.Wrap; Layout.fillWidth: true }
-        Dialog {
+        AppDialog {
             id: removal; property string serverId; property double revision
             parent: Overlay.overlay; anchors.centerIn: parent; width: Math.min(440, parent.width - 48); title: "删除 MCP 服务"; modal: true
             contentItem: Label { text: "删除此配置及凭证？已完成的历史记录会保留。"; wrapMode: Text.Wrap }
-            footer: DialogButtonBox {
+            footer: AppDialogButtonBox {
                 ActionButton { text: "取消"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
                 ActionButton { objectName: "confirmMcpRemovalButton"; text: "删除"; danger: true; enabled: mcp.statusKnown && !mcp.loading && !mcp.busy; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: mcp.remove(removal.serverId, removal.revision) }
             }

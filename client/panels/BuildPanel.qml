@@ -11,7 +11,12 @@ AppScrollView {
     clip: true; contentWidth: availableWidth
     ColumnLayout {
         width: root.availableWidth; spacing: Theme.spaceMd
-        Label { visible: !root.controller.buildReports.length; text: root.testsOnly ? "测试 · 未运行" : "配置 · 未运行    /    构建 · 未运行"; color: Theme.muted; padding: Theme.spaceLg }
+        Label {
+            text: root.testsOnly ? "测试报告" : "构建报告"
+            color: Theme.text; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold
+            leftPadding: Theme.spaceMd; topPadding: Theme.spaceMd
+        }
+        Label { visible: !root.controller.buildReports.length; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.testsOnly ? "测试 · 未运行" : "配置 · 未运行    /    构建 · 未运行"; color: Theme.muted; padding: Theme.spaceLg }
         Repeater {
             model: root.controller.buildReports
             delegate: Panel {
@@ -25,7 +30,7 @@ AppScrollView {
                     delegate: ColumnLayout {
                         id: stage
                         required property var modelData
-                        Layout.fillWidth: true; spacing: Theme.spaceXs
+                        Layout.fillWidth: true; spacing: Theme.spaceSm
                         RowLayout {
                             Layout.fillWidth: true
                             Label { text: stage.modelData.phase === "cmake_configure" ? "配置" : stage.modelData.phase === "cmake_build" ? "构建" : "测试"; font.bold: true; color: Theme.text }
@@ -35,7 +40,7 @@ AppScrollView {
                         Label { text: stage.modelData.truncated ? "日志已由后端截断" : ""; visible: text.length > 0; color: Theme.warning }
                         LongText {
                             objectName: "log_" + stage.modelData.phase
-                            Layout.fillWidth: true; title: "执行命令与日志"; maximumHeight: 240
+                            Layout.fillWidth: true; title: "执行命令与日志"; maximumHeight: 300
                             text: Ui.array(stage.modelData.command).join(" ") + "\n\n标准输出（原文）\n" + (stage.modelData.stdout || "—") + "\n\n标准错误（原文）\n" + (stage.modelData.stderr || "—")
                         }
                     }

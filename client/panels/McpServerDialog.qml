@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import "Theme.js" as Theme
 
-Dialog {
+AppDialog {
     id: root
     required property var mcp
     readonly property var draft: mcp.draft
@@ -58,7 +58,7 @@ Dialog {
                     Layout.fillWidth: true
                     AppTextField { id: key; objectName: "mcpKey"; echoMode: TextInput.Password; maximumLength: 4096; enabled: !root.locked; Layout.fillWidth: true; placeholderText: root.secretHint("api_key"); onTextEdited: mcp.setSecret("api_key", text) }
                     ActionButton { objectName: "replaceMcpKey"; text: "替换"; enabled: !root.locked; onClicked: { key.forceActiveFocus(); key.selectAll() } }
-                    ActionButton { objectName: "clearMcpKey"; text: "清除"; enabled: !root.locked; onClicked: mcp.clearSecret("api_key") }
+                    ActionButton { objectName: "clearMcpKey"; text: "清除"; danger: true; enabled: !root.locked; onClicked: mcp.clearSecret("api_key") }
                 }
                 Label { text: mcp.kind === 0 ? "搜索预设需要 Key；清除后必须重新填写才能保存。" : "清除密钥会将鉴权改为“无”；保存成功后才删除旧凭证。"; color: Theme.muted; font.pixelSize: Theme.fontSizeSm; wrapMode: Text.Wrap; Layout.fillWidth: true }
             }
@@ -68,11 +68,11 @@ Dialog {
                 RowLayout {
                     Layout.fillWidth: true
                     AppTextField { objectName: "mcpCommand"; text: root.connection.command || ""; maximumLength: 4096; Layout.fillWidth: true; enabled: !root.locked; selectByMouse: true; onTextEdited: mcp.update("command", text) }
-                    ActionButton { objectName: "chooseMcpProgram"; text: "选择文件"; enabled: !root.locked; onClicked: programPicker.open() }
+                    ActionButton { objectName: "chooseMcpProgram"; text: "选择文件"; icon.source: Theme.icon("folder"); enabled: !root.locked; onClicked: programPicker.open() }
                 }
                 RowLayout {
                     Label { text: "参数 · 每行作为一个完整 argv 项"; color: Theme.secondary; Layout.fillWidth: true }
-                    ActionButton { objectName: "addMcpArg"; text: "添加参数"; enabled: !root.locked && root.args().length < 32; onClicked: { var values = root.args(); values.push(""); mcp.updateList("args", values) } }
+                    ActionButton { objectName: "addMcpArg"; text: "添加参数"; icon.source: Theme.icon("add"); enabled: !root.locked && root.args().length < 32; onClicked: { var values = root.args(); values.push(""); mcp.updateList("args", values) } }
                 }
                 Repeater {
                     model: (root.connection.args || []).length
@@ -80,19 +80,19 @@ Dialog {
                         required property int index
                         Layout.fillWidth: true
                         AppTextField { objectName: "mcpArg_" + index; text: (root.connection.args || [])[index] || ""; maximumLength: 4096; enabled: !root.locked; Layout.fillWidth: true; selectByMouse: true; onTextEdited: { var values = root.args(); values[index] = text; mcp.updateList("args", values) } }
-                        ActionButton { text: "移除"; enabled: !root.locked; onClicked: { var values = root.args(); values.splice(index, 1); mcp.updateList("args", values) } }
+                        ActionButton { text: "移除"; danger: true; enabled: !root.locked; onClicked: { var values = root.args(); values.splice(index, 1); mcp.updateList("args", values) } }
                     }
                 }
                 Label { text: "工作目录（留空使用程序所在目录）"; color: Theme.secondary }
                 RowLayout {
                     Layout.fillWidth: true
                     AppTextField { objectName: "mcpCwd"; text: root.connection.cwd || ""; placeholderText: mcp.defaultDirectory(root.connection.command || ""); maximumLength: 4096; Layout.fillWidth: true; enabled: !root.locked; selectByMouse: true; onTextEdited: mcp.update("cwd", text || null) }
-                    ActionButton { text: "选择目录"; enabled: !root.locked; onClicked: directoryPicker.open() }
+                    ActionButton { text: "选择目录"; icon.source: Theme.icon("folder"); enabled: !root.locked; onClicked: directoryPicker.open() }
                 }
                 Label { objectName: "mcpEffectiveCwd"; text: "实际目录：" + (root.connection.cwd || mcp.defaultDirectory(root.connection.command || "") || "选择程序后显示"); textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true; color: Theme.muted; font.pixelSize: Theme.fontSizeSm }
                 RowLayout {
                     Label { text: "环境变量 · 所有值均加密保存"; color: Theme.secondary; Layout.fillWidth: true }
-                    ActionButton { objectName: "addMcpEnv"; text: "添加变量"; enabled: !root.locked && root.envNames().length < 16; onClicked: { var values = root.envNames(); values.push(""); mcp.updateList("env_names", values) } }
+                    ActionButton { objectName: "addMcpEnv"; text: "添加变量"; icon.source: Theme.icon("add"); enabled: !root.locked && root.envNames().length < 16; onClicked: { var values = root.envNames(); values.push(""); mcp.updateList("env_names", values) } }
                 }
                 Repeater {
                     model: (root.connection.env_names || []).length
@@ -103,9 +103,9 @@ Dialog {
                         Layout.fillWidth: true
                         AppTextField { objectName: "mcpEnvName_" + index; text: envRow.envName; placeholderText: "变量名"; maximumLength: 128; Layout.preferredWidth: 160; enabled: !root.locked; onTextEdited: { var values = root.envNames(); values[index] = text; envValue.clear(); mcp.updateList("env_names", values) } }
                         AppTextField { id: envValue; objectName: "mcpEnvValue_" + index; echoMode: TextInput.Password; placeholderText: root.secretHint("env:" + envRow.envName); maximumLength: 4096; Layout.fillWidth: true; enabled: !root.locked && !!envRow.envName; onTextEdited: mcp.setSecret("env:" + envRow.envName, text) }
-                        CheckBox { objectName: "mcpEnvSensitive_" + index; text: "敏感值"; checked: root.publicEnvNames().map(n => n.toUpperCase()).indexOf(envRow.envName.toUpperCase()) < 0; enabled: !root.locked && !!envRow.envName; onClicked: { var names = root.publicEnvNames().filter(n => n.toUpperCase() !== envRow.envName.toUpperCase()); if (!checked) names.push(envRow.envName); mcp.updateList("public_env_names", names) } }
+                        AppCheckBox { objectName: "mcpEnvSensitive_" + index; text: "敏感值"; checked: root.publicEnvNames().map(n => n.toUpperCase()).indexOf(envRow.envName.toUpperCase()) < 0; enabled: !root.locked && !!envRow.envName; onClicked: { var names = root.publicEnvNames().filter(n => n.toUpperCase() !== envRow.envName.toUpperCase()); if (!checked) names.push(envRow.envName); mcp.updateList("public_env_names", names) } }
                         ActionButton { text: "替换"; enabled: !root.locked; onClicked: { envValue.forceActiveFocus(); envValue.selectAll() } }
-                        ActionButton { objectName: "removeMcpEnv_" + index; text: "移除"; enabled: !root.locked; onClicked: { var values = root.envNames(); values.splice(index, 1); mcp.updateList("env_names", values) } }
+                        ActionButton { objectName: "removeMcpEnv_" + index; text: "移除"; danger: true; enabled: !root.locked; onClicked: { var values = root.envNames(); values.splice(index, 1); mcp.updateList("env_names", values) } }
                         Connections { target: mcp; function onClearSensitiveInputs() { envValue.clear() } }
                     }
                 }
@@ -113,8 +113,8 @@ Dialog {
             }
             RowLayout {
                 Label { text: "使用范围"; color: Theme.secondary }
-                CheckBox { id: chatScope; objectName: "mcpChatScope"; text: "问答"; visible: mcp.kind !== 2; checked: (root.draft.modes || []).indexOf("chat") >= 0; enabled: !root.locked; onClicked: root.modes() }
-                CheckBox { id: taskScope; objectName: "mcpTaskScope"; text: "工作"; checked: (root.draft.modes || []).indexOf("task") >= 0; enabled: !root.locked; onClicked: root.modes() }
+                AppCheckBox { id: chatScope; objectName: "mcpChatScope"; text: "问答"; visible: mcp.kind !== 2; checked: (root.draft.modes || []).indexOf("chat") >= 0; enabled: !root.locked; onClicked: root.modes() }
+                AppCheckBox { id: taskScope; objectName: "mcpTaskScope"; text: "工作"; checked: (root.draft.modes || []).indexOf("task") >= 0; enabled: !root.locked; onClicked: root.modes() }
             }
             Label { text: "仅启用读取和查询工具；修改、发送类工具暂不支持。请根据可信服务说明选择，行为提示不自动授予权限。"; color: Theme.secondary; wrapMode: Text.Wrap; Layout.fillWidth: true }
             Repeater {
@@ -122,7 +122,7 @@ Dialog {
                 delegate: ColumnLayout {
                     required property var modelData
                     Layout.fillWidth: true; spacing: Theme.spaceXs
-                    CheckBox { id: toolCheck; objectName: "mcpTool_" + modelData.name; text: modelData.name; checked: modelData.selected; enabled: modelData.compatible && !root.locked; Layout.fillWidth: true; onClicked: mcp.selectTool(modelData.name, checked); contentItem: Label { text: toolCheck.text; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; leftPadding: 30; verticalAlignment: Text.AlignVCenter } }
+                    AppCheckBox { id: toolCheck; objectName: "mcpTool_" + modelData.name; text: modelData.name; checked: modelData.selected; enabled: modelData.compatible && !root.locked; Layout.fillWidth: true; onClicked: mcp.selectTool(modelData.name, checked); contentItem: Label { text: toolCheck.text; font: toolCheck.font; color: toolCheck.enabled ? Theme.text : Theme.disabledText; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; leftPadding: toolCheck.indicator.width + toolCheck.spacing; verticalAlignment: Text.AlignVCenter } }
                     Label { text: modelData.description || "无说明"; textFormat: Text.PlainText; color: Theme.secondary; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true; Layout.leftMargin: 30 }
                     Label { visible: !modelData.compatible; text: "不可选择：" + mcp.toolReason(modelData.reason || ""); textFormat: Text.PlainText; color: Theme.warning; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true; Layout.leftMargin: 30 }
                 }
@@ -130,7 +130,7 @@ Dialog {
             Label { visible: mcp.state === "discovered" && !mcp.canSave; text: "至少勾选一个可用工具，并填写有效的名称和使用范围，才能保存。"; wrapMode: Text.Wrap; Layout.fillWidth: true; color: Theme.warning }
         }
     }
-    footer: DialogButtonBox {
+    footer: AppDialogButtonBox {
         ActionButton { objectName: "closeMcpEditor"; text: "关闭"; enabled: mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
         ActionButton { objectName: "resolveMcpSave"; visible: mcp.uncertain; text: "确认保存状态"; enabled: !mcp.editorBusy; onClicked: mcp.resolveSave() }
         ActionButton { objectName: "reloadMcpEditor"; visible: mcp.state === "load_failed" || mcp.state === "conflict"; text: "重新读取"; enabled: !mcp.editorBusy && !mcp.pendingSave; onClicked: mcp.edit(mcp.serverId) }

@@ -8,8 +8,9 @@ Panel {
     id: root
     required property var controller
     title: "执行记录"; subtitle: controller.traces.count + " 次工具调用"
+    property var selectedSequence: null
     property bool showStored: false
-    Connections { target: root.controller; function onTaskChanged() { if (!root.controller.taskId) root.showStored = false } }
+    Connections { target: root.controller; function onTaskChanged() { root.selectedSequence = null; if (!root.controller.taskId) root.showStored = false } }
     Label { visible: !root.controller.traces.count; text: "工具开始执行后显示执行记录。"; color: Theme.muted }
     ListView {
         id: traces; objectName: "traceList"; model: root.controller.traces
@@ -17,14 +18,15 @@ Panel {
         delegate: Rectangle {
             id: row
             required property var record
-            width: traces.width - 12; height: body.implicitHeight + 16; radius: Theme.radiusSm; color: Theme.raised
+            width: traces.width - 12; height: body.implicitHeight + 16; color: Theme.transparent
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.border }
             ColumnLayout {
                 id: body; anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.spaceSm } spacing: Theme.spaceXs
                 RowLayout {
                     Layout.fillWidth: true
-                    Label { text: row.record.name; font.bold: true; color: Theme.text; textFormat: Text.PlainText }
+                    Label { text: row.record.name; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideMiddle; font.family: Theme.fontMono; font.bold: true; color: Theme.text; textFormat: Text.PlainText }
                     StatusBadge { status: row.record.status }
-                    Label { text: Ui.duration(row.record.durationMs); color: Theme.muted; Layout.fillWidth: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: Ui.duration(row.record.durationMs); color: Theme.muted; horizontalAlignment: Text.AlignRight }
                 }
                 Label {
                     id: argumentsPreview
@@ -42,24 +44,23 @@ Panel {
     }
     RowLayout {
         Layout.fillWidth: true
-        ActionButton { objectName: "refreshTraceButton"; text: root.controller.traceLoading ? "加载中…" : "完整执行记录"; enabled: root.controller.taskId.length > 0 && !root.controller.traceLoading; onClicked: { root.showStored=true; root.controller.refreshTrace() } }
+        ActionButton { objectName: "refreshTraceButton"; text: root.controller.traceLoading ? "加载中…" : "完整执行记录"; enabled: root.controller.taskId.length > 0 && !root.controller.traceLoading; onClicked: { root.showStored = true; root.selectedSequence = null; root.controller.refreshTrace() } }
         Label { text: "任务 / 模型 / 工具 / 构建 / 测试 / 修复"; color: Theme.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: Theme.fontSizeXs }
     }
     ListView {
         id: stored; objectName: "storedTraceList"; visible: root.showStored
         Layout.fillWidth: true; Layout.preferredHeight: visible && count ? 160 : 0; clip: true
         model: root.controller.storedTrace
-        delegate: ItemDelegate {
-            hoverEnabled: true
-            background: Rectangle { radius: Theme.radiusSm; color: parent.highlighted ? Theme.selection : parent.down ? Theme.pressed : parent.hovered ? Theme.hover : Theme.input }
+        delegate: AppItemDelegate {
             id: traceItem
             required property var record
-            width: stored.width; height: Math.max(58, contentItem.implicitHeight + Theme.spaceSm * 2)
-            onClicked: root.controller.loadTraceDetail(record.sequence)
+            Accessible.name: Ui.eventKind(record.kind) + "，" + (record.preview || "")
+            highlighted: root.selectedSequence === record.sequence
+            width: stored.width - Theme.spaceMd; height: Math.max(58, contentItem.implicitHeight + Theme.spaceSm * 2)
+            onClicked: { root.selectedSequence = record.sequence; root.controller.loadTraceDetail(record.sequence) }
             contentItem: ColumnLayout {
                 Label { text: "#" + traceItem.record.trace_sequence + " " + Ui.eventKind(traceItem.record.kind) + "  ·  " + Ui.time(traceItem.record.timestamp); textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: Theme.text }
                 Label { text: traceItem.record.preview; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; color: Theme.muted; font.pixelSize: Theme.fontSizeXs }
-                Label { text: "点击查看完整记录与复制全文"; Layout.fillWidth: true; color: Theme.accent; font.pixelSize: Theme.fontSizeXs }
             }
         }
         ScrollBar.vertical: AppScrollBar {}

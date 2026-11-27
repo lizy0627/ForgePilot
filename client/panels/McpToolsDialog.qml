@@ -3,13 +3,13 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-Dialog {
+AppDialog {
     id: root
     required property var conversations
     objectName: "mcpToolsDialog"; title: "工具调用与来源"; modal: true
     parent: Overlay.overlay; anchors.centerIn: parent
     width: Math.min(760, parent.width - 40); height: Math.min(650, parent.height - 40)
-    standardButtons: Dialog.Close
+    footer: AppDialogButtonBox { ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole } }
     onClosed: conversations.closeMcpTools()
     Connections {
         target: root.conversations
@@ -31,23 +31,23 @@ Dialog {
                 model: root.conversations.mcpTools
                 delegate: Rectangle {
                     id: callRow; required property var modelData
-                    Layout.fillWidth: true; implicitHeight: detail.implicitHeight + 24
-                    color: Theme.raised; radius: Theme.radiusLg
+                    Layout.fillWidth: true; implicitHeight: detail.implicitHeight + Theme.spaceMd * 2
+                    color: Theme.input; radius: Theme.radiusMd
                     ColumnLayout {
                         id: detail; anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.spaceMd } spacing: Theme.spaceSm
                         Label { text: callRow.modelData.server_name + " / " + callRow.modelData.tool_name; textFormat: Text.PlainText; font.bold: true; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
                         Label { text: root.statusText(callRow.modelData.status) + " · " + callRow.modelData.duration_ms + " ms" + (callRow.modelData.error_code ? " · " + callRow.modelData.error_code : ""); textFormat: Text.PlainText; color: callRow.modelData.status === "failed" ? Theme.danger : Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
                         Label { text: "参数摘录"; color: Theme.secondary }
-                        TextEdit { text: callRow.modelData.arguments_excerpt; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text; Layout.fillWidth: true }
+                        TextEdit { text: callRow.modelData.arguments_excerpt; textFormat: TextEdit.PlainText; font.family: Theme.fontMono; font.pixelSize: Theme.fontSizeSm; selectionColor: Theme.selection; selectedTextColor: Theme.text; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text; Layout.fillWidth: true }
                         Label { text: "结果摘录"; color: Theme.secondary }
-                        TextEdit { text: callRow.modelData.result_excerpt; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text; Layout.fillWidth: true }
+                        TextEdit { text: callRow.modelData.result_excerpt; textFormat: TextEdit.PlainText; font.family: Theme.fontMono; font.pixelSize: Theme.fontSizeSm; selectionColor: Theme.selection; selectedTextColor: Theme.text; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text; Layout.fillWidth: true }
                         Repeater {
                             model: callRow.modelData.sources || []
                             delegate: ColumnLayout {
                                 required property var modelData; Layout.fillWidth: true
                                 Label { text: parent.modelData.title; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
                                 ActionButton {
-                                    objectName: "mcpSourceLink"; text: "打开来源 ↗"; flat: true
+                                    objectName: "mcpSourceLink"; text: "打开来源"; icon.source: Theme.icon("arrow-right"); flat: true
                                     onClicked: root.conversations.openMcpSource(parent.modelData.url)
                                 }
                                 Label { text: parent.modelData.url; textFormat: Text.PlainText; color: Theme.secondary; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; font.pixelSize: Theme.fontSizeSm }

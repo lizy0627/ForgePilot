@@ -11,18 +11,18 @@ Panel {
     RowLayout {
         Layout.fillWidth: true
         Label { text: "持久化任务历史"; color: Theme.secondary; Layout.fillWidth: true }
-        ActionButton { objectName: "refreshHistoryButton"; text: "刷新"; enabled: !root.controller.historyLoading; onClicked: root.controller.refreshTasks() }
+        ActionButton { objectName: "refreshHistoryButton"; text: "刷新"; icon.source: Theme.icon("refresh"); enabled: !root.controller.historyLoading; onClicked: root.controller.refreshTasks() }
     }
     Label { visible: !root.controller.tasks.length; text: "暂无任务，或后端尚未连接。"; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
     ListView {
         id: history; objectName: "historyList"; model: root.controller.tasks
         Layout.fillWidth: true; Layout.preferredHeight: count ? Math.min(320, count * 100) : 0; visible: count > 0; clip: true; spacing: Theme.spaceSm
-        delegate: ItemDelegate {
-            hoverEnabled: true
-            background: Rectangle { radius: Theme.radiusSm; color: parent.highlighted ? Theme.selection : parent.down ? Theme.pressed : parent.hovered ? Theme.hover : Theme.input }
+        delegate: AppItemDelegate {
             id: entry
             required property var modelData
-            width: history.width; height: Math.max(94, card.implicitHeight + Theme.spaceMd * 2)
+            padding: Theme.spaceMd
+            Accessible.name: (modelData.prompt || modelData.task_id) + "，" + Ui.status(modelData.state)
+            width: history.width - Theme.spaceMd; height: Math.max(94, card.implicitHeight + Theme.spaceMd * 2)
             highlighted: root.controller.taskId === modelData.task_id
             onClicked: root.controller.viewHistoryTask(modelData.task_id)
             contentItem: ColumnLayout {
@@ -38,7 +38,7 @@ Panel {
                     id: pathPreview
                     text: entry.modelData.repository_path || ""; visible: !!text; Layout.fillWidth: true
                     wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideMiddle
-                    textFormat: Text.PlainText; color: Theme.muted; font.pixelSize: Theme.fontSizeXs
+                    textFormat: Text.PlainText; color: Theme.muted; font.family: Theme.fontMono; font.pixelSize: Theme.fontSizeSm
                 }
                 RowLayout {
                     Layout.fillWidth: true

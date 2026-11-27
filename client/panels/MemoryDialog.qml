@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-Dialog {
+AppDialog {
     id: root; objectName: "memoryManagerDialog"
     required property var conversations
     readonly property var memory: conversations ? conversations.memory : null
@@ -34,19 +34,20 @@ Dialog {
         }
         RowLayout {
             TabBar {
-                id: tabs; Layout.fillWidth: true
+                id: tabs; Layout.fillWidth: true; spacing: Theme.spaceXs
+                background: Rectangle { color: Theme.transparent }
                 NavigationTab { objectName: "longTermMemoryTab"; text: "长期记忆" }
                 NavigationTab { objectName: "summaryMemoryTab"; text: "当前对话摘要" }
             }
-            ActionButton { objectName: "refreshMemoryButton"; text: root.memory && root.memory.loading ? "加载中…" : "刷新"; enabled: root.memory && !root.memory.loading && !root.memory.busy; onClicked: { root.summaryDirty = false; root.memory.refresh() } }
+            ActionButton { objectName: "refreshMemoryButton"; icon.source: Theme.icon("refresh"); text: root.memory && root.memory.loading ? "加载中…" : "刷新"; enabled: root.memory && !root.memory.loading && !root.memory.busy; onClicked: { root.summaryDirty = false; root.memory.refresh() } }
         }
         StackLayout {
             currentIndex: tabs.currentIndex; Layout.fillWidth: true; Layout.fillHeight: true
             ColumnLayout {
                 RowLayout {
-                    Label { text: "全局 + 当前项目 · " + (root.memory ? root.memory.items.length : 0) + " 条"; color: Theme.text; Layout.fillWidth: true }
+                    Label { text: "已保存的记忆  ·  " + (root.memory ? root.memory.items.length : 0) + " 条"; font.pixelSize: Theme.fontSizeLg; font.weight: Font.DemiBold; color: Theme.text; Layout.fillWidth: true }
                     ActionButton {
-                        objectName: "addMemoryButton"; text: "新增记忆"; highlighted: true
+                        objectName: "addMemoryButton"; text: "新增记忆"; icon.source: Theme.icon("add"); highlighted: true
                         enabled: root.memory && !root.memory.loading && !root.memory.busy
                         onClicked: { root.editing = ({}); content.text = ""; editor.scope = "global"; source.checked = !!root.conversations.conversationId; editor.open() }
                     }
@@ -67,11 +68,12 @@ Dialog {
                 ListView {
                     objectName: "memoryList"; model: root.memory ? root.memory.items : []
                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: Theme.spaceSm
-                    Label { anchors.centerIn: parent; visible: !parent.count; text: "暂无记忆。点击“新增记忆”手动保存偏好。"; color: Theme.secondary }
+                    Label { anchors.centerIn: parent; visible: !parent.count; text: root.memory && root.memory.loading ? "正在读取记忆…" : "暂无记忆。点击“新增记忆”保存偏好。"; color: Theme.secondary }
                     delegate: Rectangle {
                         id: row; required property var modelData
-                        width: ListView.view.width - 12; height: info.implicitHeight + 24
-                        radius: Theme.radiusSm; color: Theme.raised
+                        width: ListView.view.width - 12; height: info.implicitHeight + Theme.spaceMd * 2
+                        color: Theme.transparent
+                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.border }
                         RowLayout {
                             id: info; anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.spaceMd }
                             ColumnLayout {
@@ -86,11 +88,11 @@ Dialog {
                             }
                             ColumnLayout {
                                 ActionButton {
-                                    objectName: "editMemory_" + row.modelData.memory_id; text: "编辑"; enabled: !root.memory.busy && !root.memory.loading
+                                    objectName: "editMemory_" + row.modelData.memory_id; text: "编辑"; icon.source: Theme.icon("edit"); enabled: !root.memory.busy && !root.memory.loading
                                     onClicked: { root.editing = row.modelData; content.text = row.modelData.content; editor.scope = row.modelData.scope; editor.open() }
                                 }
                                 ActionButton {
-                                    objectName: "deleteMemory_" + row.modelData.memory_id; text: "删除"; danger: true; enabled: !root.memory.busy && !root.memory.loading
+                                    objectName: "deleteMemory_" + row.modelData.memory_id; text: "删除"; icon.source: Theme.icon("delete"); danger: true; enabled: !root.memory.busy && !root.memory.loading
                                     onClicked: { root.removeId = row.modelData.memory_id; root.removingSummary = false; removal.open() }
                                 }
                             }
@@ -123,14 +125,14 @@ Dialog {
             }
         }
     }
-    footer: DialogButtonBox { ActionButton { objectName: "closeMemoryButton"; text: "关闭"; enabled: !root.memory || !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole } }
+    footer: AppDialogButtonBox { ActionButton { objectName: "closeMemoryButton"; text: "关闭"; enabled: !root.memory || !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole } }
     Connections {
         target: root.memory
         function onChanged() { if (!root.summaryDirty) summaryText.text = root.state.summary ? root.state.summary.content : "" }
         function onSaved() { editor.close(); removal.close(); root.summaryDirty = false; summaryText.focus = false }
         function onScopeChanged() { editor.close(); removal.close(); content.clear(); summaryText.clear(); root.summaryDirty = false; root.editing = ({}); root.removeId = "" }
     }
-    Dialog {
+    AppDialog {
         id: detail; objectName: "memoryDetailDialog"
         property string detailTitle: ""
         property string detailText: ""
@@ -146,15 +148,15 @@ Dialog {
                 textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere
             }
         }
-        footer: DialogButtonBox {
+        footer: AppDialogButtonBox {
             ActionButton {
-                objectName: "copyMemoryDetailButton"; text: "复制全文"
+                objectName: "copyMemoryDetailButton"; text: "复制全文"; icon.source: Theme.icon("copy")
                 onClicked: { detailTextArea.selectAll(); detailTextArea.copy(); detailTextArea.deselect() }
             }
             ActionButton { text: "关闭"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
         }
     }
-    Dialog {
+    AppDialog {
         id: editor; objectName: "memoryEditorDialog"; property string scope: "global"
         parent: Overlay.overlay; anchors.centerIn: parent; width: Math.min(620, parent ? parent.width - 64 : 620)
         height: Math.min(440, parent ? parent.height - 64 : 440); modal: true
@@ -174,18 +176,18 @@ Dialog {
                     AppTextArea { id: content; objectName: "memoryContentInput"; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText; readOnly: root.memory && root.memory.busy; placeholderText: "例如：默认中文回答；回答先给结论。请勿填写 API Key、密码或其他凭证。" }
                 }
                 Label { text: content.length + " / 500"; color: content.length > 500 ? Theme.danger : Theme.muted }
-                CheckBox { id: source; objectName: "memorySourceCheck"; text: "记录来源为当前对话（删除对话时同步删除）"; visible: !root.editing.memory_id; enabled: root.conversations && !!root.conversations.conversationId && !root.memory.busy }
+                AppCheckBox { id: source; objectName: "memorySourceCheck"; text: "记录来源为当前对话（删除对话时同步删除）"; visible: !root.editing.memory_id; enabled: root.conversations && !!root.conversations.conversationId && !root.memory.busy }
                 Label { visible: !!root.editing.memory_id; text: "编辑保留原来源信息。"; color: Theme.muted }
                 Label { text: root.memory ? root.memory.error : ""; visible: !!text; color: Theme.danger; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText; maximumLineCount: 2; elide: Text.ElideRight; Layout.fillWidth: true }
                 LongText { visible: root.memory && !!root.memory.error; title: "完整记忆错误"; text: root.memory ? root.memory.error : ""; monospace: false; maximumHeight: 110; Layout.fillWidth: true }
             }
         }
-        footer: DialogButtonBox {
+        footer: AppDialogButtonBox {
             ActionButton { text: "取消"; enabled: !root.memory || !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             ActionButton { objectName: "saveMemoryButton"; text: "保存记忆"; highlighted: true; enabled: root.memory && !root.memory.busy && !root.memory.loading && !!content.text.trim() && content.length <= 500; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: root.memory.save(root.editing.memory_id || "", content.text, editor.scope, root.editing.revision || 0, source.checked) }
         }
     }
-    Dialog {
+    AppDialog {
         id: removal; objectName: "memoryRemovalDialog"
         parent: Overlay.overlay; anchors.centerIn: parent; width: Math.min(480, parent ? parent.width - 64 : 480)
         height: Math.min(300, parent ? parent.height - 64 : 300); modal: true
@@ -200,9 +202,9 @@ Dialog {
                 LongText { visible: root.memory && !!root.memory.error; title: "完整记忆错误"; text: root.memory ? root.memory.error : ""; monospace: false; maximumHeight: 110; Layout.fillWidth: true }
             }
         }
-        footer: DialogButtonBox {
+        footer: AppDialogButtonBox {
             ActionButton { text: "保留"; enabled: !root.memory || !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-            ActionButton { objectName: "confirmMemoryRemovalButton"; text: "删除"; danger: true; enabled: root.memory && !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: { if (root.removingSummary) root.memory.removeSummary(); else root.memory.remove(root.removeId) } }
+            ActionButton { objectName: "confirmMemoryRemovalButton"; text: "删除"; icon.source: Theme.icon("delete"); danger: true; enabled: root.memory && !root.memory.busy; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: { if (root.removingSummary) root.memory.removeSummary(); else root.memory.remove(root.removeId) } }
         }
     }
 }

@@ -7,12 +7,12 @@ import "RagUi.js" as RagUi
 Rectangle {
     id: root
     required property var controller
-    color: Theme.panel; radius: Theme.radiusMd; border.color: Theme.border
+    color: Theme.panel; radius: Theme.radiusMd
     ColumnLayout {
         anchors.fill: parent; anchors.margins: Theme.spaceLg; spacing: Theme.spaceSm
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "修改方案"; font.bold: true; font.pixelSize: Theme.fontSizeLg; Layout.fillWidth: true }
+            Label { text: "修改方案"; color: Theme.text; font.weight: Font.DemiBold; font.pixelSize: Theme.fontSizeLg; Layout.fillWidth: true }
             Label { text: root.controller.planVersion ? "方案 v" + root.controller.planVersion : "尚未生成"; color: Theme.muted }
         }
         Label {
@@ -88,7 +88,7 @@ Rectangle {
             id: contentScroll; objectName: "workspaceScroll"
             Layout.fillWidth: true; Layout.fillHeight: true; contentWidth: availableWidth; clip: true
             ColumnLayout {
-                width: contentScroll.availableWidth; spacing: Theme.spaceMd
+                width: contentScroll.availableWidth; spacing: Theme.spaceLg
                 Label { visible: !root.controller.planVersion; text: "分析仓库后将在这里给出修改范围和验证方案。"; color: Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
                 Repeater {
                     model: root.controller.planVersion ? [
@@ -98,10 +98,12 @@ Rectangle {
                         id: field
                         required property var modelData
                         Layout.fillWidth: true; spacing: Theme.spaceXs
-                        Label { text: field.modelData.label; font.bold: true; color: Theme.secondary; font.pixelSize: Theme.fontSizeSm }
+                        Label { text: field.modelData.label; font.weight: Font.DemiBold; color: Theme.secondary; font.pixelSize: Theme.fontSizeMd }
                         TextEdit {
                             objectName: field.modelData.key === "files_to_modify" ? "planView" : "plan_" + field.modelData.key
                             Layout.fillWidth: true; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true; wrapMode: TextEdit.WrapAnywhere; color: Theme.text; selectionColor: Theme.selection; selectedTextColor: Theme.text
+                            font.family: field.modelData.key === "files_to_modify" ? Theme.fontMono : Theme.fontFamily
+                            font.pixelSize: Theme.fontSizeMd
                             text: {
                                 var v = root.controller.plan[field.modelData.key];
                                 // QVariantList is a QML sequence, which need not satisfy JavaScript Array.isArray.
