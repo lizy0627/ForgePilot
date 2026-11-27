@@ -6,7 +6,7 @@ import json
 from pathlib import Path, PureWindowsPath
 import re
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,8 +16,9 @@ from .security import Redactor
 from .skill_models import SkillContent, SkillVersion
 from .skill_prose import contains_private_fragment
 
-if TYPE_CHECKING:
-    from .skill_store import SkillRepository
+
+class _ReviewedVersions(Protocol):
+    def get_version(self, skill_id: str, version: int) -> SkillVersion: ...
 
 
 # A new model field needs a release-format review before it may leave the machine.
@@ -152,7 +153,7 @@ def _export_reviewed(reviewed: SkillVersion, destination: Path, *, slug: str, re
     return package
 
 
-def export_skill_package(repository: SkillRepository, skill_id: str, version: int, destination: Path,
+def export_skill_package(repository: _ReviewedVersions, skill_id: str, version: int, destination: Path,
                          *, slug: str, release_version: int) -> SkillPackage:
     return _export_reviewed(repository.get_version(skill_id, version), destination,
                             slug=slug, release_version=release_version)
@@ -163,7 +164,7 @@ def main() -> None:
     from contextlib import closing
     import sqlite3
 
-    from .skill_store import read_skill_version
+    from .skill_version_reader import read_skill_version
 
     parser = argparse.ArgumentParser(description="Export an immutable reviewed version for public content review")
     parser.add_argument("--database", type=Path, required=True)

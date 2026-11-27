@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import sqlite3
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from .artifacts.canonical import canonical_json_bytes, content_sha256
@@ -12,11 +11,9 @@ from .errors import ForgePilotError
 from .mission_events import append_mission_event
 from .recording import now
 from .skill_mission_drafts import create_mission_draft_locked, validate_mission_artifact_refs
-from .skill_models import SkillContent, SkillDraft, SkillDraftData, SkillGenerationAttempt, SkillIdentity, SkillVersion
+from .skill_models import SkillDraft, SkillDraftData, SkillGenerationAttempt, SkillIdentity, SkillVersion
 from .skill_selection import FrozenSkill, load_frozen, resolve_selection
-
-if TYPE_CHECKING:
-    from .sqlite_store import SqliteEventStore
+from .skill_version_reader import read_skill_version, skill_version_from_row
 
 
 @dataclass(frozen=True)
@@ -68,22 +65,6 @@ def _draft_row(db: sqlite3.Connection, draft_id: str) -> sqlite3.Row:
     if row is None:
         raise ForgePilotError("skill_draft_not_found", "Skill draft does not exist")
     return row
-
-
-def _version(row: sqlite3.Row) -> SkillVersion:
-    return SkillVersion(
-        skill_id=row["skill_id"], version=row["version"], name=row["name"],
-        content=SkillContent.model_validate_json(row["content_json"]),
-        content_sha256=row["content_sha256"], created_at=row["created_at"],
-    )
-
-
-def read_skill_version(db: sqlite3.Connection, skill_id: str, version: int) -> SkillVersion:
-    row = db.execute("SELECT * FROM skill_versions WHERE skill_id=? AND version=?",
-                     (skill_id, version)).fetchone()
-    if row is None:
-        raise ForgePilotError("skill_not_found", "Skill version does not exist")
-    return _version(row)
 
 
 def _identity(db: sqlite3.Connection, skill_id: str) -> SkillIdentity:
@@ -151,7 +132,7 @@ def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | Non
 
 
 class SkillRepository:
-    def __init__(self, store: SqliteEventStore) -> None:
+    def __init__(self, store) -> None:
         self._store = store
 
     def resolve_selection(self, selected_skills) -> tuple[FrozenSkill, ...]:
@@ -453,7 +434,7 @@ class SkillRepository:
             rows = db.execute("""SELECT v.* FROM skills s JOIN skill_versions v
                                  ON (s.skill_id,s.current_version)=(v.skill_id,v.version)
                                  WHERE s.enabled=1 ORDER BY s.skill_id""")
-            return [_version(row) for row in rows]
+            return [skill_version_from_row(row) for row in rows]
 
     def list_match_metadata(self) -> list[SkillMatchMetadata]:
         """Project the enabled, current versions in a single SQLite snapshot."""

@@ -1,15 +1,18 @@
 """Verify the release catalog and install its immutable versions on database open."""
+from contextlib import AbstractContextManager
 from pathlib import Path
+import sqlite3
 import sys
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from .artifacts.canonical import canonical_json_bytes
 from .errors import ForgePilotError
 from .recording import now
 from .skill_package import SkillPackage, read_package_json, read_skill_package, validate_slug
 
-if TYPE_CHECKING:
-    from .sqlite_store import SqliteEventStore
+
+class _BuiltinSkillStore(Protocol):
+    def transaction(self) -> AbstractContextManager[sqlite3.Connection]: ...
 
 
 def builtin_resource_directory() -> Path:
@@ -45,7 +48,7 @@ def read_catalog(directory: Path) -> tuple[SkillPackage, ...]:
         raise ForgePilotError("invalid_skill_catalog", "Cannot load the verified built-in skill catalog") from None
 
 
-def import_builtin_skills(store: "SqliteEventStore") -> None:
+def import_builtin_skills(store: _BuiltinSkillStore) -> None:
     packages = read_catalog(builtin_resource_directory())
     with store.transaction() as db:
         installed = {row["skill_id"]: row for row in db.execute(
