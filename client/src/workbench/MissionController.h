@@ -137,6 +137,15 @@ signals:
     void eventReceived(const QString &eventId, const QJsonObject &event);
 private:
     enum class RequestKind { Mutation, Create, Artifact };
+    struct CreationSubmission {
+        QString token;
+        quint64 previewGeneration;
+        quint64 skillGeneration;
+        bool withSkills;
+    };
+    bool submittedPreviewIsCurrent(const CreationSubmission &submission) const;
+    void releaseCreationPreview();
+    void creationFailed(quint64 request, int status, const QString &code, const QString &message);
     void track(quint64 request, RequestKind kind);
     void received(quint64 request, const QString &task, const QJsonObject &body);
     void failed(quint64 request, int status, const QString &code);
@@ -154,6 +163,7 @@ private:
     std::function<bool()> continuation();
     AgentApiClient m_api;
     AgentApiClient m_historyApi;
+    // Pin preview and discard requests to their issuing backend across URL changes.
     AgentApiClient m_creationApi;
     SkillDraftClient m_skillDrafts;
     MissionSnapshotLoader m_loader;
@@ -170,16 +180,19 @@ private:
     QJsonObject m_snapshot, m_recovery, m_creationPreview;
     QString m_creationError;
     quint64 m_previewRequest = 0;
+    quint64 m_previewGeneration = 0;
+    QHash<quint64, QUrl> m_previewBackends;
+    QUrl m_creationPreviewBackend;
+    CreationSubmission m_creationSubmission{};
     bool m_creationReady = false;
     QTimer m_recommendationTimer;
     QUrl m_recommendationBackend;
     QString m_recommendationRepository, m_recommendationError;
     QJsonObject m_recommendationBody;
     quint64 m_recommendationRequest = 0;
-    quint64 m_skillContextGeneration = 0, m_submittedSkillGeneration = 0;
+    quint64 m_skillContextGeneration = 0;
     QJsonArray m_recommendations;
     QStringList m_selectedSkillIds;
-    bool m_submittedWithSkills = false;
     quint64 m_missionSkillsRequest = 0;
     QJsonObject m_missionSkills;
     QString m_missionSkillsError;

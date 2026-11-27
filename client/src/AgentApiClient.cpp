@@ -111,9 +111,12 @@ quint64 AgentApiClient::createMission(const QJsonObject &body) {
     if (request.value("selected_skills") == QJsonValue(QJsonArray{})) request.remove("selected_skills");
     return sendMission("mission.create", {}, request);
 }
-quint64 AgentApiClient::recommendSkills(const QJsonObject &body) { return sendMission("mission.recommendations", {}, body); }
-quint64 AgentApiClient::previewMission(const QJsonObject &body) { return sendMission("mission.preview", {}, body); }
-quint64 AgentApiClient::discardMissionPreview(const QString &token) { return sendMission("mission.discard_preview", {}, {{"preview_token", token}}); }
+quint64 AgentApiClient::recommendSkills(const QJsonObject &body, const QUrl &backend)
+{ return sendMission("mission.recommendations", {}, body, backend); }
+quint64 AgentApiClient::previewMission(const QJsonObject &body, const QUrl &backend)
+{ return sendMission("mission.preview", {}, body, backend); }
+quint64 AgentApiClient::discardMissionPreview(const QString &token, const QUrl &backend)
+{ return sendMission("mission.discard_preview", {}, {{"preview_token", token}}, backend); }
 quint64 AgentApiClient::listMissions(const QString &before, const QString &repositoryPath, const QString &status) {
     return sendMission("mission.list", {}, {{"before", before}, {"repository_path", repositoryPath}, {"status", status}});
 }
@@ -146,7 +149,8 @@ quint64 AgentApiClient::rejectRequest(const QString &op, const QString &id, cons
     });
     return serial;
 }
-quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body) {
+quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const QJsonObject &body, const QUrl &backend) {
+    if (!backend.isEmpty() && !Protocol::validBaseUrl(backend)) return rejectRequest(op, id, "invalid_request");
     const bool needsTaskId = !QSet<QString>{"mission.create", "mission.recommendations", "mission.preview",
         "mission.discard_preview", "mission.list"}.contains(op);
     if (needsTaskId && !MissionProtocol::validId(id)) return rejectRequest(op, id, "invalid_task_id");
@@ -159,8 +163,9 @@ quint64 AgentApiClient::sendMission(const QString &op, const QString &id, const 
     else if (action == "approve") path += "/approvals";
     else if (action == "artifact") path += "/artifacts/" + body.value("artifact_id").toString();
     else if (action != "create" && action != "get" && action != "list") path += '/' + action;
-    auto url = action == "recommendations" ? m_base.resolved(QUrl("/api/v2/skills/recommendations"))
-                                           : MissionProtocol::endpoint(m_base, path);
+    const auto &base = backend.isEmpty() ? m_base : backend;
+    auto url = action == "recommendations" ? base.resolved(QUrl("/api/v2/skills/recommendations"))
+                                           : MissionProtocol::endpoint(base, path);
     if (action == "list") {
         QStringList query{"limit=20"};
         for (const auto &key : {"before", "repository_path", "status"}) {

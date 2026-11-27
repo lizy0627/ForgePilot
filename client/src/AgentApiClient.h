@@ -20,9 +20,9 @@ public:
     quint64 getTrace(const QString &taskId, qint64 after = 0);
     quint64 getTraceDetail(const QString &taskId, qint64 sequence);
     quint64 createMission(const QJsonObject &body);
-    quint64 recommendSkills(const QJsonObject &body);
-    quint64 previewMission(const QJsonObject &body);
-    quint64 discardMissionPreview(const QString &token);
+    quint64 recommendSkills(const QJsonObject &body, const QUrl &backend = {});
+    quint64 previewMission(const QJsonObject &body, const QUrl &backend = {});
+    quint64 discardMissionPreview(const QString &token, const QUrl &backend = {});
     quint64 listMissions(const QString &before = {}, const QString &repositoryPath = {}, const QString &status = {});
     quint64 getMission(const QString &taskId);
     quint64 getMissionGraph(const QString &taskId);
@@ -45,7 +45,8 @@ signals:
                       int status, const QString &code, const QString &message);
 private:
     quint64 send(const QString &operation, const QString &taskId = {}, const QJsonObject &body = {});
-    quint64 sendMission(const QString &operation, const QString &taskId = {}, const QJsonObject &body = {});
+    quint64 sendMission(const QString &operation, const QString &taskId = {}, const QJsonObject &body = {},
+                        const QUrl &backend = {});
     quint64 rejectRequest(const QString &operation, const QString &taskId, const QString &code);
     QNetworkAccessManager m_network;
     QUrl m_base{"http://127.0.0.1:8765"};

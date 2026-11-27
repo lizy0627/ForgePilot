@@ -570,7 +570,7 @@ bool MissionProtocol::staleError(const QString &code) {
     return QSet<QString>{"revision_conflict", "mission_revision_conflict", "approval_conflict", "mission_approval_conflict", "approval_stale", "recovery_conflict", "recovery_stale", "delivery_changed"}.contains(code);
 }
 QString MissionProtocol::errorMessage(const QString &code, int status) {
-    if (code == "skill_selection_changed") return "所选技能已升级或停用，请刷新候选并重新勾选。";
+    if (code == "skill_selection_changed") return "所选技能已升级或停用，请重新预览，核对技能选择和基线后确认提交。";
     if (code == "invalid_skill_selection") return QStringLiteral("请选择至多 %1 项不同的技能，并核对推荐版本及哈希。").arg(MaxSelectedSkills);
     if (code == "skill_snapshot_invalid") return "任务冻结的技能数据缺失或校验失败，请检查任务历史及数据库备份。";
     if (code == "skill_route_denied") return "分析节点的主备模型路由与所选技能的传输范围不符。";

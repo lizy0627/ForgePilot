@@ -39,6 +39,12 @@ QJsonObject graph(const QJsonObject &m, const QString &nodeId = "execution_appro
 }
 QJsonObject conflict(const QString &code = "mission_revision_conflict")
 { return {{"error", QJsonObject{{"code", code}, {"message", "Changed"}, {"details", QJsonArray{}}, {"task_id", QJsonValue::Null}}}}; }
+QJsonObject sourcePreview(const QString &token)
+{
+    return {{"preview_token", token}, {"base_commit", QString(40, 'a')}, {"source_head", QString(40, 'a')},
+        {"baseline_paths", QJsonArray{"main.cpp"}}, {"changed_files", QJsonArray{"main.cpp"}},
+        {"patch", "selected patch"}, {"build", QJsonObject{{"source", "preset"}}}};
+}
 QByteArray missionFrame(qint64 rev, const QString &id = A)
 {
     const auto cursor = id + ':' + QString::number(rev);
@@ -52,12 +58,17 @@ struct Fixture {
     QJsonObject current = mission();
     std::function<bool(const Request &)> intercept;
     QList<Request> streams;
+    QStringList discardedPreviews;
     int reads = 0;
     Fixture() {
         source.handle = [this](const Request &r) {
             if (intercept && intercept(r)) return;
             const auto task = current.value("task_id");
             if (r.path.startsWith("/api/v2/missions?")) Source::json(r, {{"items", QJsonArray{current}}, {"total", 1}, {"next_cursor", QJsonValue::Null}});
+            else if (r.method == "DELETE" && r.path.startsWith("/api/v2/missions/previews/")) {
+                discardedPreviews.append(QString::fromUtf8(r.path.sliced(r.path.lastIndexOf('/') + 1)));
+                Source::json(r, {{"discarded", true}});
+            }
             else if (r.path.endsWith("/events")) { streams.append(r); Source::stream(r, ": ready\n\n", false); }
             else if (r.path.endsWith("/graph")) Source::json(r, graph(current));
             else if (r.path.endsWith("/artifacts")) Source::json(r, {{"task_id", task}, {"items", QJsonArray{}}});
@@ -150,13 +161,17 @@ private slots:
         third.insert("skill_id", "third");
         const QJsonObject offered{{"recommendations", QJsonArray{first, second, third}}};
         const QString token(64, 'a');
-        const QJsonObject preview{{"preview_token", token}, {"base_commit", QString(40,'a')},
-            {"source_head", QString(40,'a')}, {"baseline_paths", QJsonArray{}}, {"changed_files", QJsonArray{}},
-            {"patch", ""}, {"build", QJsonObject{{"source", "preset"}}}};
+        const QString nextToken(64, 'b');
+        const QVariantMap baseline{{"repository_path", "D:/repo"}, {"baseline_paths", QStringList{"main.cpp"}}};
+        const auto preview = sourcePreview(token);
         QList<QJsonObject> creations;
         f.intercept = [&](const Request &r) {
-            if (r.path == "/api/v2/missions/preview") Source::json(r, preview);
-            else if (r.path == "/api/v2/skills/recommendations") Source::json(r, offered);
+            if (r.path == "/api/v2/missions/preview")
+                Source::json(r, sourcePreview(f.posts("/missions/preview") == 1 ? token : nextToken));
+            else if (r.path == "/api/v2/skills/recommendations") {
+                const bool firstDisabled = !creations.isEmpty() && code == "skill_selection_changed";
+                Source::json(r, firstDisabled ? QJsonObject{{"recommendations", QJsonArray{second, third}}} : offered);
+            }
             else if (r.method == "POST" && r.path == "/api/v2/missions") {
                 creations.append(r.body);
                 if (creations.size() == 1) Source::json(r, conflict(code), status);
@@ -166,7 +181,7 @@ private slots:
         };
         MissionController c;
         c.setBaseUrl(f.source.url());
-        c.previewCreation({{"repository_path", "D:/repo"}});
+        c.previewCreation(baseline);
         c.updateSkillContext("worker", "bug_fix", "D:/repo", {});
         QTRY_VERIFY(c.creationReady());
         QTRY_COMPARE(c.skillRecommendations().size(), 3);
@@ -177,8 +192,8 @@ private slots:
         QCOMPARE(c.creationPreview(), preview.toVariantMap());
         QVERIFY(c.creationReady());
         QCOMPARE(f.posts("/missions/preview"), 1);
-        const QVariantMap draft{{"request", "worker"}, {"repository_path", "D:/repo"},
-            {"task_type", "bug_fix"}, {"preview_token", token}};
+        QVariantMap draft = baseline;
+        draft.insert({{"request", "worker"}, {"task_type", "bug_fix"}, {"preview_token", token}, {"baseline_confirmed", true}});
         c.createMission(draft);
         QTRY_VERIFY(!c.creationError().isEmpty());
         QCOMPARE(creations.size(), 1);
@@ -195,14 +210,112 @@ private slots:
         }
         QTRY_VERIFY(!c.recommendationsLoading());
         QCOMPARE(creations.size(), 1);
-        QVERIFY(c.creationReady());
-        QCOMPARE(c.creationPreview(), preview.toVariantMap());
+        if (code == "skill_selection_changed") {
+            QVERIFY(!c.creationReady());
+            QVERIFY(!c.creationPreview().contains("preview_token"));
+            QVERIFY(c.creationError().contains(QStringLiteral("预览")));
+            QTRY_COMPARE(f.discardedPreviews, QStringList{token});
+            c.createMission(draft);
+            QVERIFY(!c.busy());
+            c.previewCreation(baseline);
+            QTRY_VERIFY(c.creationReady());
+            QCOMPARE(c.creationPreview(), sourcePreview(nextToken).toVariantMap());
+            QCOMPARE(creations.size(), 1);
+            draft.insert("preview_token", nextToken);
+            c.setSkillSelected(second.value("skill_id").toString(), true);
+        } else {
+            QVERIFY(c.creationReady());
+            QCOMPARE(c.creationPreview(), preview.toVariantMap());
+            QVERIFY(f.discardedPreviews.isEmpty());
+        }
         c.createMission(draft);
         QTRY_COMPARE(creations.size(), 2);
         auto retry = QJsonObject::fromVariantMap(draft);
         if (!refreshChoices) retry.insert("selected_skills", QJsonArray{exact.first()});
+        if (code == "skill_selection_changed") retry.insert("selected_skills", QJsonArray{exact[1]});
         QCOMPARE(creations[1], retry);
-        QCOMPARE(f.posts("/missions/preview"), 1);
+        QTRY_COMPARE(c.taskId(), A);
+        QCOMPARE(f.posts("/missions"), 2);
+        QCOMPARE(f.posts("/missions/preview"), code == "skill_selection_changed" ? 2 : 1);
+    }
+    void lateCreateReplyOnlyAffectsSubmittedPreview_data()
+    {
+        QTest::addColumn<QString>("change");
+        QTest::addColumn<bool>("created");
+        QTest::newRow("new-preview-same-draft") << QString("preview") << false;
+        QTest::newRow("new-description-same-preview") << QString("description") << false;
+        QTest::newRow("new-backend-same-token") << QString("backend") << false;
+        QTest::newRow("success-after-new-preview") << QString("preview") << true;
+    }
+    void lateCreateReplyOnlyAffectsSubmittedPreview()
+    {
+        QFETCH(QString, change);
+        QFETCH(bool, created);
+        Fixture original, other;
+        Request held;
+        const QString submittedToken(64, 'a');
+        const QString nextToken(64, 'b');
+        const auto offered = protocolExample("skill_recommendations_response");
+        const QString skill = offered.value("recommendations").toArray().first().toObject().value("skill_id").toString();
+        const auto intercept = [&](const Request &r) {
+            if (r.path == "/api/v2/missions/preview") {
+                const bool newPreview = change == "preview" && held.socket;
+                Source::json(r, sourcePreview(newPreview ? nextToken : submittedToken));
+            } else if (r.path == "/api/v2/skills/recommendations") Source::json(r, offered);
+            else if (r.method == "POST" && r.path == "/api/v2/missions") held = r;
+            else return false;
+            return true;
+        };
+        original.intercept = intercept;
+        other.intercept = intercept;
+        MissionController c;
+        c.setBaseUrl(original.source.url());
+        const QVariantMap baseline{{"repository_path", "D:/repo"}, {"baseline_paths", QStringList{"main.cpp"}}};
+        c.previewCreation(baseline);
+        c.updateSkillContext("worker", "bug_fix", "D:/repo", {});
+        QTRY_VERIFY(c.creationReady());
+        QTRY_VERIFY(!c.skillRecommendations().isEmpty());
+        c.setSkillSelected(skill, true);
+        QVariantMap draft = baseline;
+        draft.insert({{"request", "worker"}, {"task_type", "bug_fix"}, {"preview_token", submittedToken}, {"baseline_confirmed", true}});
+        c.createMission(draft);
+        QTRY_VERIFY(held.socket);
+        QVERIFY(held.body.contains("selected_skills"));
+
+        if (change == "backend") c.setBaseUrl(other.source.url());
+        if (change != "preview") {
+            c.updateSkillContext("new request", "bug_fix", "D:/repo", {});
+            QTRY_VERIFY(!c.skillRecommendations().isEmpty());
+            c.setSkillSelected(skill, true);
+        }
+        if (change != "description") {
+            c.previewCreation(baseline);
+            QTRY_VERIFY(c.creationReady());
+        }
+        QSignalSpy createdSignals(&c, &MissionController::missionCreated);
+        if (created) {
+            original.current = mission(B);
+            Source::json(held, original.current, 202);
+            QTRY_COMPARE(c.missions()->get(0).value("taskId").toString(), B);
+        } else Source::json(held, conflict("skill_selection_changed"), 409);
+        QTRY_VERIFY(!c.busy());
+        QTRY_COMPARE(original.discardedPreviews, QStringList{submittedToken});
+        QVERIFY(other.discardedPreviews.isEmpty());
+        QVERIFY(c.creationError().isEmpty());
+        QVERIFY(c.error().isEmpty());
+        QVERIFY(c.taskId().isEmpty());
+        QCOMPARE(createdSignals.size(), 0);
+        QCOMPARE(c.selectedSkillIds(), QStringList{skill});
+        QVERIFY(!c.recommendationsLoading());
+        if (change == "description") {
+            QVERIFY(!c.creationReady());
+            QVERIFY(!c.creationPreview().contains("preview_token"));
+        } else {
+            QVERIFY(c.creationReady());
+            QCOMPARE(c.creationPreview(), sourcePreview(change == "backend" ? submittedToken : nextToken).toVariantMap());
+        }
+        QCOMPARE(original.posts("/missions"), 1);
+        QCOMPARE(other.posts("/missions"), 0);
     }
     void unavailableRecommendationRouteAllowsPlainCreation()
     {
@@ -270,33 +383,26 @@ private slots:
     void creationPreviewInvalidationDisposesLateResultsAndRequiresReconfirmation()
     {
         QFETCH(QString, conflictCode);
-        Fixture f; QList<Request> previews; QStringList disposed;
+        Fixture f; QList<Request> previews;
         f.intercept=[&](const Request &request) {
             if(request.path == "/api/v2/missions/preview") { previews.append(request); return true; }
-            if(request.path.startsWith("/api/v2/missions/previews/")) {
-                disposed.append(QString::fromUtf8(request.path.mid(request.path.lastIndexOf('/')+1)));
-                Source::json(request, {{"discarded", true}}); return true;
-            }
             if(request.method == "POST" && request.path == "/api/v2/missions") {
                 Source::json(request, conflict(conflictCode), 409); return true;
             }
             return false;
         };
-        auto preview=[](char token) { return QJsonObject{{"preview_token", QString(64, token)}, {"base_commit", QString(40,'a')},
-            {"source_head", QString(40,'a')}, {"baseline_paths", QJsonArray{"main.cpp"}}, {"changed_files", QJsonArray{"main.cpp"}},
-            {"patch", "selected patch"}, {"build", QJsonObject{{"source", "preset"}}}}; };
         MissionController c; c.setBaseUrl(f.source.url());
         c.selectMission(A); QTRY_VERIFY(c.synchronized());
         c.previewCreation({{"repository_path", "D:/fixture"}}); QTRY_COMPARE(previews.size(), 1);
         c.invalidateCreationPreview(true); c.previewCreation({{"repository_path", "D:/other"}}); QTRY_COMPARE(previews.size(), 2);
-        Source::json(previews[0], preview('b')); QTRY_VERIFY(disposed.contains(QString(64,'b')));
+        Source::json(previews[0], sourcePreview(QString(64,'b'))); QTRY_VERIFY(f.discardedPreviews.contains(QString(64,'b')));
         QVERIFY(!c.creationReady()); QVERIFY(c.previewLoading());
-        Source::json(previews[1], preview('c')); QTRY_VERIFY(c.creationReady());
+        Source::json(previews[1], sourcePreview(QString(64,'c'))); QTRY_VERIFY(c.creationReady());
         QCOMPARE(c.taskId(), A); QVERIFY(c.synchronized());
-        c.invalidateCreationPreview(); QVERIFY(!c.creationReady()); QTRY_VERIFY(disposed.contains(QString(64,'c')));
+        c.invalidateCreationPreview(); QVERIFY(!c.creationReady()); QTRY_VERIFY(f.discardedPreviews.contains(QString(64,'c')));
         QCOMPARE(c.creationPreview().value("changed_files").toStringList(), QStringList{"main.cpp"});
         c.previewCreation({{"repository_path", "D:/other"}}); QTRY_COMPARE(previews.size(), 3);
-        Source::json(previews[2], preview('d')); QTRY_VERIFY(c.creationReady());
+        Source::json(previews[2], sourcePreview(QString(64,'d'))); QTRY_VERIFY(c.creationReady());
         c.createMission({{"repository_path", "D:/other"}, {"request", "fixture"}, {"preview_token", QString(64,'d')},
             {"baseline_paths", QJsonArray{"main.cpp"}.toVariantList()}, {"baseline_confirmed", true}});
         QTRY_VERIFY(!c.creationError().isEmpty()); QVERIFY(!c.creationReady()); QVERIFY(!c.busy());

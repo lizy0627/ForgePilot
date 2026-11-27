@@ -101,6 +101,7 @@ struct Fixture {
     QJsonObject artifacts = fixtureJson("client/tests/fixtures/mission_artifacts.json");
     QList<Request> streams;
     QList<QJsonObject> creates, approvals, deliveries;
+    int previewCount = 0;
     Request pendingConfirmation;
     std::function<bool(const Request &)> intercept;
 
@@ -166,7 +167,8 @@ struct Fixture {
                 Source::json(request, {{"task_id", MissionId}, {"selected_skills", QJsonArray{}}, {"injections", QJsonArray{}}});
             } else if (request.path == "/api/v2/missions/preview" && request.method == "POST") {
                 const auto paths = request.body.value("baseline_paths").toArray();
-                Source::json(request, {{"preview_token", QString(64, 'c')}, {"base_commit", QString(40, 'a')},
+                const auto token = QString::number(++previewCount, 16).rightJustified(64, '0');
+                Source::json(request, {{"preview_token", token}, {"base_commit", QString(40, 'a')},
                     {"source_head", QString(40, 'a')}, {"baseline_paths", paths}, {"changed_files", QJsonArray{"main.cpp"}},
                     {"patch", paths.isEmpty() ? "" : "--- a/main.cpp\n+++ b/main.cpp\n@@ -1 +1 @@\n-old\n+selected\n"},
                     {"build", QJsonObject{{"source", "default"}, {"note", "受控构建目录"}}}});
@@ -1288,6 +1290,13 @@ print(json.dumps(result))
         QTRY_VERIFY(ui.find("missionSkillChoice"));
         QVERIFY(ui.click("missionPreviewButton"));
         QTRY_VERIFY(ui.missions.creationReady());
+        QVERIFY(ui.click("missionBaselineFile"));
+        QVERIFY(!ui.missions.creationReady());
+        QVERIFY(ui.click("missionPreviewButton"));
+        QTRY_VERIFY(ui.missions.creationReady());
+        auto *confirmation = ui.find("missionBaselineConfirmation");
+        QVERIFY(ui.click(confirmation));
+        const auto firstToken = ui.missions.creationPreview().value("preview_token").toString();
         QVERIFY(ui.click("missionSkillChoice"));
         QVERIFY(ui.click("missionCreateButton"));
         QTRY_VERIFY(!ui.missions.creationError().isEmpty());
@@ -1298,19 +1307,31 @@ print(json.dumps(result))
         if (legacy) {
             QTRY_VERIFY(!ui.missions.recommendationError().isEmpty());
             QVERIFY(!ui.find("missionSkillChoice"));
+            QVERIFY(ui.missions.creationReady());
+            QVERIFY(confirmation->property("checked").toBool());
         } else {
+            QVERIFY(!ui.missions.creationReady());
+            QVERIFY(!confirmation->property("checked").toBool());
+            QVERIFY(!ui.find("missionCreateButton")->isEnabled());
             QTRY_VERIFY(ui.find("missionSkillChoice") && ui.find("missionSkillChoice")->property("text").toString().contains("v2"));
             QVERIFY(!ui.find("missionSkillChoice")->property("checked").toBool());
             QVERIFY(ui.click("missionSkillChoice"));
-        }
-        QCOMPARE(attempts.size(), 1);
-        if (!ui.missions.creationReady()) {
             QVERIFY(ui.click("missionPreviewButton"));
             QTRY_VERIFY(ui.missions.creationReady());
+            QVERIFY(!confirmation->property("checked").toBool());
+            QVERIFY(!ui.find("missionCreateButton")->isEnabled());
+            QVERIFY(ui.click(confirmation));
         }
+        QCOMPARE(attempts.size(), 1);
+        const auto retryToken = ui.missions.creationPreview().value("preview_token").toString();
+        QCOMPARE(retryToken == firstToken, legacy);
         QVERIFY(ui.click("missionCreateButton"));
         QTRY_COMPARE(fixture.creates.size(), 1);
         QCOMPARE(attempts.size(), 2);
+        QCOMPARE(attempts.first().value("preview_token").toString(), firstToken);
+        QCOMPARE(attempts.last().value("preview_token").toString(), retryToken);
+        QCOMPARE(attempts.last().value("baseline_paths").toArray(), QJsonArray{"main.cpp"});
+        QVERIFY(attempts.last().value("baseline_confirmed").toBool());
         QCOMPARE(attempts.first().value("selected_skills").toArray().first().toObject().value("version").toInt(), 1);
         if (legacy) QVERIFY(!attempts.last().contains("selected_skills"));
         else {
@@ -1700,10 +1721,11 @@ print(json.dumps(result))
         QVERIFY(ui.click(ui.find("missionUsePresets")));
         QVERIFY(ui.click(ui.find("missionPreviewButton"))); QTRY_VERIFY(ui.missions.creationReady());
         QVERIFY(!confirmation->property("checked").toBool()); QVERIFY(ui.click(confirmation));
+        const auto confirmedToken = ui.missions.creationPreview().value("preview_token").toString();
         QVERIFY(ui.click(ui.find("missionCreateButton"))); QTRY_COMPARE(fixture.creates.size(), 1);
         QCOMPARE(fixture.creates.first().value("baseline_paths").toArray(), QJsonArray{"main.cpp"});
         QCOMPARE(fixture.creates.first().value("baseline_confirmed").toBool(), true);
-        QCOMPARE(fixture.creates.first().value("preview_token").toString(), QString(64, 'c'));
+        QCOMPARE(fixture.creates.first().value("preview_token").toString(), confirmedToken);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void clickedNodeStaysSelectedWhenProgressAdvances()

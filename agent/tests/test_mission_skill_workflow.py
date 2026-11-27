@@ -186,6 +186,38 @@ async def test_cloud_fallback_rejection_preserves_source_preview(tmp_path, git_e
 
 
 @pytest.mark.asyncio
+async def test_changed_before_submission_discards_pending_preview_and_repreviews(tmp_path, git_exe, qt_draft):
+    case = await make_loop_case(tmp_path, git_exe)
+    analyst = RecordingAnalyst(case)
+    try:
+        async with session(case, tmp_path, git_exe, analyst) as (client, host):
+            selected = select_skill(host.store, qt_draft)
+            source = {"repository_path": str(case.root)}
+            preview = await client.post("/api/v2/missions/preview", json=source)
+            assert preview.status_code == 200, preview.text
+            token = preview.json()["preview_token"]
+            worktree = Path(case.manager.record(host._previews[token].task_id)["worktree_path"])
+            current = upgrade(host.store, selected)
+            stale = await client.post("/api/v2/missions", json=request_for(case) | {
+                "selected_skills": [selected], "preview_token": token})
+            assert stale.status_code == 409 and stale.json()["error"]["code"] == "skill_selection_changed"
+            assert token in host._previews and worktree.exists() and host.list_page()["total"] == 0
+            assert (await client.delete(f"/api/v2/missions/previews/{token}")).status_code == 200
+            assert token not in host._previews and not worktree.exists()
+
+            renewed = await client.post("/api/v2/missions/preview", json=source)
+            assert renewed.status_code == 200, renewed.text
+            new_token = renewed.json()["preview_token"]
+            assert new_token != token
+            ref = current.model_dump(include={"skill_id", "version", "content_sha256"})
+            path = await create_mission(client, case, selected_skills=[ref], preview_token=new_token)
+            assert (await poll(client, path, {"awaiting_human", "failed"}))["status"] == "awaiting_human"
+            assert host.list_page()["total"] == 1
+    finally:
+        await case.gateway.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["disable", "upgrade"])
 async def test_changed_during_admission_rolls_back_graph_and_preview(
         tmp_path, git_exe, qt_draft, monkeypatch, change):
@@ -213,6 +245,7 @@ async def test_changed_during_admission_rolls_back_graph_and_preview(
                 "selected_skills": [first], "preview_token": token})
             assert result.status_code == 409 and result.json()["error"]["code"] == "skill_selection_changed"
             assert host._previews == {} and tid not in host._services and not worktree.exists()
+            assert (await client.delete(f"/api/v2/missions/previews/{token}")).status_code == 200
             assert analyst.calls == [] and host.list_page()["total"] == 0
             with host.store.locked_connection() as db:
                 for table in ("workspace_records", "graph_events", "task_graph_runs", "mission_skill_snapshots"):
