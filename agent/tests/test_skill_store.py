@@ -103,6 +103,7 @@ def test_private_evidence_requires_matching_mission_digest_and_revision(store, q
         (SkillEvidenceRef(kind="node", record_id="unknown-node"), cutoff),
         (SkillEvidenceRef(kind="event", record_id=f"{other_id}:{other_sequence}"), cutoff),
         (event, cutoff - 1),
+        (event, cutoff + 1),
         (event, None),
     )
     for ref, evidence_revision in invalid:

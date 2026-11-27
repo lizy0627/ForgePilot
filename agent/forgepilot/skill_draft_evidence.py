@@ -11,8 +11,10 @@ from .errors import ForgePilotError
 from .mission_events import TERMINAL_MISSION_STATUSES
 from .mission_tools import MissionToolSelection
 from .repository import excluded
+from .skill_evidence_projection import (
+    MAX_GENERATION_ARTIFACT_BYTES, read_evidence_artifact, validate_artifact_ref, validate_mission_evidence_records,
+)
 from .skill_evidence_ref import SkillEvidenceRef
-from .skill_mission_drafts import MAX_GENERATION_ARTIFACT_BYTES, _evidence_items, _owned_artifact
 from .skill_prose import contains_private_fragment
 from .skill_suggestion import ModelLesson, SkillSuggestion, SuggestionBasis
 
@@ -108,11 +110,13 @@ def prepare_draft_input(store, draft, attempt_id, current_policy: DataPolicy, *,
     refs = {}
     materials = []
     prefix = sha256(attempt_id.encode("utf-8")).hexdigest()[:16]
-    with store.locked_connection() as db:
+    with store.missions.consistent_view():
         run = store.missions.get_graph_run(mission_id)
         status = run["status"]
         if status not in TERMINAL_MISSION_STATUSES or status == "skipped":
             raise ForgePilotError("skill_draft_evidence_insufficient", "No eligible terminal Mission evidence")
+        validate_mission_evidence_records(store.missions, mission_id, draft.data.evidence_revision,
+                                          draft.data.evidence_refs)
         selection = store.missions.metadata(mission_id).get("tool_selection")
         try:
             if not isinstance(current_policy, DataPolicy) or "cloud_model_allowed" not in selection["data_policy"]:
@@ -125,20 +129,19 @@ def prepare_draft_input(store, draft, attempt_id, current_policy: DataPolicy, *,
 
         def read_record(artifact_id, *, required=False):
             if artifact_id not in artifacts:
-                row = db.execute("SELECT size_bytes FROM artifacts WHERE task_id=? AND artifact_id=?",
-                                 (mission_id, artifact_id)).fetchone()
-                if row is None:
+                metadata = store.artifacts.metadata_for_task(mission_id, artifact_id)
+                if metadata is None:
                     raise ForgePilotError("invalid_skill_evidence", "Source artifact cannot be verified")
-                if row[0] > MAX_GENERATION_ARTIFACT_BYTES:
-                    if required:
-                        raise _policy_error()
-                    return None
-                artifacts[artifact_id] = _owned_artifact(store.missions, mission_id, artifact_id)
+                if metadata.size_bytes > MAX_GENERATION_ARTIFACT_BYTES:
+                    artifacts[artifact_id] = None
+                else:
+                    artifacts[artifact_id] = read_evidence_artifact(store.missions, mission_id, artifact_id)
+            if required and artifacts[artifact_id] is None:
+                raise _policy_error()
             return artifacts[artifact_id]
 
-        latest_spec = db.execute("""SELECT artifact_id FROM artifacts WHERE task_id=? AND artifact_type='TaskSpec'
-                                    ORDER BY rowid DESC LIMIT 1""", (mission_id,)).fetchone()
-        for spec_id in {run["task_spec_artifact_id"], latest_spec[0] if latest_spec else None} - {None}:
+        latest_spec = store.artifacts.latest_metadata_for_task(mission_id, "TaskSpec")
+        for spec_id in {run["task_spec_artifact_id"], latest_spec.artifact_id if latest_spec else None} - {None}:
             spec = read_record(spec_id, required=True).content
             if not isinstance(spec, TaskSpec):
                 raise _policy_error()
@@ -151,9 +154,7 @@ def prepare_draft_input(store, draft, attempt_id, current_policy: DataPolicy, *,
             record = read_record(ref.record_id)
             if record is None:
                 continue
-            if (record.content_sha256 != ref.content_sha256 or
-                    (ref.locator, ref.classification, ref.recorded_value) not in _evidence_items(record.content)):
-                raise ForgePilotError("invalid_skill_evidence", "Source evidence differs from its frozen record")
+            validate_artifact_ref(record, ref)
             if isinstance(record.content, TaskSpec):
                 policies.append(record.content.data_policy)
             if isinstance(record.content, ChangeSet) and ref.record_id not in change_summaries:

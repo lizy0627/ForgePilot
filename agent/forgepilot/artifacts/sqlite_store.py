@@ -1,6 +1,7 @@
 """Durable SQLite metadata plus integrity-checked external Artifact payloads."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -21,6 +22,13 @@ from .validation import ArtifactProtocolError, ArtifactRelationshipError, create
 
 INLINE_LIMIT_BYTES = 256 * 1024
 MAX_EXTERNAL_BYTES = 1024 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ArtifactMetadata:
+    artifact_id: str
+    content_sha256: str
+    size_bytes: int
 
 
 def default_artifact_root() -> Path:
@@ -391,6 +399,21 @@ class SqliteArtifactStore:
         except sqlite3.Error:
             raise ArtifactStorageError("Artifact relationships could not be reconciled") from None
 
+    def metadata_for_task(self, task_id: str, artifact_id: str) -> ArtifactMetadata | None:
+        """Check ownership and inspect the immutable record without opening its payload."""
+        with self.events.locked_connection() as db:
+            row = db.execute("""SELECT artifact_id,content_sha256,size_bytes FROM artifacts
+                                WHERE task_id=? AND artifact_id=?""", (task_id, artifact_id)).fetchone()
+            return ArtifactMetadata(*row) if row is not None else None
+
+    def latest_metadata_for_task(self, task_id: str, artifact_type: str) -> ArtifactMetadata | None:
+        """Return the most recently stored artifact of this type, including pre-admission records."""
+        with self.events.locked_connection() as db:
+            row = db.execute("""SELECT artifact_id,content_sha256,size_bytes FROM artifacts
+                                WHERE task_id=? AND artifact_type=? ORDER BY rowid DESC LIMIT 1""",
+                             (task_id, artifact_type)).fetchone()
+            return ArtifactMetadata(*row) if row is not None else None
+
     def get(self, artifact_id: str) -> ArtifactEnvelope:
         with self.events._lock:
             row = self.events._db.execute(
@@ -438,6 +461,6 @@ class SqliteArtifactStore:
 
 
 __all__ = [
-    "ArtifactIntegrityError", "ArtifactStorageError", "INLINE_LIMIT_BYTES",
+    "ArtifactIntegrityError", "ArtifactMetadata", "ArtifactStorageError", "INLINE_LIMIT_BYTES",
     "SqliteArtifactStore", "default_artifact_root",
 ]

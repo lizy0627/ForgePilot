@@ -11,9 +11,10 @@ from forgepilot.errors import ForgePilotError
 from forgepilot.mission_tools import MissionToolSelection
 from forgepilot.security import Redactor
 from forgepilot.skill_draft_evidence import (
-    MAX_INPUT_BYTES, MAX_INPUT_CHARS, prepare_draft_input, suggestion_schema, validate_suggestion,
+    MAX_INPUT_BYTES, MAX_INPUT_CHARS, TEMPLATE_VERSION, prepare_draft_input, suggestion_schema, validate_suggestion,
 )
 from forgepilot.skill_mission_drafts import create_mission_draft
+from forgepilot.skill_models import SkillDraftData, SkillEvidenceRef
 from forgepilot.sqlite_store import SqliteEventStore
 from test_artifact_protocol import PLAN_ID, TASK_ID, TASK_SPEC_ID, all_contents
 from test_mission_events import make_mission
@@ -62,7 +63,50 @@ def test_policy_intersects_admission_spec_and_current(store, frozen, spec, curre
     assert prepared.policy.cloud_model_allowed is allowed
 
 
-def test_bounded_public_projection_and_attempt_scoped_basis(store):
+def test_latest_spec_can_restrict_policy_after_draft_cutoff(store):
+    freeze_policy(store, True)
+    spec, findings, *_ = all_contents()
+    allow_cloud = DataPolicy(cloud_model_allowed=True)
+    original = put(store, spec.model_copy(update={"data_policy": allow_cloud}))
+    put(store, findings)
+    draft = create_mission_draft(store, TASK_ID)
+    put(store, spec.model_copy(update={"objective": "A later objective.",
+                                       "data_policy": DataPolicy(cloud_model_allowed=False)}))
+    put(store, spec.model_copy(update={"data_policy": allow_cloud}), task_id=str(uuid4()))
+
+    prepared = prepare_draft_input(store, draft, "attempt", allow_cloud)
+    assert prepared.policy.cloud_model_allowed is False
+    materials = json.loads(prepared.messages[1]["content"])["materials"]
+    objective, = [item for item in materials if item["field"] == "objective"]
+    assert objective["value"] == original.content.objective
+    assert prepared.references[objective["key"]].record_id == original.artifact_id
+
+
+def test_whole_artifact_reference_replays_after_restart_without_projecting_unselected_fields(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    with closing(SqliteEventStore(path)) as store:
+        make_mission(store)
+        set_state(store, "failed")
+        freeze_policy(store, False)
+        artifact = put(store, all_contents()[1])
+        ref = SkillEvidenceRef(kind="artifact", record_id=artifact.artifact_id, content_sha256=artifact.content_sha256)
+        cutoff = store.missions.get_graph_run(TASK_ID)["current_revision"]
+        data = SkillDraftData(evidence_refs=(ref,), evidence_revision=cutoff)
+        draft = store.skills.create_draft(request_id="legacy", source_mission_id=TASK_ID, data=data)
+        put(store, all_contents()[1])
+
+    with closing(SqliteEventStore(path)) as store:
+        assert store.skills.get_draft(draft.draft_id) == draft
+        assert store.skills.create_draft(request_id="legacy", source_mission_id=TASK_ID, data=data) == draft
+        active, attempt_id, _ = store.skills.regenerate(draft.draft_id, expected_revision=1,
+                                                       request_id="retry", template_version=TEMPLATE_VERSION)
+        assert active.data.evidence_refs == (ref,)
+        with pytest.raises(ForgePilotError, match="skill_draft_evidence_insufficient"):
+            prepare_draft_input(store, active, attempt_id, DataPolicy())
+
+
+@pytest.mark.parametrize("source", ["manual", "model"])
+def test_bounded_public_projection_and_attempt_scoped_basis(store, source):
     spec, findings, plan, changes, validation, *_ = all_contents()
     for identifier, parents, content in ((TASK_SPEC_ID, (), spec), (PLAN_ID, (TASK_SPEC_ID,), plan),
                                          (str(uuid4()), (PLAN_ID,), changes)):
@@ -74,9 +118,18 @@ def test_bounded_public_projection_and_attempt_scoped_basis(store):
     command, = validation.commands
     put(store, validation.model_copy(update={"commands": (command, command.model_copy(
         update={"kind": "protected_test", "output_summary": "Private result."}))}))
-    draft = create_mission_draft(store, TASK_ID, developer_note="System prompt: private instruction")
+    note = "System prompt: private instruction"
+    if source == "manual":
+        draft = create_mission_draft(store, TASK_ID, developer_note=note)
+    else:
+        draft, _, _ = store.skills.create_generation(TASK_ID, developer_note=note, template_version=TEMPLATE_VERSION)
+    locators = {ref.locator for ref in draft.data.evidence_refs}
+    assert "/files/0/change_type" in locators
+    assert ("/summary" in locators) == (source == "model")
     prepared = prepare_draft_input(store, draft, "first", DataPolicy())
     sent = prepared.messages[1]["content"]
+    summary, = [item for item in json.loads(sent)["materials"] if item["field"] == "change_summary"]
+    assert prepared.references[summary["key"]].locator == "/summary"
     for expected in (changes.summary, spec.objective, item.claim, "test_exit_code"):
         assert expected in sent
     for forbidden in (changes.files[0].path, "Private sentinel", "Private result", "@@", "protected_test",
@@ -124,15 +177,17 @@ def test_free_text_never_bypasses_projection(store, prohibited):
     assert "developer_observation" not in prepared.messages[1]["content"]
 
 
-@pytest.mark.parametrize("field", ["record_id", "content_sha256", "locator"])
-def test_forged_reference_rejected_at_dispatch(store, field):
+@pytest.mark.parametrize("damage", ["foreign", "after_cutoff", "digest", "locator"])
+def test_forged_reference_rejected_at_dispatch(store, damage):
     findings = all_contents()[1]
     put(store, findings)
     other = put(store, findings, task_id=str(uuid4()))
     draft = create_mission_draft(store, TASK_ID)
     ref, = draft.data.evidence_refs
-    corrupt = {"record_id": other.artifact_id, "content_sha256": "0" * 64, "locator": "/items/5/claim"}
-    data = draft.data.model_copy(update={"evidence_refs": (ref.model_copy(update={field: corrupt[field]}),)})
+    later = put(store, findings)
+    corrupt = {"foreign": {"record_id": other.artifact_id}, "after_cutoff": {"record_id": later.artifact_id},
+               "digest": {"content_sha256": "0" * 64}, "locator": {"locator": "/items/5/claim"}}
+    data = draft.data.model_copy(update={"evidence_refs": (ref.model_copy(update=corrupt[damage]),)})
     with pytest.raises(ForgePilotError, match="invalid_skill_evidence"):
         prepare_draft_input(store, draft.model_copy(update={"data": data}), "attempt", DataPolicy())
 

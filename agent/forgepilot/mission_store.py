@@ -549,10 +549,39 @@ class MissionRepository:
 
     def owned_artifact(self, task_id, artifact_id):
         with self.events._lock:
-            owner = self.events._db.execute("SELECT task_id FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
-            if owner is None or owner[0] != task_id:
+            if self.events.artifacts.metadata_for_task(task_id, artifact_id) is None:
                 raise ForgePilotError("unknown_artifact", "Artifact does not belong to this mission")
             return self.events.artifacts.get(artifact_id)
+
+    def allows_evidence_revision(self, task_id: str, revision: int | None) -> bool:
+        with self.events.locked_connection() as db:
+            row = db.execute("SELECT current_revision FROM task_graph_runs WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ForgePilotError("unknown_mission", "Source Mission does not exist")
+            return revision is None or revision <= row["current_revision"]
+
+    def has_evidence_record(self, task_id: str, kind: str, record_id: str, cutoff_revision: int, *,
+                            content_sha256: str | None = None) -> bool:
+        """Match a frozen reference using the caller's transaction or locked read view."""
+        with self.events.locked_connection() as db:
+            if kind == "artifact":
+                metadata = self.events.artifacts.metadata_for_task(task_id, record_id)
+                if metadata is None or metadata.content_sha256 != content_sha256:
+                    return False
+                # Artifacts stored before admission have no creation event.
+                later = db.execute("""SELECT 1 FROM graph_events WHERE task_id=? AND revision>?
+                                      AND event_type='artifact.created' AND json_extract(payload_json,'$.artifact_id')=?
+                                      LIMIT 1""", (task_id, cutoff_revision, record_id)).fetchone()
+                return later is None
+            if kind == "event":
+                sequence = record_id.rsplit(":", 1)[-1]
+                return db.execute("""SELECT 1 FROM graph_events WHERE task_id=? AND sequence=? AND revision<=?
+                                     AND task_id || ':' || sequence=?""",
+                                  (task_id, sequence, cutoff_revision, record_id)).fetchone() is not None
+            if kind == "node":
+                return db.execute("SELECT 1 FROM graph_node_states WHERE task_id=? AND node_id=?",
+                                  (task_id, record_id)).fetchone() is not None
+            return False
 
     @contextmanager
     def delivery_reconciliation(self, task_id):

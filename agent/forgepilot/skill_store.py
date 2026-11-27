@@ -10,7 +10,8 @@ from .artifacts.canonical import canonical_json_bytes, content_sha256
 from .errors import ForgePilotError
 from .mission_events import append_mission_event
 from .recording import now
-from .skill_mission_drafts import create_mission_draft_locked, validate_mission_artifact_refs
+from .skill_evidence_projection import validate_mission_artifact_refs, validate_mission_evidence_records
+from .skill_mission_drafts import freeze_mission_draft_data
 from .skill_models import SkillDraft, SkillDraftData, SkillGenerationAttempt, SkillIdentity, SkillVersion
 from .skill_selection import FrozenSkill, load_frozen, resolve_selection
 from .skill_version_reader import read_skill_version, skill_version_from_row
@@ -97,35 +98,7 @@ def _check_source(db: sqlite3.Connection, missions, source_mission_id: str | Non
         if data.evidence_revision is not None or data.evidence_refs:
             raise ForgePilotError("invalid_skill_evidence", "Evidence requires a source Mission")
         return
-    mission = db.execute("SELECT current_revision FROM task_graph_runs WHERE task_id=?",
-                         (source_mission_id,)).fetchone()
-    if mission is None:
-        raise ForgePilotError("unknown_mission", "Source Mission does not exist")
-    if data.evidence_revision is not None and data.evidence_revision > mission["current_revision"]:
-        raise ForgePilotError("invalid_skill_evidence", "Evidence revision exceeds the source Mission revision")
-    if data.evidence_refs and data.evidence_revision is None:
-        raise ForgePilotError("invalid_skill_evidence", "Evidence references require a cutoff revision")
-    for ref in data.evidence_refs:
-        if ref.kind == "artifact":
-            # Pre-admission artifacts have no creation event. When a Mission did
-            # log the artifact, respect the same cutoff as a direct event reference.
-            found = db.execute("""SELECT 1 FROM artifacts a WHERE a.task_id=? AND a.artifact_id=?
-                                  AND a.content_sha256=? AND NOT EXISTS(
-                                      SELECT 1 FROM graph_events e WHERE e.task_id=a.task_id
-                                      AND e.revision>? AND e.event_type='artifact.created'
-                                      AND json_extract(e.payload_json,'$.artifact_id')=a.artifact_id)""",
-                               (source_mission_id, ref.record_id, ref.content_sha256, data.evidence_revision)).fetchone()
-        elif ref.kind == "event":
-            # MissionEvent.event_id is the source task ID followed by its sequence.
-            sequence = ref.record_id.rsplit(":", 1)[-1]
-            found = db.execute("""SELECT 1 FROM graph_events WHERE task_id=? AND sequence=?
-                                  AND revision<=? AND task_id || ':' || sequence = ?""",
-                               (source_mission_id, sequence, data.evidence_revision, ref.record_id)).fetchone()
-        else:
-            found = db.execute("SELECT 1 FROM graph_node_states WHERE task_id=? AND node_id=?",
-                               (source_mission_id, ref.record_id)).fetchone()
-        if found is None:
-            raise ForgePilotError("invalid_skill_evidence", "Evidence reference does not match a source Mission record")
+    validate_mission_evidence_records(missions, source_mission_id, data.evidence_revision, data.evidence_refs)
     if verify_artifacts:
         validate_mission_artifact_refs(missions, source_mission_id,
                                        (ref for ref in data.evidence_refs if ref.kind == "artifact"))
@@ -203,19 +176,24 @@ class SkillRepository:
                      source_mission_id: str | None = None) -> SkillDraft:
         data = SkillDraftData.model_validate(data)
         with self._store.transaction() as db:
-            return self._insert_draft(db, request_id, data, source_mission_id=source_mission_id)
+            return self._create_draft(db, request_id, data, source_mission_id=source_mission_id)
 
-    def _insert_draft(self, db: sqlite3.Connection, request_id: str, data: SkillDraftData, *,
+    def _create_draft(self, db: sqlite3.Connection, request_id: str, data: SkillDraftData, *,
                       source_mission_id: str | None = None, base_skill_id: str | None = None,
-                      base_version: int | None = None, create_hash: str | None = None) -> SkillDraft:
-        _check_request_id(request_id)
-        fingerprint = create_hash or content_sha256({
+                      base_version: int | None = None) -> SkillDraft:
+        fingerprint = content_sha256({
             "source_mission_id": source_mission_id, "base_skill_id": base_skill_id,
             "base_version": base_version, "data": data.model_dump(mode="json"),
         })
         existing = self._replayed_draft(db, request_id, fingerprint)
         if existing is not None:
             return existing
+        return self._insert_draft(db, request_id, fingerprint, data, source_mission_id=source_mission_id,
+                                  base_skill_id=base_skill_id, base_version=base_version)
+
+    def _insert_draft(self, db: sqlite3.Connection, request_id: str, fingerprint: str, data: SkillDraftData, *,
+                      source_mission_id: str | None = None, base_skill_id: str | None = None,
+                      base_version: int | None = None) -> SkillDraft:
         _check_source(db, self._store.missions, source_mission_id, data)
         draft_id = str(uuid4())
         timestamp = now()
@@ -229,6 +207,7 @@ class SkillRepository:
 
     def _replayed_draft(self, db: sqlite3.Connection, request_id: str, fingerprint: str, *,
                         verify_artifacts: bool = True) -> SkillDraft | None:
+        _check_request_id(request_id)
         existing = db.execute("SELECT * FROM skill_drafts WHERE request_id=?", (request_id,)).fetchone()
         if existing is None:
             return None
@@ -236,12 +215,31 @@ class SkillRepository:
             raise ForgePilotError("skill_request_conflict", "Request ID already identifies another draft request")
         return self._checked_draft(db, existing, verify_artifacts=verify_artifacts)
 
+    def create_mission_draft(self, task_id: str, *, developer_note: str = "",
+                             request_id: str | None = None) -> SkillDraft:
+        request_id = str(uuid4()) if request_id is None else request_id
+        with self._store.transaction() as db:
+            return self._create_mission_draft(db, task_id, developer_note, request_id, for_generation=False)
+
+    def _create_mission_draft(self, db: sqlite3.Connection, task_id: str, developer_note: str,
+                              request_id: str, *, for_generation: bool) -> SkillDraft:
+        note = SkillDraftData(developer_note=developer_note)
+        operation = "model_mission_draft" if for_generation else "manual_mission_draft"
+        fingerprint = content_sha256({"operation": operation, "mission_id": task_id,
+                                      "developer_note": note.developer_note})
+        # Replay the original intent before inspecting the current Mission or selecting newer artifacts.
+        existing = self._replayed_draft(db, request_id, fingerprint, verify_artifacts=not for_generation)
+        if existing is not None:
+            return existing
+        data = freeze_mission_draft_data(self._store.missions, self._store.artifacts, task_id, note,
+                                         for_generation=for_generation)
+        return self._insert_draft(db, request_id, fingerprint, data, source_mission_id=task_id)
+
     def create_generation(self, task_id: str, *, developer_note: str = "", request_id: str | None = None,
                           template_version: str) -> tuple[SkillDraft, str, bool]:
         request_id = str(uuid4()) if request_id is None else request_id
         with self._store.transaction() as db:
-            draft = create_mission_draft_locked(self._store, db, task_id, developer_note,
-                                                request_id, "model_mission_draft")
+            draft = self._create_mission_draft(db, task_id, developer_note, request_id, for_generation=True)
             return self._begin_generation(db, draft, request_id, template_version, expected_revision=None)
 
     def regenerate(self, draft_id: str, *, expected_revision: int, request_id: str,
@@ -365,7 +363,7 @@ class SkillRepository:
         with self._store.transaction() as db:
             original = read_skill_version(db, skill_id, version)
             data = SkillDraftData(name=original.name, content=original.content.model_dump())
-            return self._insert_draft(db, request_id, data, base_skill_id=skill_id, base_version=version)
+            return self._create_draft(db, request_id, data, base_skill_id=skill_id, base_version=version)
 
     def publish_local(self, draft_id: str, *, expected_revision: int, request_id: str) -> SkillVersion:
         """Review the stored revision and commit its version, current pointer and receipt together."""
