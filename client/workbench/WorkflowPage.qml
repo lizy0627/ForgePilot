@@ -286,6 +286,7 @@ Item {
                     Controls.AppMenuItem { text: "刷新任务"; enabled: !root.mission.busy; onTriggered: root.mission.refresh() }
                     Controls.AppMenuItem {
                         text: "取消任务"
+                        danger: true
                         visible: ["succeeded", "failed", "cancelled"].indexOf(root.mission.status) < 0
                         enabled: visible && root.mission.synchronized && !root.mission.busy
                         onTriggered: cancelDialog.open()

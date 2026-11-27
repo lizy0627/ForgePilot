@@ -80,7 +80,7 @@ qt_add_qml_module(ForgePilotClient URI ForgePilot VERSION 1.0 QML_FILES Main.qml
     workbench/StateNotice.qml workbench/NodeStatusBadge.qml workbench/WorkbenchUi.js
     RESOURCES assets/forge-mark.svg assets/fluent/LICENSE
     assets/fluent/add.svg assets/fluent/arrow-right.svg assets/fluent/brain.svg assets/fluent/chat.svg
-    assets/fluent/check.svg assets/fluent/chevron-down.svg assets/fluent/chevron-right.svg assets/fluent/code.svg
+    assets/fluent/check.svg assets/fluent/chevron-down.svg assets/fluent/chevron-right.svg
     assets/fluent/copy.svg assets/fluent/delete.svg assets/fluent/dismiss.svg assets/fluent/document.svg
     assets/fluent/edit.svg assets/fluent/flow.svg assets/fluent/folder.svg assets/fluent/history.svg
     assets/fluent/library.svg assets/fluent/more.svg assets/fluent/refresh.svg assets/fluent/send.svg

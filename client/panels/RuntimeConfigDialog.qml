@@ -53,7 +53,7 @@ AppDialog {
     }
     onClosed: clearSecrets()
     Connections {
-        target: root.controller
+        target: root.controller || null
         function onFieldsChanged() { root.readFields() }
         function onSecretsConsumed() { root.clearSecrets() }
     }

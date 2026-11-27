@@ -416,6 +416,130 @@ private slots:
             if (QFile::exists(fonts.filePath(name))) QFontDatabase::addApplicationFont(fonts.filePath(name));
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
     }
+    void desktopControlStates_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::newRow("new-conversation") << QStringLiteral("newTaskButton");
+        QTest::newRow("icon") << QStringLiteral("refreshConversationHistoryButton");
+        QTest::newRow("mode") << QStringLiteral("agentWorkbenchModeButton");
+        QTest::newRow("history") << QStringLiteral("conversationHistoryEntry_") + MissionId;
+    }
+    void desktopControlStates()
+    {
+        QFETCH(QString, name);
+        Fixture fixture;
+        const QJsonObject existing{{"conversation_id", MissionId}, {"title", "构建日志与测试结果"}, {"messages", QJsonArray{}}};
+        auto created = existing;
+        created["conversation_id"] = McpId;
+        created["title"] = "新对话";
+        int createCount = 0;
+        fixture.intercept = [&](const Request &request) {
+            if (request.path == "/api/v1/conversations" && request.method == "POST") {
+                ++createCount;
+                Source::json(request, created, 201);
+            } else if (request.path.startsWith("/api/v1/conversations?")) {
+                const QJsonArray items = createCount ? QJsonArray{created, existing} : QJsonArray{existing};
+                Source::json(request, {{"items", items}, {"total", items.size()}});
+            } else if (request.path == "/api/v1/conversations/" + MissionId.toUtf8()) {
+                Source::json(request, existing);
+            } else if (request.path == "/api/v1/conversations/" + McpId.toUtf8()) {
+                Source::json(request, created);
+            } else return false;
+            return true;
+        };
+        Ui ui(fixture, 1320, 800);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QTRY_COMPARE(ui.conversations.conversationId(), MissionId);
+        QTRY_VERIFY(!ui.conversations.loading() && !ui.conversations.historyLoading());
+        QTRY_VERIFY(ui.find(name) && ui.find(name)->isVisible());
+        auto *button = ui.find(name);
+        QTRY_VERIFY(button->width() > 0 && button->isEnabled());
+        ui.window->update();
+        QTest::qWait(60);
+        // The history delegate contains separate actions on its trailing edge.
+        const auto inside = button->mapToScene({button->width() / 4, button->height() / 2}).toPoint();
+        const QPoint outside(8, 8);
+        // Windows re-evaluates hover from the system cursor when a busy button
+        // becomes enabled again. QTest's synthetic move alone leaves it behind.
+        const bool nativeWindows = QGuiApplication::platformName() == "windows";
+        const auto previousCursor = QCursor::pos();
+        const auto restoreCursor = qScopeGuard([&] { if (nativeWindows) QCursor::setPos(previousCursor); });
+        auto movePointer = [&](QPoint point) {
+            if (nativeWindows) QCursor::setPos(ui.window->mapToGlobal(point));
+            QTest::mouseMove(ui.window, point);
+        };
+        auto *surface = button->property("background").value<QQuickItem *>();
+        QVERIFY(surface);
+        auto fill = [&] { return surface->property("color").value<QColor>(); };
+        auto captureButton = [&](const QString &state) {
+            const auto dir = qEnvironmentVariable("FORGEPILOT_UI_OUTPUT");
+            if (name != "newTaskButton" || dir.isEmpty()) return true;
+            if (!QDir().mkpath(dir)) return false;
+            ui.window->update();
+            QTest::qWait(40);
+            const auto frame = ui.window->grabWindow();
+            const auto dpr = frame.devicePixelRatio();
+            const auto bounds = button->mapRectToScene(button->boundingRect()).adjusted(-4, -4, 4, 4);
+            const QRect crop(qRound(bounds.x()*dpr), qRound(bounds.y()*dpr),
+                             qRound(bounds.width()*dpr), qRound(bounds.height()*dpr));
+            return frame.copy(crop).save(dir + "/new-conversation-" + state + ".png");
+        };
+        QSignalSpy clicks(button, SIGNAL(clicked()));
+        movePointer(outside);
+        QTRY_VERIFY(!button->property("hovered").toBool());
+        const auto idle = fill();
+        QVERIFY(captureButton("default"));
+        movePointer(inside);
+        QTRY_VERIFY(button->property("hovered").toBool());
+        const auto hover = fill();
+        QVERIFY(idle != hover);
+        QVERIFY(captureButton("hover"));
+        QTest::mousePress(ui.window, Qt::LeftButton, Qt::NoModifier, inside);
+        QTRY_VERIFY(button->property("down").toBool());
+        QVERIFY(fill() != idle && fill() != hover);
+        QVERIFY(captureButton("pressed"));
+        movePointer(outside);
+        QTest::mouseRelease(ui.window, Qt::LeftButton, Qt::NoModifier, outside);
+        QCOMPARE(clicks.count(), 0);
+        QTRY_COMPARE(fill(), idle);
+        movePointer(inside);
+        QTest::mousePress(ui.window, Qt::LeftButton, Qt::NoModifier, inside);
+        QTest::mouseRelease(ui.window, Qt::LeftButton, Qt::NoModifier, inside);
+        QCOMPARE(clicks.count(), 1);
+        if (name == "newTaskButton") {
+            QTRY_COMPARE(ui.conversations.conversationId(), McpId);
+            QCOMPARE(createCount, 1);
+        }
+        QTRY_VERIFY(button->isEnabled() && !button->property("down").toBool());
+        QTRY_VERIFY(button->property("hovered").toBool());
+        const auto released = fill();
+        movePointer(outside);
+        QTRY_VERIFY(!button->property("hovered").toBool());
+        QVERIFY(fill() != released);
+        if (name == "agentWorkbenchModeButton") QVERIFY(button->property("checked").toBool());
+        // Move the focus away with Backtab, then return using the normal tab chain.
+        button->forceActiveFocus();
+        QTest::keyClick(ui.window, Qt::Key_Backtab);
+        QVERIFY(!button->hasActiveFocus());
+        QTest::keyClick(ui.window, Qt::Key_Tab);
+        QTRY_VERIFY(button->property("visualFocus").toBool());
+        if (name == "newTaskButton") {
+            for (const QSize size : {QSize(1320, 800), QSize(860, 640)}) {
+                ui.window->resize(size);
+                QTRY_COMPARE(ui.window->size(), size);
+                const auto suffix = size.width() == 860 ? "-minimum" : "-desktop";
+                const auto settings = size.width() == 860 ? "compactSettingsButton" : "settingsButton";
+                QTRY_VERIFY(ui.find(settings) && ui.find(settings)->isVisible());
+                QVERIFY(ui.capture(QStringLiteral("chat") + suffix));
+                QVERIFY(ui.click(settings));
+                QTRY_VERIFY(ui.find("closeSettingsButton") && ui.find("closeSettingsButton")->isVisible());
+                QVERIFY(ui.capture(QStringLiteral("settings") + suffix));
+                QVERIFY(ui.click("closeSettingsButton"));
+                QTRY_VERIFY(!ui.find("closeSettingsButton") || !ui.find("closeSettingsButton")->isVisible());
+            }
+        }
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void historyNavigationPreservesTheDraft_data()
     {
         QTest::addColumn<int>("width");

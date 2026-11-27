@@ -29,5 +29,13 @@ Button {
         color: Theme.buttonFill(control, control.styleRole)
         border.width: control.visualFocus || control.down ? 2 : 1
         border.color: Theme.buttonBorder(control, control.styleRole)
+        Rectangle {
+            visible: control.enabled && control.visualFocus && control.highlighted
+            anchors.fill: parent
+            anchors.margins: 2
+            radius: Math.max(0, parent.radius - 2)
+            color: Theme.transparent
+            border.color: Theme.onAccent
+        }
     }
 }

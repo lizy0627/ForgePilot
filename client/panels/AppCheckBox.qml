@@ -14,8 +14,9 @@ CheckBox {
         implicitWidth: 18
         implicitHeight: 18
         radius: 4
-        color: Theme.buttonFill(control, control.checked ? "primary" : "secondary")
-        border.color: control.checked ? Theme.accentBorder : Theme.controlEdge
+        color: !control.enabled && control.checked ? Theme.disabledText
+            : Theme.buttonFill(control, control.checked ? "primary" : "secondary")
+        border.color: !control.enabled ? Theme.border : control.checked ? Theme.accentBorder : Theme.controlEdge
         Image {
             visible: control.checked
             anchors.centerIn: parent

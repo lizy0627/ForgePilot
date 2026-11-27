@@ -48,7 +48,7 @@ ApplicationWindow {
         if (showRuntimeConfiguration) { configurationPrompted = true; runtimeConfigDialog.open() }
     }
     Connections {
-        target: window.runtimeConfig
+        target: window.runtimeConfig || null
         function onChanged() {
             if (window.runtimeConfig.wizardRequired && !window.configurationPrompted) {
                 window.configurationPrompted = true
@@ -128,7 +128,7 @@ ApplicationWindow {
             anchors.fill: parent; anchors.leftMargin: Theme.spaceLg; anchors.rightMargin: Theme.spaceLg
             spacing: Theme.spaceXs
             RowLayout {
-                Layout.preferredWidth: window.compactChat ? 166 : 220
+                Layout.preferredWidth: window.compactChat ? 202 : 220
                 Layout.maximumWidth: Layout.preferredWidth
                 Brand {}
                 Item { Layout.fillWidth: true }

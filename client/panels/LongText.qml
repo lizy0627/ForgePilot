@@ -39,7 +39,9 @@ ColumnLayout {
         Layout.fillWidth: true; Layout.preferredHeight: active ? root.maximumHeight : 0
         active: root.expanded; visible: active
         sourceComponent: AppScrollView {
+            id: viewport
             clip: true
+            contentWidth: availableWidth
             function copyAll() {
                 detailText.selectAll()
                 detailText.copy()
@@ -47,9 +49,10 @@ ColumnLayout {
             }
             AppTextArea {
                 id: detailText
+                width: viewport.availableWidth
                 text: root.text; textFormat: TextEdit.PlainText; readOnly: true; selectByMouse: true
                 wrapMode: TextEdit.WrapAnywhere; font.family: root.monospace ? Theme.fontMono : Theme.fontFamily
-                font.pixelSize: Theme.fontSizeSm
+                font.pixelSize: root.monospace ? Theme.fontSizeSm : Theme.fontSizeMd
             }
         }
     }
