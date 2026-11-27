@@ -29,11 +29,12 @@ private slots:
         QTemporaryDir settingsDirectory; QVERIFY(settingsDirectory.isValid());
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settingsDirectory.path());
-        TaskController tasks; const auto base=qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL"); tasks.setBaseUrl(QUrl(base));
-        ConversationController conversations(&tasks); McpController mcp(&tasks);
+        BackendConnection connection;
+        TaskController tasks(connection); const auto base=qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL"); tasks.setBaseUrl(QUrl(base));
+        ConversationController conversations(connection,&tasks); McpController mcp(connection);
         QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError> &errors){for(const auto &error:errors) warnings.append(error.toString());});
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)}, {"conversations",QVariant::fromValue(&conversations)}, {"mcp",QVariant::fromValue(&mcp)}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&tasks)}, {"conversations",QVariant::fromValue(&conversations)}, {"mcp",QVariant::fromValue(&mcp)}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY2(!engine.rootObjects().isEmpty(),qPrintable(warnings.join('\n')));
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first()); QVERIFY(window); QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -230,12 +231,13 @@ private slots:
             QVERIFY(control({{"drop_save",true},{"delay_detail",true}})); QVERIFY(click("saveMcpButton"));
             QTRY_VERIFY(mcp.state()!="saving" && !mcp.canCloseEditor());
             const auto putCount=http("POST","/fixture/control").value("put_ids").toArray().size();
-            tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE")));
+            connection.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE")));
             QVERIFY(!ready("addMcpButton")); QTRY_VERIFY(!mcp.loading()); QTest::qWait(1800);
             QVERIFY(!mcp.pendingSave()); QVERIFY(mcp.canCloseEditor()); QVERIFY(!mcp.editorOpen()); QVERIFY(mcp.items().isEmpty());
+            QVERIFY(mcp.notice().contains("上次保存结果待确认"));
             QVERIFY(find("mcpKey")->property("text").toString().isEmpty());
             QCOMPARE(http("POST","/fixture/control").value("put_ids").toArray().size(),putCount);
-            tasks.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading()); QCOMPARE(mcp.items().size(),1);
+            connection.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading()); QCOMPARE(mcp.items().size(),1);
             QVERIFY(remove(pendingId)); QTRY_VERIFY(mcp.items().isEmpty()); QTRY_VERIFY(!mcp.loading());
 
             // A new committed UUID survives failed verification and closing/reopening settings.
@@ -398,9 +400,9 @@ private slots:
         QVERIFY(mcp.editorBusy()); QVERIFY(click("closeMcpEditor")); QTRY_VERIFY(!mcp.editorOpen()); QVERIFY(control({{"mode","normal"},{"fail_on","initialize"}}));
         // Backend change closes the active editor and clears its sensitive inputs.
         QVERIFY(click("addMcpButton")); QVERIFY(input("mcpKey",secret));
-        tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE"))); QTRY_VERIFY(!mcp.loading()); QTest::qWait(900);
+        connection.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE"))); QTRY_VERIFY(!mcp.loading()); QTest::qWait(900);
         QVERIFY(mcp.items().isEmpty()); QVERIFY(!mcp.editorOpen()); QVERIFY(find("mcpKey")->property("text").toString().isEmpty());
-        tasks.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading());
+        connection.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading());
         QVERIFY(click("addMcpButton")); QVERIFY(choose("mcpKind",1)); QVERIFY(input("mcpEndpoint",endpoint));
         QVERIFY(choose("mcpAuth",2)); QVERIFY(input("mcpHeader","X-API-Key")); QVERIFY(input("mcpKey",secret));
         QVERIFY(control({{"auth","api_key"},{"expected_secret",secret}})); QVERIFY(click("probeMcpButton")); QTRY_COMPARE(mcp.state(),QString("discovered"));
@@ -475,8 +477,8 @@ private slots:
         QVERIFY(capture("saved-small"));
         // A late nonempty list from the old backend cannot populate the new empty backend.
         QVERIFY(control({{"delay_list",true}})); mcp.refresh(); QTest::qWait(150);
-        tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE"))); QTRY_VERIFY(!mcp.loading()); QTest::qWait(900);
-        QVERIFY(mcp.items().isEmpty()); tasks.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading()); QCOMPARE(mcp.items().size(),1);
+        connection.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_MCP_ALTERNATE"))); QTRY_VERIFY(!mcp.loading()); QTest::qWait(900);
+        QVERIFY(mcp.items().isEmpty()); connection.setBaseUrl(QUrl(base)); QTRY_VERIFY(!mcp.loading()); QCOMPARE(mcp.items().size(),1);
         QVERIFY(click("closeSettingsButton")); QVERIFY(!mcp.editorOpen());
         QVERIFY(mcp.draft().isEmpty()); QVERIFY(mcp.items().isEmpty()); QVERIFY(find("mcpKey")->property("text").toString().isEmpty());
         QDirIterator settingsFiles(settingsDirectory.path(),QDir::Files,QDirIterator::Subdirectories);

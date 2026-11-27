@@ -3,6 +3,7 @@
 #include "ConversationController.h"
 #include "RagController.h"
 #include "McpController.h"
+#include "BackendConnection.h"
 #include "JsonHttp.h"
 #include "Protocol.h"
 #include "SseClient.h"
@@ -123,7 +124,14 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(rag.status(), QString("ready"), 8000);
     }
 
-    void ragControllerCancelsRunningIndex() {
+    void ragControllerLeavesRunningIndex_data() {
+        QTest::addColumn<bool>("switchBackend");
+        QTest::newRow("explicit-cancel") << false;
+        QTest::newRow("switch-backend") << true;
+    }
+
+    void ragControllerLeavesRunningIndex() {
+        QFETCH(bool,switchBackend);
         Source source; int cancellations=0;
         const QString repository="C:/running";
         auto state=[](QString status,bool running,int revision) {
@@ -133,9 +141,12 @@ private slots:
                 {"last_indexed_at",QJsonValue::Null},{"running",running},
                 {"operation_id",QString(32,'d')},{"revision",revision},{"error_code",QJsonValue::Null}};
         };
-        Request stream;
+        Request stream, pendingStatus;
         source.handle=[&](const Request &r) {
-            if(r.path.startsWith("/api/v1/rag/status?")) Source::json(r,state("indexing",true,1));
+            if(r.path.startsWith("/api/v1/rag/status?")) {
+                if(stream.socket) pendingStatus=r;
+                else Source::json(r,state("indexing",true,1));
+            }
             else if(r.path.startsWith("/api/v1/rag/index/events?")) { stream=r; Source::stream(r,{},false); }
             else if(r.path=="/api/v1/rag/index/cancel") {
                 ++cancellations; QCOMPARE(r.body.value("repository_path").toString(),repository);
@@ -144,6 +155,17 @@ private slots:
         };
         RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath(repository);
         QTRY_VERIFY(rag.running()); QTRY_VERIFY(stream.socket);
+        if (switchBackend) {
+            Source next;
+            next.handle = [&](const Request &r) { Source::json(r,state("ready",false,1)); };
+            rag.refresh(); QTRY_VERIFY(pendingStatus.socket);
+            rag.setBaseUrl(next.url());
+            QCOMPARE(rag.fileCount(),0); QVERIFY(!rag.running());
+            QTRY_VERIFY(!stream.socket && !pendingStatus.socket);
+            QTRY_COMPARE(rag.status(),QString("ready"));
+            QCOMPARE(rag.repositoryPath(),repository); QCOMPARE(cancellations,0);
+            return;
+        }
         rag.cancelIndex(); QTRY_COMPARE(cancellations,1); QTRY_COMPARE(rag.status(),QString("cancelled"));
         QVERIFY(!rag.running()); QVERIFY(rag.error().isEmpty());
     }
@@ -407,9 +429,55 @@ private slots:
         TaskController c; c.setBaseUrl(source.url()); c.selectTask(A); QTRY_COMPARE(c.state(),QString("planning"));
         QVERIFY(!c.feedbackReplanning()); QVERIFY(c.canCancel()); QVERIFY(!c.canFeedback());
     }
+    void backendSwitchDetachesUnconfirmedChatSubmission() {
+        Source first, second;
+        Request firstPost, secondPost;
+        auto handler=[](QString title, Request &post) {
+            return [title,&post](const Request &r) {
+                if(r.method=="POST") post=r;
+                else if(r.path=="/api/v1/conversations/"+A.toUtf8())
+                    Source::json(r,{{"conversation_id",A},{"title",title},{"messages",QJsonArray{}}});
+                else Source::json(r,{{"items",QJsonArray{}},{"total",0}});
+            };
+        };
+        first.handle=handler("first",firstPost);
+        second.handle=handler("second",secondPost);
+        BackendConnection connection;
+        connection.setBaseUrl(first.url());
+        TaskController tasks(connection);
+        ConversationController chat(connection,&tasks);
+        QSignalSpy submitted(&chat,&ConversationController::submitted);
+
+        chat.selectConversation(A); QTRY_COMPARE(chat.title(),QString("first"));
+        chat.sendMessage("on first");
+        QTRY_VERIFY(firstPost.socket);
+        const auto firstRequestId=firstPost.body.value("request_id");
+        connection.setBaseUrl(second.url());
+        QTRY_VERIFY(!chat.historyLoading());
+        QCOMPARE(second.requests.size(),1);
+        QVERIFY(second.requests.first().path.startsWith("/api/v1/conversations?"));
+        QVERIFY(!chat.busy()); QVERIFY(!chat.retryPending());
+
+        chat.selectConversation(A); QTRY_COMPARE(chat.title(),QString("second"));
+        chat.sendMessage("on second"); QTRY_VERIFY(secondPost.socket);
+        Source::json(firstPost,{{"status","running"},{"task_id",B}});
+        QTRY_VERIFY(!firstPost.socket);
+        QVERIFY(chat.busy()); QVERIFY(tasks.taskId().isEmpty()); QCOMPARE(submitted.count(),0);
+        Source::json(secondPost,{{"status","completed"}});
+        QTRY_COMPARE(submitted.count(),1);
+        QCOMPARE(submitted.first().at(1).toString(),QString("on second"));
+        QTRY_VERIFY(!chat.busy()); QVERIFY(!chat.retryPending());
+
+        connection.setBaseUrl(first.url());
+        chat.selectConversation(A); QTRY_COMPARE(chat.title(),QString("first"));
+        QVERIFY(chat.retryPending());
+        chat.retrySend(); QTRY_VERIFY(firstPost.socket);
+        QCOMPARE(firstPost.body.value("request_id"),firstRequestId);
+    }
     void requestPollingTenTicksLeavesMessagesAlone() {
         PollSource source; source.state.remove("task_id"); source.state["mode"]="chat";
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QCOMPARE(c.messages()->count(),1);
         QSignalSpy resets(c.messages(),&QAbstractItemModel::modelReset);
         QSignalSpy updates(c.messages(),&QAbstractItemModel::dataChanged);
@@ -445,7 +513,8 @@ private slots:
     void terminalPollingAndTaskSignalDeduplicate() {
         QFETCH(QString,state); QFETCH(bool,signalFirst);
         PollSource source; source.holdPoll=true;
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(tasks.state(),QString("waiting_approval"));
         tasks.taskFinished("completed"); QTRY_COMPARE(source.polls.size(),1);
         if(signalFirst) tasks.taskFinished(state);
@@ -459,7 +528,8 @@ private slots:
     }
     void taskSignalBeforePublicationAndLateTaskBinding() {
         PollSource source; source.holdPoll=true; source.state.remove("task_id");
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QVERIFY(tasks.taskId().isEmpty());
         QTRY_COMPARE(source.polls.size(),1);
         source.state["task_id"]=B; Source::json(source.polls.last(),source.state);
@@ -475,7 +545,8 @@ private slots:
     }
     void terminalResponseCanFirstBindTask() {
         PollSource source; source.holdPoll=true; source.state.remove("task_id");
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(source.polls.size(),1);
         source.state["task_id"]=B; source.state["status"]="completed";
         Source::json(source.polls.last(),source.state);
@@ -484,7 +555,8 @@ private slots:
     }
     void stopWhileStatusIsInFlight() {
         PollSource source; source.holdPoll=true; source.holdStop=true; source.state["mode"]="chat"; source.state.remove("task_id");
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(source.polls.size(),1);
         QVERIFY(!c.busy()); QVERIFY(!c.loading()); c.stopAnswer(); QTRY_COMPARE(source.stops,1); QVERIFY(c.busy());
         auto stale=source.state; stale["status"]="completed"; stale["context_notice"]="obsolete";
@@ -500,7 +572,8 @@ private slots:
     void stalePollCannotReleaseNewPoll() {
         QFETCH(QString,change);
         PollSource source,other; source.holdPoll=true; other.holdPoll=true;
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(tasks.state(),QString("waiting_approval"));
         tasks.taskFinished("completed"); QTRY_COMPARE(source.polls.size(),1);
         const auto old=source.polls.first(); auto stale=source.state; stale["status"]="completed"; stale["context_notice"]="obsolete";
@@ -520,7 +593,8 @@ private slots:
     }
     void pollingErrorsAndDeletion() {
         PollSource source; source.holdPoll=true;
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(tasks.state(),QString("waiting_approval"));
         tasks.taskFinished("completed"); QTRY_COMPARE(source.polls.size(),1); Source::json(source.polls.last(),{},503);
         QTRY_VERIFY(!c.error().isEmpty()); QVERIFY(c.active()); QVERIFY(!c.busy()); QCOMPARE(source.details.size(),1);
@@ -534,7 +608,8 @@ private slots:
     }
     void deletingConversationDiscardsHeldPoll() {
         PollSource source; source.holdPoll=true;
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(tasks.state(),QString("waiting_approval"));
         tasks.taskFinished("completed"); QTRY_COMPARE(source.polls.size(),1);
         c.showMcpTools(B); QTRY_VERIFY(!c.mcpToolsLoading()); c.prepareDelete(A,"delete"); QTRY_VERIFY(!c.deleteLoading());
@@ -549,7 +624,8 @@ private slots:
         source.handle=[&](const Request &r) {
             if(r.path.endsWith("/mcp-tools")) records.append(r); else normal(r);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QTRY_COMPARE(tasks.state(),QString("waiting_approval"));
         c.showMcpTools(B); QTRY_COMPARE(records.size(),1);
         tasks.taskFinished("completed"); QTRY_COMPARE(source.polls.size(),1);
@@ -570,7 +646,8 @@ private slots:
                 source.details.append(r); Source::json(r,{{"conversation_id",A},{"messages",QJsonArray{}}});
             } else normal(r);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.sendMessage("uncertain admission");
         QTRY_COMPARE(posts,1); QTRY_VERIFY(!c.busy()); QTRY_COMPARE(source.details.size(),2); QTRY_VERIFY(!c.loading());
         QVERIFY(c.retryPending()); QVERIFY(!c.active()); accepted=true;
@@ -579,7 +656,8 @@ private slots:
     }
     void terminalOnOlderPageStillFetchesLatestMessages() {
         PollSource source;
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QVERIFY(c.hasMoreMessages());
         source.state["status"]="completed"; c.refresh(true);
         QTRY_COMPARE(source.details.size(),3); QTRY_VERIFY(!c.loading()); QVERIFY(!c.active());
@@ -596,7 +674,8 @@ private slots:
                     {"last_request",QJsonObject{{"request_id",A},{"tool_activity",QJsonObject{{"status","running"},{"server_name","查询"},{"tool_name","search"}}}}}});
             } else Source::json(r,{{"items",QJsonArray{}},{"total",0}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading());
         QCOMPARE(c.toolActivity().value("status").toString(),QString("running"));
         c.showMcpTools(A); QTRY_COMPARE(delayed.size(),1);
@@ -623,7 +702,8 @@ private slots:
             else if(r.path.startsWith("/api/v1/conversations/")) Source::json(r,{{"conversation_id",A},{"messages",QJsonArray{}}});
             else Source::json(r,{{"items",QJsonArray{}},{"total",0}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks); c.selectConversation(A);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks); c.selectConversation(A);
         QTRY_VERIFY(!c.loading()); c.showMcpTools(A); QTRY_COMPARE(delayed.size(),1);
         Source::json(delayed[0],{{"error",QJsonObject{{"message","读取失败"}}}},503);
         QTRY_VERIFY(!c.mcpToolsLoading()); QVERIFY(c.mcpToolsError().contains("读取失败"));
@@ -651,7 +731,7 @@ private slots:
                 ++mutations; Source::json(r,{{"server_id",A},{"revision",2},{"enabled",false}});
             } else Source::json(r,{{"error",QJsonObject{{"code","route_not_found"}}}},404);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url()); McpController mcp(connection);
         QVERIFY(!mcp.property("statusKnown").toBool());
         mcp.open(); QTRY_VERIFY(!mcp.loading());
         QVERIFY(mcp.property("statusKnown").toBool()); QVERIFY(!mcp.disabled()); QCOMPARE(mcp.items().size(),1);
@@ -689,7 +769,7 @@ private slots:
                     {"tools",QJsonArray{QJsonObject{{"name","query"},{"compatible",true}}}},{"default_selected_tools",QJsonArray{"query"}}});
             } else Source::json(r,{{"error",QJsonObject{{"code","unexpected"}}}},404);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks); mcp.open(); QTRY_VERIFY(!mcp.loading());
+        BackendConnection connection; connection.setBaseUrl(source.url()); McpController mcp(connection); mcp.open(); QTRY_VERIFY(!mcp.loading());
         mcp.edit(); mcp.setKind(1); const auto id=mcp.serverId();
         for(const auto &endpoint:QStringList{"http://public.example/mcp","https://user:pass@example.com/mcp","https://example.com/mcp?key=value","https://example.com/mcp#fragment"}) {
             mcp.update("endpoint",endpoint); const auto count=source.requests.size(); mcp.probe();
@@ -728,7 +808,7 @@ private slots:
             else if(r.method=="PUT") { ++puts; savedId=QString::fromUtf8(r.path.mid(r.path.lastIndexOf('/')+1)); Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503); }
             else Source::json(r,{{"error",QJsonObject{{"code",missing?"unknown_mcp_server":"api_internal"}}}},missing?404:503);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks); mcp.open(); QTRY_VERIFY(!mcp.loading());
+        BackendConnection connection; connection.setBaseUrl(source.url()); McpController mcp(connection); mcp.open(); QTRY_VERIFY(!mcp.loading());
         mcp.edit(); mcp.setKind(1); mcp.update("endpoint","http://127.0.0.1/mcp"); const auto id=mcp.serverId();
         mcp.probe(); QTRY_COMPARE(mcp.state(),QString("discovered")); mcp.selectTool("query",true); mcp.save();
         QTRY_VERIFY(mcp.uncertain()); QTRY_VERIFY(!mcp.editorBusy()); QCOMPARE(savedId,id); QCOMPARE(puts,1);
@@ -736,6 +816,43 @@ private slots:
         QCOMPARE(mcp.draft().value("connection").toMap().value("endpoint").toString(),QString("http://127.0.0.1/mcp"));
         QCOMPARE(puts,1); QVERIFY(mcp.editorError().contains("确认保存状态"));
         missing=true; mcp.resolveSave(); QTRY_VERIFY(!mcp.editorBusy()); QVERIFY(!mcp.uncertain()); QCOMPARE(mcp.serverId(),id); QCOMPARE(mcp.state(),QString("editing"));
+    }
+    void mcpSwitchWhileSaving() {
+        Source first, second;
+        Request heldSave;
+        first.handle=[&](const Request &r) {
+            if(r.path.endsWith("/servers")) Source::json(r,{{"items",QJsonArray{}},{"disabled",false}});
+            else if(r.path.endsWith("/presets")) Source::json(r,{{"items",QJsonArray{}}});
+            else if(r.path.endsWith("/probe")) Source::json(r,{{"connection",r.body.value("connection")},{"catalog_hash","sha256:test"},
+                {"tools",QJsonArray{QJsonObject{{"name","query"},{"compatible",true}}}},{"default_selected_tools",QJsonArray{"query"}}});
+            else if(r.method=="PUT") heldSave=r;
+            else QFAIL("Unexpected request to the old backend");
+        };
+        const QJsonArray newItems{QJsonObject{{"server_id",B},{"name","new"}}};
+        second.handle=[&](const Request &r) {
+            QCOMPARE(r.method,QByteArray("GET"));
+            if(r.path.endsWith("/servers")) Source::json(r,{{"items",newItems},{"disabled",false}});
+            else if(r.path.endsWith("/presets")) Source::json(r,{{"items",QJsonArray{}}});
+            else QFAIL("Unexpected save recovery request to the new backend");
+        };
+        BackendConnection connection;
+        connection.setBaseUrl(first.url());
+        McpController mcp(connection);
+        QSignalSpy saved(&mcp,&McpController::saved);
+        mcp.open(); QTRY_VERIFY(!mcp.loading());
+        mcp.edit(); mcp.setKind(1); mcp.update("endpoint","http://127.0.0.1/mcp");
+        mcp.probe(); QTRY_VERIFY(mcp.canSave());
+        const auto oldId=mcp.serverId();
+        mcp.save(); QTRY_VERIFY(heldSave.socket);
+
+        connection.setBaseUrl(second.url());
+        Source::json(heldSave,{{"server_id",oldId},{"revision",1},{"enabled",true}});
+        QTRY_VERIFY(!mcp.loading());
+        QCOMPARE(saved.size(),0);
+        QCOMPARE(mcp.items(),newItems.toVariantList());
+        QVERIFY(!mcp.editorOpen()); QVERIFY(!mcp.pendingSave());
+        QVERIFY(mcp.draft().isEmpty()); QVERIFY(mcp.tools().isEmpty());
+        QVERIFY(mcp.notice().contains("旧后端的上次保存结果待确认"));
     }
     void mcpClosedAndBackendGenerations() {
         Source oldSource,newSource; QList<Request> delayed;
@@ -745,13 +862,13 @@ private slots:
             else delayed.append(r);
         };
         newSource.handle=[](const Request &r) { Source::json(r,{{"items",QJsonArray{}},{"disabled",true}}); };
-        TaskController tasks; tasks.setBaseUrl(oldSource.url()); McpController mcp(&tasks); mcp.open(); QTRY_VERIFY(!mcp.loading());
+        BackendConnection connection; connection.setBaseUrl(oldSource.url()); McpController mcp(connection); mcp.open(); QTRY_VERIFY(!mcp.loading());
         mcp.edit(); mcp.setKind(1); mcp.update("endpoint","http://127.0.0.1/mcp"); mcp.probe(); mcp.probe();
         QTRY_COMPARE(delayed.size(),1); mcp.closeEditor(); mcp.edit(); const auto next=mcp.serverId();
         Source::json(delayed.first(),{{"tools",QJsonArray{QJsonObject{{"name","late"},{"compatible",true}}}}});
         QTest::qWait(40); QCOMPARE(mcp.serverId(),next); QVERIFY(mcp.tools().isEmpty());
         mcp.setKind(1); mcp.update("endpoint","http://127.0.0.1/mcp"); mcp.probe(); QTRY_COMPARE(delayed.size(),2);
-        tasks.setBaseUrl(newSource.url()); QTRY_VERIFY(!mcp.loading()); QVERIFY(mcp.disabled()); QVERIFY(!mcp.editorOpen());
+        connection.setBaseUrl(newSource.url()); QTRY_VERIFY(!mcp.loading()); QVERIFY(mcp.disabled()); QVERIFY(!mcp.editorOpen());
         Source::json(delayed.last(),{{"tools",QJsonArray{}}}); QTest::qWait(40); QVERIFY(mcp.tools().isEmpty());
         const auto count=newSource.requests.size(); mcp.edit(); mcp.probe(); mcp.save(); mcp.test(A,1); mcp.setEnabled(A,1,true);
         QCOMPARE(newSource.requests.size(),count); QVERIFY(!mcp.editorOpen());
@@ -781,7 +898,8 @@ private slots:
         const auto request=api.getTask(A);
         QTRY_COMPARE(errors.size(),1); QCOMPARE(replies.size(),0);
         QCOMPARE(errors[0][0].toULongLong(),request); QCOMPARE(errors[0][3].toInt(),status); QCOMPARE(errors[0][4].toString(),code);
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.refreshHistory(); QTRY_VERIFY(!c.historyLoading()); QVERIFY2(c.error().contains(message),qPrintable(c.error()));
         QTest::qWait(30); QCOMPARE(source.requests.size(),2); QCOMPARE(redirect.requests.size(),0); QCOMPARE(errors.size(),1);
     }
@@ -831,7 +949,8 @@ private slots:
         api.getTask(A); QTRY_COMPARE(errors.size()+replies.size(),1);
         if(size>64*1024*1024) { QCOMPARE(errors.size(),1); QCOMPARE(errors[0][4].toString(),QString("response_limit")); }
         else { QCOMPARE(replies.size(),1); QVERIFY(!replies[0][3].toJsonObject().value("padding").toString().isEmpty()); }
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.refreshHistory(); QTRY_VERIFY(!c.historyLoading());
         if(size>16*1024*1024) QVERIFY2(c.error().contains("16 MiB"),qPrintable(c.error()));
         else QVERIFY2(c.error().isEmpty(),qPrintable(c.error()));
@@ -854,7 +973,8 @@ private slots:
         QSignalSpy errors(&api,&AgentApiClient::requestError), replies(&api,&AgentApiClient::responseReceived);
         api.getTask(A); QTRY_COMPARE(replies.size(),1); QCOMPARE(errors.size(),0);
         QCOMPARE(replies[0][3].toJsonObject().value("note").toString(),note);
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.refreshHistory(); QTRY_VERIFY(!c.historyLoading()); QVERIFY2(c.error().isEmpty(),qPrintable(c.error()));
         QCOMPARE(source.requests.size(),2);
     }
@@ -873,7 +993,8 @@ private slots:
                 Source::json(r,{{"conversation_id",id},{"repository_path",id==A?"C:/FixtureA":"C:/FixtureB"},{"messages",QJsonArray{}}});
             }
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks); auto *m=c.memory();
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks); auto *m=c.memory();
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); m->open(); QTRY_VERIFY(oldMemories.socket); QTRY_VERIFY(oldSummary.socket);
         c.selectConversation(B); QTRY_VERIFY(!c.loading()); QTRY_VERIFY(!m->loading());
         QCOMPARE(m->items().first().toMap().value("content").toString(),QString("项目乙偏好"));
@@ -890,7 +1011,8 @@ private slots:
             else if(r.path.endsWith("/context")) Source::json(r,{{"summary",QJsonValue::Null},{"enabled",true},{"revision",0}});
             else Source::json(r,{{"conversation_id",r.path.endsWith(A.toUtf8())?A:B},{"repository_path","C:/Fixture"},{"messages",QJsonArray{}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks); auto *m=c.memory(); QSignalSpy saved(m,&MemoryController::saved);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks); auto *m=c.memory(); QSignalSpy saved(m,&MemoryController::saved);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); m->open(); QTRY_VERIFY(!m->loading());
         m->save({},"甲的记忆","project",0,true); m->save({},"重复点击","global",0,false);
         QTRY_COMPARE(mutations.size(),1); QVERIFY(m->busy()); QCOMPARE(mutations[0].body.value("source_conversation_id").toString(),A);
@@ -914,7 +1036,8 @@ private slots:
             else Source::json(r,{{"conversation_id",A},{"title","待删除"},{"messages",QJsonArray{QJsonObject{{"message_id",1},{"role","user"},{"content","删除后不能复现"}}}},
                 {"active_request",QJsonObject{{"request_id",A},{"mode","task"},{"task_id",B},{"status","running"}}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.refreshHistory(); QTRY_COMPARE(tasks.state(),"waiting_approval"); QTRY_COMPARE(tasks.eventSequence(),1);
         QTRY_VERIFY(!c.historyLoading()); QCOMPARE(c.historyTotal(),1);
         c.prepareDelete(A,"待删除"); QTRY_VERIFY(!c.deleteLoading()); QVERIFY(c.deleteActive());
@@ -948,7 +1071,8 @@ private slots:
                 Source::json(r,detail);
             }
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.sendMessage("在途请求"); QTRY_VERIFY(post.socket);
         c.refresh(); QTRY_VERIFY(oldDetail.socket); c.refreshHistory(); QTRY_VERIFY(oldPage.socket);
         c.prepareDelete(A,"待删除"); QTRY_VERIFY(!c.deleteLoading()); c.confirmDelete(); QTRY_VERIFY(removal.socket);
@@ -974,7 +1098,8 @@ private slots:
             else if(r.path.startsWith("/api/v1/conversations?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
             else Source::json(r,{{"conversation_id",A},{"title","运行状态变化"},{"messages",QJsonArray{}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.prepareDelete(A,"运行状态变化"); QTRY_VERIFY(!c.deleteLoading());
         QVERIFY(!c.deleteActive()); c.confirmDelete(); QTRY_VERIFY(!c.deleting());
         QCOMPARE(deletes.size(),1); QVERIFY(c.deleteActive()); QVERIFY(!c.deleteError().isEmpty()); QVERIFY(!removed);
@@ -997,7 +1122,8 @@ private slots:
                 else Source::json(r,{{"items",removed?QJsonArray{item(A)}:QJsonArray{item(A),item(B)}},{"total",removed?2:3},{"next_cursor","p1.fixture"}});
             } else Source::json(r,{{"conversation_id",r.path.endsWith(A.toUtf8())?A:B},{"messages",QJsonArray{}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.refreshHistory(); QTRY_COMPARE(c.history().size(),2); QTRY_VERIFY(!c.loading());
         c.refreshHistory(true); QTRY_COMPARE(c.history().size(),3); QCOMPARE(more,1);
         c.prepareDelete(B,"分页边界"); QTRY_VERIFY(!c.deleteLoading()); c.confirmDelete(); QTRY_VERIFY(!c.deleting());
@@ -1012,7 +1138,8 @@ private slots:
             else if(r.path=="/api/v1/conversations/"+A.toUtf8()) old=r;
             else Source::json(r,{{"conversation_id",B},{"title","第二个对话"},{"messages",QJsonArray{QJsonObject{{"message_id",2},{"role","assistant"},{"content","第二个回答"}}}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(old.socket);
         c.selectConversation(B); QTRY_COMPARE(c.messages()->count(),1);
         QCOMPARE(c.title(),QString("第二个对话"));
@@ -1033,7 +1160,8 @@ private slots:
                 Source::json(r,detail);
             } else Source::json(r,{{"items",QJsonArray{}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); QCOMPARE(c.mode(),"chat");
         QCOMPARE(c.toolMode(),QString("auto")); c.setToolMode("invalid"); QCOMPARE(c.toolMode(),QString("auto"));
         c.setToolMode("web"); QCOMPARE(c.toolMode(),QString("web"));
@@ -1054,7 +1182,8 @@ private slots:
             if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
             else Source::json(r,{{"conversation_id",A},{"title","旧工作对话"},{"messages",QJsonArray{}},{"repository_path","C:/fixture"}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading());
         QSignalSpy requested(&c,&ConversationController::codeTaskRequested);
         c.setMode("task"); c.sendMessage("修改代码");
@@ -1072,7 +1201,8 @@ private slots:
             else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
             else Source::json(r,{{"conversation_id",r.path.endsWith(A.toUtf8())?A:B},{"title","对话"},{"messages",QJsonArray{}},{"repository_path","C:/fixture"}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController c(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController c(connection,&tasks);
         c.selectConversation(A); QTRY_VERIFY(!c.loading()); c.setMode("chat"); c.sendMessage("修改代码前先解释");
         QTRY_VERIFY(pending.socket); QCOMPARE(pending.body.value("mode"),QJsonValue("chat"));
         c.selectConversation(B); QTRY_VERIFY(!c.loading());
@@ -1348,7 +1478,8 @@ private slots:
             else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
             else Source::json(r,{});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController controller(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController controller(connection,&tasks);
         controller.selectConversation(A); QTRY_VERIFY(stream.socket); QTRY_COMPARE(eventGets,1);
         QTest::qWait(1200); QCOMPARE(polls,0); QCOMPARE(posts,0);
         QCOMPARE(controller.toolActivity(),QVariantMap{});
@@ -1399,7 +1530,8 @@ private slots:
             else if(r.path.startsWith("/api/v1/tasks?")) Source::json(r,{{"items",QJsonArray{}},{"total",0}});
             else Source::json(r,{});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); ConversationController controller(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url());
+        TaskController tasks(connection); ConversationController controller(connection,&tasks);
         controller.selectConversation(A); QTRY_VERIFY(stream.socket); QTRY_COMPARE(controller.messages()->count(),1);
         stream.socket->write(conversationSse(1,"answer_started",{{"segment_id","s1"}})
             +conversationSse(2,"answer_delta",{{"segment_id","s1"},{"previous_revision",1},{"text","旧草稿🙂"}}));
@@ -1590,6 +1722,57 @@ private slots:
         controller.selectTask(B); QTRY_COMPARE(controller.state(),"waiting_approval");
         Source::json(old,snapshot(A,"failed",30)); QTest::qWait(100);
         QCOMPARE(controller.taskId(),B); QCOMPARE(controller.state(),"waiting_approval");
+    }
+    void backendSwitchDetachesLegacyTaskWithoutCancelling() {
+        Source first, second;
+        Request feedback, events, history;
+        first.handle=[&](const Request &r) {
+            if (r.path.endsWith("/events")) { events=r; Source::stream(r,{},false); }
+            else if (r.path.endsWith("/feedback")) feedback=r;
+            else if (r.path.contains('?')) history=r;
+            else Source::json(r,snapshot());
+        };
+        second.handle=[](const Request &r) {
+            if (r.path.endsWith("/events")) Source::stream(r,{},false);
+            else Source::json(r,snapshot(A,"waiting_approval",3,2));
+        };
+        BackendConnection connection;
+        TaskController tasks(connection);
+        QSignalSpy changed(&tasks,&TaskController::baseUrlChanged);
+        tasks.setBaseUrl(first.url());
+        QCOMPARE(connection.baseUrl(),first.url());
+        tasks.selectTask(A);
+        QTRY_VERIFY(tasks.canFeedback() && events.socket);
+        tasks.openPlanFeedback();
+        tasks.submitPlanFeedback("first server");
+        tasks.refreshTasks();
+        QTRY_VERIFY(feedback.socket && history.socket);
+        QVERIFY(!tasks.configureBackend("https://remote.example"));
+        QCOMPARE(tasks.baseUrl(),first.url());
+        QVERIFY(tasks.feedbackSending());
+
+        // Queue A's results while the client event loop is still in this call.
+        Source::json(feedback,snapshot(A,"planning",9),202);
+        Source::json(history,{{"total",1},{"items",QJsonArray{snapshot(A)}}});
+        events.socket->write(sseEvent(1,"task_state_changed",{{"state","cancelled"}}));
+        QVERIFY(connection.setBaseUrl(second.url()));
+        QCOMPARE(changed.size(),2);
+        QVERIFY(tasks.taskId().isEmpty() && tasks.repositoryPath().isEmpty());
+        QVERIFY(!tasks.feedbackOpen() && !tasks.busy() && !tasks.historyLoading());
+        QCOMPARE(tasks.connectionState(),"disconnected");
+        QVERIFY(tasks.configureBackend(second.url().toString()));
+        QCOMPARE(changed.size(),2);
+        QVERIFY(!tasks.historyLoading());
+        tasks.selectTask(A); // Same identifier on another server.
+        QTRY_COMPARE(tasks.planVersion(),2);
+        QCOMPARE(tasks.state(),"waiting_approval");
+        QCOMPARE(tasks.eventSequence(),0);
+        QVERIFY(tasks.tasks().isEmpty());
+        QTRY_VERIFY(!events.socket || events.socket->state()==QAbstractSocket::UnconnectedState);
+        QTRY_COMPARE(second.requests.size(),2);
+        for (const auto &r : second.requests) QVERIFY(!r.path.contains('?'));
+        QCOMPARE(first.requests.size(),4);
+        for (const auto &r : first.requests) QVERIFY(!r.path.endsWith("/cancel"));
     }
     void sseHttpErrors_data() {
         QTest::addColumn<int>("status");

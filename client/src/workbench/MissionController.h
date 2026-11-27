@@ -158,12 +158,10 @@ private:
     void requestHistory(bool append);
     void observeMission(const QJsonObject &mission);
     void refreshRecommendations();
-    bool currentRecommendation(quint64 request) const;
     // A synchronous signal may delete the controller or select another mission.
     std::function<bool()> continuation();
     AgentApiClient m_api;
     AgentApiClient m_historyApi;
-    // Pin preview and discard requests to their issuing backend across URL changes.
     AgentApiClient m_creationApi;
     SkillDraftClient m_skillDrafts;
     MissionSnapshotLoader m_loader;
@@ -181,12 +179,9 @@ private:
     QString m_creationError;
     quint64 m_previewRequest = 0;
     quint64 m_previewGeneration = 0;
-    QHash<quint64, QUrl> m_previewBackends;
-    QUrl m_creationPreviewBackend;
     CreationSubmission m_creationSubmission{};
     bool m_creationReady = false;
     QTimer m_recommendationTimer;
-    QUrl m_recommendationBackend;
     QString m_recommendationRepository, m_recommendationError;
     QJsonObject m_recommendationBody;
     quint64 m_recommendationRequest = 0;

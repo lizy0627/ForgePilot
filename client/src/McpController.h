@@ -6,7 +6,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <optional>
-class TaskController;
+class BackendConnection;
 
 // Settings-only client. Draft properties contain no credentials; patches live only
 // for the editor lifetime. Page and editor generations independently fence replies.
@@ -38,7 +38,7 @@ class McpController : public QObject {
     Q_PROPERTY(bool existing READ existing NOTIFY editorChanged)
     Q_PROPERTY(QVariantMap credentialState READ credentialState NOTIFY editorChanged)
 public:
-    explicit McpController(TaskController *tasks);
+    explicit McpController(BackendConnection &connection);
     QVariantList missionChoices() const { return m_missionChoices; }
     bool missionLoading() const { return m_missionLoading; }
     QString missionError() const { return m_missionError; }
@@ -108,7 +108,7 @@ private:
     struct PendingSave { QUrl backend; QString serverId; qint64 baseRevision; };
     std::optional<PendingSave> m_pending;
     bool m_resolving = false, m_hasDiscovered = false;
-    TaskController *m_tasks;
+    BackendConnection &m_connection;
     QNetworkAccessManager m_network;
     QSet<QNetworkReply *> m_pageReplies, m_editorReplies;
     quint64 m_generation = 0, m_editorGeneration = 0;

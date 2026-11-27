@@ -10,6 +10,7 @@ import "workbench/WorkflowTheme.js" as WorkflowTheme
 
 ApplicationWindow {
     id: window
+    required property var backendConnection
     required property var controller
     required property var conversations
     property var mcp: null
@@ -381,7 +382,13 @@ ApplicationWindow {
         }
         onOpened: if (window.mcp) window.mcp.open()
         onClosed: { if (window.mcp) window.mcp.close() }
-        contentItem: SettingsPanel { id: settings; objectName: "settingsPanel"; controller: window.controller; mcp: window.mcp; rag: window.rag; runtimeConfig: window.runtimeConfig; onConfigureRuntimeRequested: { settingsDialog.close(); runtimeConfigDialog.open() } }
+        contentItem: SettingsPanel {
+            id: settings; objectName: "settingsPanel"
+            backendConnection: window.backendConnection
+            serverStatus: window.conversations.serverStatus
+            mcp: window.mcp; rag: window.rag; runtimeConfig: window.runtimeConfig
+            onConfigureRuntimeRequested: { settingsDialog.close(); runtimeConfigDialog.open() }
+        }
         footer: DialogButtonBox { ActionButton { objectName: "closeSettingsButton"; text: "完成"; enabled: !window.mcp || window.mcp.canCloseEditor; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole } }
     }
     Loader { active: !!window.mcp; sourceComponent: Component { McpServerDialog { mcp: window.mcp } } }

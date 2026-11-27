@@ -3,6 +3,7 @@
 #include "Protocol.h"
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QSignalBlocker>
 #include <algorithm>
 
 MissionController::MissionController(QObject *parent) : QObject(parent), m_loader(&m_api), m_approval(&m_api), m_delivery(&m_api)
@@ -14,13 +15,12 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
     m_recommendationTimer.setSingleShot(true);
     m_recommendationTimer.setInterval(250);
     connect(&m_recommendationTimer, &QTimer::timeout, this, [this] {
-        m_recommendationBackend = baseUrl();
-        m_recommendationRequest = m_creationApi.recommendSkills(m_recommendationBody, m_recommendationBackend);
+        m_recommendationRequest = m_creationApi.recommendSkills(m_recommendationBody);
     });
     connect(&m_creationApi, &AgentApiClient::responseReceived, this,
         [this](quint64 id, const QString &operation, const QString &, const QJsonObject &body) {
             if (operation == "mission.recommendations") {
-                if (!currentRecommendation(id)) return;
+                if (id != m_recommendationRequest) return;
                 m_recommendationRequest = 0;
                 m_recommendations = body.value("recommendations").toArray();
                 QPointer<MissionController> guard(this);
@@ -29,12 +29,10 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
                 return;
             }
             if (operation != "mission.preview") return;
-            const auto backend = m_previewBackends.take(id);
             if (id != m_previewRequest) {
-                m_creationApi.discardMissionPreview(body.value("preview_token").toString(), backend);
+                m_creationApi.discardMissionPreview(body.value("preview_token").toString());
                 return;
             }
-            m_creationPreviewBackend = backend;
             ++m_previewGeneration;
             m_previewRequest = 0; m_creationPreview = body; m_creationReady = true; m_creationError.clear();
             emit creationChanged();
@@ -42,7 +40,7 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
     connect(&m_creationApi, &AgentApiClient::requestError, this,
         [this](quint64 id, const QString &operation, const QString &, int status, const QString &, const QString &message) {
             if (operation == "mission.recommendations") {
-                if (!currentRecommendation(id)) return;
+                if (id != m_recommendationRequest) return;
                 m_recommendationRequest = 0;
                 m_recommendationError = status == 404 || status == 405
                     ? tr("当前后端未提供技能推荐，可直接创建普通任务。")
@@ -51,7 +49,6 @@ MissionController::MissionController(QObject *parent) : QObject(parent), m_loade
                 return;
             }
             if (operation != "mission.preview") return;
-            m_previewBackends.remove(id);
             if (id != m_previewRequest) return;
             m_previewRequest = 0; m_creationReady = false; m_creationError = message;
             emit creationChanged();
@@ -180,21 +177,33 @@ void MissionController::setBaseUrl(const QUrl &url)
 {
     if (url == baseUrl()) { if (!m_historyLoaded && !historyLoading()) refreshMissions(); return; }
     if (!Protocol::validBaseUrl(url)) { setError("请输入不含凭据的本机 HTTP 后端地址。"); return; }
-    QPointer<MissionController> guard(this); const auto nextGeneration = m_generation + 1;
-    ++m_historyGeneration; m_historyRequest = 0; m_historyApi.abortPending();
+    QPointer<MissionController> guard(this);
+    const auto currentBackend = [guard, url] { return guard && guard->baseUrl() == url; };
+    ++m_historyGeneration; m_historyRequest = 0;
     m_historyCursor.clear(); m_historyError.clear(); m_historyTotal = 0; m_historyLoaded = false;
+    // Detach every request to the previous backend. Its preview tokens are local
+    // references to forget here; releasing them would issue a DELETE to that server.
+    m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_creationApi.setBaseUrl(url);
+    const bool wasConnected = m_sse.connectionState() != "disconnected";
+    {
+        // Publish the disconnection once all transports point to the new backend.
+        const QSignalBlocker deferNotification(&m_sse);
+        m_sse.setBaseUrl(url);
+    }
+    ++m_previewGeneration; m_previewRequest = 0; m_creationReady = false;
+    m_creationPreview = {}; m_creationError.clear(); m_creationSubmission = {};
     clearSelection();
-    if (!guard || m_generation != nextGeneration) return;
-    const auto current = continuation();
+    if (!currentBackend()) return;
+    if (wasConnected) emit connectionStateChanged();
+    if (!currentBackend()) return;
     m_missions.clear();
-    if (!current()) return;
-    m_api.setBaseUrl(url); m_historyApi.setBaseUrl(url); m_sse.setBaseUrl(url);
+    if (!currentBackend()) return;
     resetSkillContext();
-    if (!current()) return;
-    invalidateCreationPreview(true);
-    if (!current()) return;
+    if (!currentBackend()) return;
+    emit creationChanged();
+    if (!currentBackend()) return;
     emit baseUrlChanged();
-    if (current()) refreshMissions();
+    if (currentBackend()) refreshMissions();
 }
 void MissionController::setRepositoryFilter(const QString &path)
 {
@@ -291,7 +300,7 @@ void MissionController::releaseCreationPreview()
     ++m_previewGeneration;
     m_previewRequest = 0;
     const auto token = m_creationPreview.take("preview_token").toString();
-    if (!token.isEmpty()) m_creationApi.discardMissionPreview(token, m_creationPreviewBackend);
+    if (!token.isEmpty()) m_creationApi.discardMissionPreview(token);
     m_creationReady = false;
 }
 void MissionController::invalidateCreationPreview(bool forget)
@@ -308,8 +317,7 @@ void MissionController::previewCreation(const QVariantMap &request)
     const auto backend = baseUrl();
     invalidateCreationPreview();
     if (!guard || m_previewGeneration != generation || baseUrl() != backend) return;
-    m_previewRequest = m_creationApi.previewMission(QJsonObject::fromVariantMap(request), backend);
-    m_previewBackends.insert(m_previewRequest, backend);
+    m_previewRequest = m_creationApi.previewMission(QJsonObject::fromVariantMap(request));
     emit creationChanged();
 }
 void MissionController::createMission(const QVariantMap &request)
@@ -317,7 +325,7 @@ void MissionController::createMission(const QVariantMap &request)
     if (busy()) return;
     auto body = QJsonObject::fromVariantMap(request);
     const auto token = body.value("preview_token").toString();
-    if (body.contains("preview_token") && (!m_creationReady || m_creationPreviewBackend != baseUrl()
+    if (body.contains("preview_token") && (!m_creationReady
             || token != m_creationPreview.value("preview_token").toString())) {
         m_creationError = tr("预览已失效，请重新预览并确认后提交。");
         emit creationChanged();
@@ -392,11 +400,6 @@ void MissionController::creationFailed(quint64 request, int status, const QStrin
     }
     emit creationChanged();
     if (current()) updateAvailability();
-}
-
-bool MissionController::currentRecommendation(quint64 request) const
-{
-    return request == m_recommendationRequest && baseUrl() == m_recommendationBackend;
 }
 
 void MissionController::updateSkillContext(const QString &description, const QString &taskType,

@@ -299,7 +299,8 @@ private slots:
             QTRY_COMPARE(c.missions()->get(0).value("taskId").toString(), B);
         } else Source::json(held, conflict("skill_selection_changed"), 409);
         QTRY_VERIFY(!c.busy());
-        QTRY_COMPARE(original.discardedPreviews, QStringList{submittedToken});
+        if (change == "backend") QVERIFY(original.discardedPreviews.isEmpty());
+        else QTRY_COMPARE(original.discardedPreviews, QStringList{submittedToken});
         QVERIFY(other.discardedPreviews.isEmpty());
         QVERIFY(c.creationError().isEmpty());
         QVERIFY(c.error().isEmpty());
@@ -316,6 +317,47 @@ private slots:
         }
         QCOMPARE(original.posts("/missions"), 1);
         QCOMPARE(other.posts("/missions"), 0);
+    }
+    void backendSwitchDetachesPreviewAndEventStream_data()
+    {
+        QTest::addColumn<bool>("selectNext");
+        QTest::newRow("clear-selection") << false;
+        QTest::newRow("select-during-notification") << true;
+    }
+    void backendSwitchDetachesPreviewAndEventStream()
+    {
+        QFETCH(bool, selectNext);
+        Fixture original, next;
+        next.current = mission(B);
+        Request preview;
+        original.intercept = [&](const Request &r) {
+            if (r.path != "/api/v2/missions/preview") return false;
+            preview = r;
+            return true;
+        };
+        MissionController c;
+        c.setBaseUrl(original.source.url());
+        c.selectMission(A);
+        QTRY_VERIFY(c.synchronized() && !original.streams.isEmpty());
+        c.previewCreation({{"repository_path", "D:/repo"}});
+        QTRY_VERIFY(preview.socket);
+        const auto previousRequests = original.source.requests.size();
+
+        if (selectNext) {
+            connect(&c, &MissionController::missionChanged, &c, [&] {
+                if (c.taskId().isEmpty()) c.selectMission(B);
+            }, Qt::SingleShotConnection);
+        }
+        c.setBaseUrl(next.source.url());
+        QCOMPARE(c.taskId(), selectNext ? B : QString{});
+        QVERIFY(!c.previewLoading() && !c.creationReady());
+        QVERIFY(c.creationPreview().isEmpty());
+        QTRY_VERIFY(!preview.socket && !original.streams.first().socket);
+        QTRY_VERIFY(c.historyLoaded());
+        if (selectNext) QTRY_VERIFY(c.synchronized() && !next.streams.isEmpty());
+        QCOMPARE(c.missions()->count(), 1);
+        QCOMPARE(c.missions()->get(0).value("taskId").toString(), B);
+        QCOMPARE(original.source.requests.size(), previousRequests);
     }
     void unavailableRecommendationRouteAllowsPlainCreation()
     {

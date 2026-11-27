@@ -34,10 +34,11 @@ private slots:
                 });
             }
         });
-        TaskController tasks; tasks.setBaseUrl(QUrl(QString("http://127.0.0.1:%1").arg(server.serverPort())));
-        ConversationController c(&tasks); QQmlApplicationEngine engine; QStringList warnings;
+        BackendConnection connection;
+        TaskController tasks(connection); tasks.setBaseUrl(QUrl(QString("http://127.0.0.1:%1").arg(server.serverPort())));
+        ConversationController c(connection,&tasks); QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError> &errors){for(const auto &e:errors) warnings.append(e.toString());});
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"width",860},{"height",640}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"width",860},{"height",640}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window); QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -61,7 +62,8 @@ private slots:
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join('\n')));
     }
     void realConversationUi() {
-        TaskController tasks; tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
+        BackendConnection connection;
+        TaskController tasks(connection); tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
         // Legacy tasks are historical fixtures; desktop submissions now create Missions.
         AgentApiClient legacy; QVERIFY(legacy.setBaseUrl(tasks.baseUrl()));
         auto createLegacyTask=[&](const QString &text) {
@@ -70,10 +72,10 @@ private slots:
             if(replies.isEmpty() && !replies.wait(15000)) return QString{};
             return replies.last()[3].toJsonObject().value("task_id").toString();
         };
-        ConversationController c(&tasks);
+        ConversationController c(connection,&tasks);
         QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError>&errors){ for(const auto &error:errors) warnings.append(error.toString()); });
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"developmentTest",true}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"developmentTest",true}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY2(!engine.rootObjects().isEmpty(),qPrintable(warnings.join('\n')));
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window); QVERIFY(QTest::qWaitForWindowExposed(window));

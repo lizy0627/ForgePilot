@@ -1,4 +1,5 @@
 #pragma once
+#include "BackendConnection.h"
 #include "AgentApiClient.h"
 #include "SseClient.h"
 #include "RecordListModel.h"
@@ -47,8 +48,9 @@ class TaskController : public QObject {
     Q_PROPERTY(QString traceDetailText READ traceDetailText NOTIFY traceChanged)
 public:
     explicit TaskController(QObject *parent = nullptr);
+    explicit TaskController(BackendConnection &connection, QObject *parent = nullptr);
     ~TaskController() override { m_requests.clear(); m_api.abortPending(); m_sse.disconnect(); }
-    QUrl baseUrl() const { return m_api.baseUrl(); }
+    QUrl baseUrl() const { return m_connection.baseUrl(); }
     void setBaseUrl(const QUrl &url);
     QString repositoryPath() const { return m_repository; }
     void setRepositoryPath(const QString &path);
@@ -128,6 +130,8 @@ signals:
     void traceChanged();
     void feedbackChanged();
 private:
+    void initialize();
+    void resetBackend();
     void resetSelection();
     void watch(quint64 request, bool mutation = false);
     bool applySnapshot(const QJsonObject &body);
@@ -136,6 +140,7 @@ private:
     void setError(const QString &message);
     void clearFeedback();
     void projectEvent(const QString &id,const QJsonObject &payload);
+    BackendConnection &m_connection;
     AgentApiClient m_api;
     SseClient m_sse;
     RecordListModel m_traces;

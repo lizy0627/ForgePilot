@@ -154,10 +154,11 @@ struct Fixture {
 };
 
 struct Ui {
-    TaskController tasks;
-    ConversationController conversations{&tasks};
+    BackendConnection connection;
+    TaskController tasks{connection};
+    ConversationController conversations{connection,&tasks};
     MissionController missions;
-    McpController mcp{&tasks};
+    McpController mcp{connection};
     QQmlApplicationEngine engine;
     QQuickWindow *window = nullptr;
     QStringList warnings;
@@ -167,7 +168,7 @@ struct Ui {
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings.append(error.toString());
         });
-        QVariantMap initial{{"controller", QVariant::fromValue(&tasks)},
+        QVariantMap initial{{"backendConnection", QVariant::fromValue(&connection)}, {"controller", QVariant::fromValue(&tasks)},
             {"conversations", QVariant::fromValue(&conversations)},
             {"missions", QVariant::fromValue(&missions)}, {"width", initialWidth}, {"height", initialHeight}};
         if (withMcp) initial.insert("mcp", QVariant::fromValue(&mcp));
@@ -248,6 +249,23 @@ private slots:
     void initTestCase()
     {
         configureClientUi(*qobject_cast<QGuiApplication *>(QCoreApplication::instance()));
+    }
+    void chatDraftsStayWithTheirBackend()
+    {
+        Fixture first, second;
+        Ui ui(first);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        auto *prompt=ui.find("conversationPrompt"); QVERIFY(prompt);
+        ui.conversations.selectConversation(A);
+        prompt->setProperty("text","draft on first");
+        ui.connection.setBaseUrl(second.source.url());
+        ui.conversations.selectConversation(A);
+        QCOMPARE(prompt->property("text").toString(),QString());
+        prompt->setProperty("text","draft on second");
+        ui.connection.setBaseUrl(first.source.url());
+        ui.conversations.selectConversation(A);
+        QCOMPARE(prompt->property("text").toString(),QString("draft on first"));
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
     void responsiveLayout_data()
     {

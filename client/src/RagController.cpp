@@ -51,7 +51,12 @@ void RagController::setUseForTasks(bool enabled)
 void RagController::reset()
 {
     ++m_generation;
-    if (m_request) { m_request->disconnect(this); m_request->abort(); m_request = nullptr; }
+    if (m_request) {
+        m_request->disconnect(this);
+        m_request->abort();
+        m_request->deleteLater();
+        m_request = nullptr;
+    }
     stopEvents();
     m_recover.stop(); m_poll.stop();
     m_repositoryId.clear(); m_operationId.clear(); m_revision = 0;
@@ -64,14 +69,14 @@ void RagController::reset()
 void RagController::setBaseUrl(const QUrl &url)
 {
     if (url == m_base || !Protocol::validBaseUrl(url)) return;
-    reset(); m_base = url; emit changed();
+    m_base = url; reset();
     startPolling();
 }
 
 void RagController::setRepositoryPath(const QString &path)
 {
     if (path == m_repository) return;
-    reset(); m_repository = path; emit changed();
+    m_repository = path; reset();
     startPolling();
 }
 
@@ -110,34 +115,37 @@ void RagController::send(const QByteArray &method, const QString &path, const QJ
 {
     QUrl url(m_base); url.setPath(path);
     if (method != "POST") setRepositoryQuery(url, m_repository);
-    clearError();
     const auto generation = m_generation;
     auto *reply = JsonHttp::send(m_network, this, method, url, body, 1024 * 1024,
         [this, generation, method](QNetworkReply *completed, const JsonHttp::Response &response) {
             if (generation != m_generation || completed != m_request) return;
-            m_request = nullptr; emit changed();
+            m_request = nullptr;
             const auto error = response.body.value("error").toObject();
             if (response.exceededLimit || response.invalidJson || response.status < 200
                     || response.status >= 300 || response.networkError != QNetworkReply::NoError) {
                 m_reachable = response.status > 0;
                 if (method == "GET") m_statusReadFailed = true;
-                emit changed();
                 const auto code = error.value("code").toString("network_error");
                 const auto message = error.value("message").toString("代码索引请求失败，请刷新后重试。");
                 setError(code + "：" + message);
+                if (generation != m_generation) return;
                 if (m_running || !m_reachable) scheduleRecovery();
+                emit changed();
                 return;
             }
             m_reachable = true;
             if (!applyStatus(response.body)) {
-                if (method == "GET") { m_statusReadFailed = true; emit changed(); }
+                if (generation != m_generation) return;
+                if (method == "GET") m_statusReadFailed = true;
+                emit changed();
                 return;
             }
-            if (m_statusReadFailed) { m_statusReadFailed = false; emit changed(); }
+            m_statusReadFailed = false;
             if (m_running) openEvents();
             else { m_recover.stop(); stopEvents(); }
+            emit changed();
         });
-    m_request = reply; emit changed();
+    m_request = reply; clearError(); emit changed();
 }
 
 bool RagController::applyStatus(const QJsonObject &body)
@@ -183,7 +191,6 @@ bool RagController::applyStatus(const QJsonObject &body)
     m_total = body.value("total_files").toInt(); m_processed = body.value("processed").toInt();
     m_lastIndexed = indexedAt.toString();
     m_statusErrorCode = statusError.toString();
-    emit changed();
     return true;
 }
 
@@ -216,10 +223,12 @@ void RagController::openEvents()
     connect(reply, &QIODevice::readyRead, this, [this, reply, generation] { readEvents(reply, generation); });
     connect(reply, &QNetworkReply::finished, this, [this, reply, generation] {
         if (generation != m_generation || reply != m_stream) return;
-        readEvents(reply, generation); m_stream = nullptr; reply->deleteLater();
+        readEvents(reply, generation);
+        if (generation != m_generation || reply != m_stream) return;
+        m_stream = nullptr; reply->deleteLater();
         if (m_running) {
-            setError("代码索引进度连接中断，正在重新连接。");
             scheduleRecovery();
+            setError("代码索引进度连接中断，正在重新连接。");
         }
     });
 }
@@ -230,8 +239,9 @@ void RagController::readEvents(QNetworkReply *reply, quint64 generation)
     if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) return;
     const auto frames = m_parser.feed(reply->readAll());
     if (!m_parser.error().isEmpty()) {
+        stopEvents(); scheduleRecovery();
         setError("代码索引进度流格式无效，正在通过状态查询恢复。");
-        stopEvents(); scheduleRecovery(); return;
+        return;
     }
     for (const auto &frame : frames) {
         if (frame.event != "rag_index_progress") continue;
@@ -243,11 +253,17 @@ void RagController::readEvents(QNetworkReply *reply, quint64 generation)
         const auto expectedId = operation + ':' + QString::number(revision);
         if (error.error != QJsonParseError::NoError || !document.isObject()
                 || operation.isEmpty() || operation != m_operationId || frame.id != expectedId) {
+            stopEvents(); scheduleRecovery();
             if (m_error.isEmpty()) setError("代码索引进度响应格式无效，正在通过状态查询恢复。");
-            stopEvents(); scheduleRecovery(); return;
+            return;
         }
         if (revision <= m_revision) continue;
-        if (!applyStatus(body)) { stopEvents(); scheduleRecovery(); return; }
-        if (!m_running) { stopEvents(); return; }
+        if (!applyStatus(body)) {
+            if (generation == m_generation) { stopEvents(); scheduleRecovery(); }
+            return;
+        }
+        if (!m_running) stopEvents();
+        emit changed();
+        if (generation != m_generation || reply != m_stream) return;
     }
 }

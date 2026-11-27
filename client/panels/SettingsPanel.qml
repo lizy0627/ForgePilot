@@ -6,7 +6,8 @@ import "RagUi.js" as RagUi
 
 ColumnLayout {
     id: root
-    required property var controller
+    required property var backendConnection
+    property string serverStatus: ""
     property var mcp: null
     property var rag: null
     property var runtimeConfig: null
@@ -37,19 +38,19 @@ ColumnLayout {
                 Layout.fillWidth: true; title: "连接"; subtitle: "本机后端"
                 RowLayout {
                     Layout.fillWidth: true
-                    AppTextField { id: server; objectName: "serverInput"; text: root.controller.baseUrl; placeholderText: "http://127.0.0.1:8765"; Layout.fillWidth: true; selectByMouse: true }
-                    ActionButton { objectName: "connectButton"; text: "连接"; enabled: !root.controller.busy; onClicked: root.controller.configureBackend(server.text) }
+                    AppTextField { id: server; objectName: "serverInput"; text: root.backendConnection.baseUrl.toString(); placeholderText: "http://127.0.0.1:8765"; Layout.fillWidth: true; selectByMouse: true }
+                    ActionButton { objectName: "connectButton"; text: "连接"; onClicked: root.backendConnection.configureBackend(server.text) }
                 }
                 StatusBadge {
-                    id: serverStatusBadge
-                    status: root.controller.serverStatus; Layout.alignment: Qt.AlignLeft
+                    visible: root.serverStatus.length > 0
+                    status: root.serverStatus; Layout.alignment: Qt.AlignLeft
                     Layout.maximumWidth: Math.max(120, root.width - Theme.spaceLg * 4)
                     elide: Text.ElideRight
                 }
-                LongText {
-                    visible: serverStatusBadge.truncated || root.controller.serverStatus.length > 60
-                    Layout.fillWidth: true; title: "完整连接状态"
-                    text: root.controller.serverStatus; monospace: false; maximumHeight: 150
+                Label {
+                    objectName: "connectionError"; visible: text.length > 0
+                    Layout.fillWidth: true; color: Theme.danger; wrapMode: Text.Wrap
+                    text: root.backendConnection.error
                 }
                 Label { text: "连接地址仅在本次运行中生效。切换后端或关闭窗口不会取消任务；模型配置由后端管理。"; color: Theme.muted; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: Theme.fontSizeSm }
             }

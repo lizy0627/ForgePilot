@@ -4,8 +4,22 @@
 #include <QJsonDocument>
 #include <QSet>
 
-TaskController::TaskController(QObject *parent) : QObject(parent)
+TaskController::TaskController(QObject *parent) : QObject(parent), m_connection(*new BackendConnection(this))
 {
+    initialize();
+}
+
+TaskController::TaskController(BackendConnection &connection, QObject *parent)
+    : QObject(parent), m_connection(connection)
+{
+    initialize();
+}
+
+void TaskController::initialize()
+{
+    m_api.setBaseUrl(baseUrl());
+    m_sse.setBaseUrl(baseUrl());
+    connect(&m_connection, &BackendConnection::baseUrlChanged, this, &TaskController::resetBackend);
     connect(this, &TaskController::taskChanged, this, &TaskController::feedbackChanged);
     connect(&m_api, &AgentApiClient::responseReceived, this,
         [this](quint64 request, const QString &operation, const QString &requestedTask, const QJsonObject &body) {
@@ -101,9 +115,15 @@ void TaskController::setError(const QString &message)
 { if (m_error != message) { m_error = message; emit errorChanged(); } }
 void TaskController::setBaseUrl(const QUrl &url)
 {
-    if (url == baseUrl()) return;
-    if (!Protocol::validBaseUrl(url)) { setError("请使用本机 HTTP 地址，不包含凭据、路径、查询参数或片段。"); return; }
-    resetSelection(); m_api.setBaseUrl(url); m_sse.setBaseUrl(url);
+    if (!m_connection.setBaseUrl(url)) setError(m_connection.error());
+}
+
+void TaskController::resetBackend()
+{
+    resetSelection();
+    m_api.setBaseUrl(baseUrl()); m_sse.setBaseUrl(baseUrl());
+    m_conversationFilter.clear();
+    setRepositoryPath({});
     m_serverStatus="disconnected"; emit serverStatusChanged();
     m_tasks.clear(); m_historyCursor.clear(); m_historyTotal=0; emit tasksChanged(); emit baseUrlChanged();
 }
@@ -140,9 +160,9 @@ void TaskController::openExecutionView()
 { if(!m_taskId.isEmpty() && !Protocol::terminal(state()) && !m_snapshot.value("read_only").toBool()) { m_historyReadOnly=false; emit taskChanged(); } }
 bool TaskController::configureBackend(const QString &url)
 {
-    const QUrl parsed(url);
-    if(!Protocol::validBaseUrl(parsed)) { setError("请输入本机 HTTP 地址，例如 http://127.0.0.1:8765。"); return false; }
-    setBaseUrl(parsed); clearError(); refreshTasks(); return true;
+    const bool valid = m_connection.configureBackend(url);
+    setError(m_connection.error());
+    return valid;
 }
 void TaskController::approvePlan()
 {

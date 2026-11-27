@@ -106,6 +106,10 @@ ColumnLayout {
     }
     Connections {
         target: root.conversations
+        function onBackendChanged() {
+            confirm.close(); rename.close(); fullTitle.close()
+            nameInput.clear(); root.actionId = ""; root.viewedId = ""; root.viewedTitle = ""
+        }
         function onConversationDeleted(id) {
             if (id === root.actionId) { confirm.close(); rename.close(); nameInput.clear(); root.actionId = "" }
         }

@@ -10,13 +10,15 @@ Item {
     required property var conversations
     required property var controller
     property var drafts: ({})
-    property string draftId: ""
+    property string selectedDraftKey: ""
     property bool followLatest: true
     property var projectDraft: null
     readonly property bool workMode: conversations.mode === "task"
     readonly property real columnWidth: Math.max(240, Math.min(780, width - Theme.spaceXl * 2))
     signal openWorkDetails()
     signal convertToAgentTask(string selectedText, string sourceLabel)
+    function draftKey(id) { return conversations.baseUrl.toString() + "/" + id }
+    Component.onCompleted: selectedDraftKey = draftKey(conversations.conversationId)
     function chooseProject(url) {
         if (!conversations.conversationId) projectDraft = prompt.text
         conversations.chooseRepository(url)
@@ -29,19 +31,24 @@ Item {
     }
     Connections {
         target: root.conversations
+        function onBackendChanged() {
+            root.projectDraft = null
+            folder.close()
+        }
         function onSelectionChanged() {
-            root.drafts[root.draftId] = prompt.text
-            root.draftId = root.conversations.conversationId
+            root.drafts[root.selectedDraftKey] = prompt.text
+            root.selectedDraftKey = root.draftKey(root.conversations.conversationId)
             root.followLatest = true
-            prompt.text = root.projectDraft !== null ? root.projectDraft : root.drafts[root.draftId] || ""
+            prompt.text = root.projectDraft !== null ? root.projectDraft : root.drafts[root.selectedDraftKey] || ""
             root.projectDraft = null
         }
         function onChanged() { if (!root.conversations.busy && !root.conversations.conversationId) root.projectDraft = null }
         function onSubmitted(id, sentPrompt) {
             if (id === root.conversations.conversationId && prompt.text === sentPrompt) prompt.clear()
-            if (root.drafts[id] === sentPrompt) root.drafts[id] = ""
+            const key = root.draftKey(id)
+            if (root.drafts[key] === sentPrompt) root.drafts[key] = ""
         }
-        function onConversationDeleted(id) { delete root.drafts[id] }
+        function onConversationDeleted(id) { delete root.drafts[root.draftKey(id)] }
     }
     FolderDialog {
         id: folder; objectName: "conversationFolderDialog"; title: "选择工作项目"; options: FolderDialog.DontUseNativeDialog

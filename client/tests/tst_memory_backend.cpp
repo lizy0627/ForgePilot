@@ -12,11 +12,12 @@ class MemoryBackendTest:public QObject {
 private slots:
     void realMemoryUi() {
         configureClientUi(*qobject_cast<QGuiApplication*>(QCoreApplication::instance()));
-        TaskController tasks; tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
-        ConversationController c(&tasks); auto *memory=c.memory();
+        BackendConnection connection;
+        TaskController tasks(connection); tasks.setBaseUrl(QUrl(qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL")));
+        ConversationController c(connection,&tasks); auto *memory=c.memory();
         QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError>&errors){ for(const auto &error:errors) warnings.append(error.toString()); });
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"developmentTest",true}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&tasks)},{"conversations",QVariant::fromValue(&c)},{"developmentTest",true}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY2(!engine.rootObjects().isEmpty(),qPrintable(warnings.join('\n')));
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window); QVERIFY(QTest::qWaitForWindowExposed(window));

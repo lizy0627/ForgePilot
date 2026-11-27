@@ -10,7 +10,8 @@
 
 Q_LOGGING_CATEGORY(conversationStreamLog,"forgepilot.conversation.stream",QtInfoMsg)
 
-ConversationController::ConversationController(TaskController *tasks,QObject *parent):QObject(parent),m_tasks(tasks)
+ConversationController::ConversationController(BackendConnection &connection,TaskController *tasks,QObject *parent)
+    : QObject(parent),m_connection(connection),m_tasks(tasks)
 {
     m_memory=new MemoryController(this, [this](const QByteArray &method, const QString &path,
                                               const QJsonObject &body, Callback callback) {
@@ -26,7 +27,7 @@ ConversationController::ConversationController(TaskController *tasks,QObject *pa
         else if(active() || retryPending()) refresh();
     });
     m_poll.start();
-    m_stream.setBaseUrl(tasks->baseUrl());
+    m_stream.setBaseUrl(baseUrl());
     m_streamFlush.setSingleShot(true); m_streamFlush.setInterval(40);
     connect(&m_streamFlush,&QTimer::timeout,this,&ConversationController::flushStreamBuffer);
     connect(&m_stream,&ConversationStreamClient::eventReceived,this,&ConversationController::applyStreamEvent);
@@ -63,37 +64,52 @@ ConversationController::ConversationController(TaskController *tasks,QObject *pa
         // Confirm the request's terminal state, then use the same finalizer as the timer.
         if(!activeRequest.isEmpty() && activeRequest.value("task_id").toString()==m_tasks->taskId()) pollActiveRequest();
     });
-    connect(tasks,&TaskController::baseUrlChanged,this,[this]{
-        stopAnswerStream(true); m_stream.setBaseUrl(m_tasks->baseUrl());
-        m_conversationStreamSupported=true; restorePollInterval();
+    connect(&connection,&BackendConnection::baseUrlChanged,this,[this]{
+        abortRequests();
+        m_stream.setBaseUrl(baseUrl());
+        m_conversationStreamSupported=true;
         m_serverStatus="disconnected";
-        ++m_deleteGeneration; m_deleteTarget.clear(); m_deleteError.clear(); m_deleting=false; m_deleteLoading=false;
-        ++m_listGeneration; m_historyLoading=false; m_history.clear(); m_cursor.clear();
-        m_historyTotal=0; emit historyChanged();
-        selectConversation({}); refreshHistory();
+        m_creating=false;
+        // Unconfirmed sends retain their idempotency key for a return to that backend.
+        m_sending.clear(); m_deleted.clear(); m_removing.clear();
+        ++m_deleteGeneration; m_deleteTarget.clear(); m_deleteTitle.clear(); m_deleteError.clear();
+        m_deleteActive=false; m_deleting=false; m_deleteLoading=false;
+        ++m_listGeneration; m_historyLoading=false; m_history.clear(); m_cursor.clear(); m_historyTotal=0;
+        resetSelection({});
+        emit backendChanged(); emit historyChanged(); emit changed(); emit selectionChanged();
+        refreshHistory();
     });
 }
 ConversationController::~ConversationController()
-{ for(auto *reply:std::as_const(m_replies)) { reply->disconnect(this); reply->abort(); } }
+{ abortRequests(); }
+void ConversationController::abortRequests()
+{
+    const auto replies=std::exchange(m_replies,{});
+    for(auto *reply:replies) {
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
+}
 void ConversationController::request(const QByteArray &method,const QString &path,const QJsonObject &body,Callback callback,qint64 limit)
 {
-    QUrl url=m_tasks->baseUrl().resolved(QUrl(path));
-    const auto base=m_tasks->baseUrl();
+    const auto base=baseUrl();
+    const QUrl url=base.resolved(QUrl(path));
     const auto generation=m_generation;
     const auto cid=m_id;
-    if(m_serverStatus!="connected") { m_serverStatus="checking"; emit changed(); }
     auto *reply=JsonHttp::send(m_network,this,method,url,body,limit,
         [=,this](QNetworkReply *completed,const JsonHttp::Response &response){
-        m_replies.remove(completed);
+        if(!m_replies.contains(completed)) return;
         const int status=response.status;
         QString error;
         if(response.exceededLimit) error=limit==16*1024*1024 ? "对话响应超过 16 MiB 上限，请缩小查询范围。" : "工具记录响应超过 128 KiB 上限，请重试。";
         else if(status<200 || status>=300) error="对话请求失败。"+response.body.value("error").toObject().value("message").toString("请检查后端连接后刷新。");
         else if(response.networkError!=QNetworkReply::NoError || response.invalidJson) error="对话响应不完整，请刷新重试。";
-        if(base==m_tasks->baseUrl() && generation==m_generation && cid==m_id) { m_serverStatus=status>0?"connected":"error"; emit changed(); }
-        callback(response.body,status,error);
+        if(base==baseUrl() && generation==m_generation && cid==m_id) { m_serverStatus=status>0?"connected":"error"; emit changed(); }
+        if(m_replies.remove(completed)) callback(response.body,status,error);
     });
     m_replies.insert(reply);
+    if(m_serverStatus!="connected") { m_serverStatus="checking"; emit changed(); }
 }
 void ConversationController::setMode(const QString &mode)
 { if((mode=="chat" || mode=="task") && !busy() && !retryPending()) { m_mode=mode; emit changed(); } }
@@ -115,7 +131,7 @@ void ConversationController::refreshHistory(bool more)
             if(!more) m_history.clear();
             for(const auto &item:body.value("items").toArray()) {
                 const auto row=item.toObject().toVariantMap(); const auto id=row.value("conversation_id").toString();
-                if(m_deleted.contains(m_tasks->baseUrl().toString()+'/'+id)) continue;
+                if(m_deleted.contains(baseUrl().toString()+'/'+id)) continue;
                 bool found=false;
                 for(auto &existing:m_history) if(existing.toMap().value("conversation_id")==id) { existing=row; found=true; break; }
                 if(!found) m_history.append(row);
@@ -130,15 +146,19 @@ void ConversationController::refreshHistory(bool more)
 void ConversationController::selectConversation(const QString &id)
 {
     if(!id.isEmpty() && !Protocol::validTaskId(id)) return;
-    if(m_deleted.contains(m_tasks->baseUrl().toString()+'/'+id)) return;
+    if(m_deleted.contains(baseUrl().toString()+'/'+id)) return;
+    resetSelection(id);
+    m_tasks->setConversationFilter(id); m_tasks->setRepositoryPath({});
+    emit changed(); emit selectionChanged();
+    if(!id.isEmpty()) refresh();
+}
+void ConversationController::resetSelection(const QString &id)
+{
     stopAnswerStream(true);
     ++m_generation; m_id=id; m_mode="chat"; m_detail={}; m_rows.clear(); m_messages.clear(); m_before=0;
     resetRequestPolling(); m_finishedRequest.clear();
     closeMcpTools();
     m_loading=false; m_editing=false; m_error.clear();
-    m_tasks->setConversationFilter(id); m_tasks->setRepositoryPath({});
-    emit changed(); emit selectionChanged();
-    if(!id.isEmpty()) refresh();
 }
 void ConversationController::refresh(bool older)
 {
@@ -181,11 +201,11 @@ void ConversationController::pollActiveRequest()
     const auto previous=m_detail.value("active_request").toObject();
     const auto rid=previous.value("request_id").toString(),cid=m_id;
     if(cid.isEmpty() || rid.isEmpty() || busy() || m_loading || m_pollingRequest || m_removing.contains(pendingKey())) return;
-    const auto base=m_tasks->baseUrl();
+    const auto base=baseUrl();
     const auto generation=m_generation,pollGeneration=m_pollGeneration;
     m_pollingRequest=true;
     request("GET",path()+"/requests/"+rid,{},[=,this](const QJsonObject &body,int status,const QString &error){
-        if(generation!=m_generation || pollGeneration!=m_pollGeneration || cid!=m_id || base!=m_tasks->baseUrl() ||
+        if(generation!=m_generation || pollGeneration!=m_pollGeneration || cid!=m_id || base!=baseUrl() ||
             rid!=m_detail.value("active_request").toObject().value("request_id").toString()) return;
         m_pollingRequest=false;
         if(status==404) { forgetConversation(cid); return; }
@@ -273,7 +293,7 @@ void ConversationController::flushStreamBuffer()
 void ConversationController::applyStreamEvent(const QString &type,const QJsonObject &payload,quint64 generation)
 {
     if(generation!=m_streamGeneration || generation!=m_stream.sessionGeneration()
-       || m_tasks->baseUrl()!=m_stream.baseUrl()
+       || baseUrl()!=m_stream.baseUrl()
        || payload.value("conversation_id").toString()!=m_id
        || payload.value("request_id").toString()!=m_streamRequest) return;
     const auto revision=payload.value("revision").toInteger();
@@ -403,11 +423,11 @@ void ConversationController::refreshMcpTools()
 {
     if(m_id.isEmpty() || m_mcpToolsRequest.isEmpty() || m_mcpToolsLoading) return;
     const auto generation=m_mcpToolsGeneration;
-    const auto base=m_tasks->baseUrl();
+    const auto base=baseUrl();
     const auto cid=m_id,rid=m_mcpToolsRequest;
     m_mcpToolsLoading=true; m_mcpToolsError.clear(); emit mcpToolsChanged();
     request("GET",path()+"/requests/"+rid+"/mcp-tools",{},[=,this](const QJsonObject &body,int,const QString &error){
-        if(generation!=m_mcpToolsGeneration || base!=m_tasks->baseUrl() || cid!=m_id || rid!=m_mcpToolsRequest) return;
+        if(generation!=m_mcpToolsGeneration || base!=baseUrl() || cid!=m_id || rid!=m_mcpToolsRequest) return;
         m_mcpToolsLoading=false; m_mcpToolsError=error;
         if(error.isEmpty()) {
             if(body.value("conversation_id").toString()!=cid || body.value("request_id").toString()!=rid ||
@@ -556,11 +576,11 @@ void ConversationController::showActiveTask()
 void ConversationController::renameConversationById(const QString &id,const QString &title)
 {
     if(id==m_id) { renameConversation(title); return; }
-    const auto key=m_tasks->baseUrl().toString()+'/'+id;
+    const auto key=baseUrl().toString()+'/'+id;
     if(!Protocol::validTaskId(id) || title.trimmed().isEmpty() || m_deleted.contains(key) || m_removing.contains(key)) return;
-    const auto base=m_tasks->baseUrl();
+    const auto base=baseUrl();
     request("PATCH","/api/v1/conversations/"+id,{{"title",title.trimmed().left(80)}},[=,this](const QJsonObject&,int,const QString &error){
-        if(base!=m_tasks->baseUrl() || m_deleted.contains(key) || m_removing.contains(key)) return;
+        if(base!=baseUrl() || m_deleted.contains(key) || m_removing.contains(key)) return;
         m_error=error; refreshHistory(); emit changed();
     });
 }
@@ -580,7 +600,7 @@ void ConversationController::prepareDelete(const QString &id,const QString &titl
 void ConversationController::confirmDelete()
 {
     if(m_deleteTarget.isEmpty() || m_deleteLoading || m_deleting) return;
-    const auto id=m_deleteTarget,base=m_tasks->baseUrl().toString(),key=base+'/'+id;
+    const auto id=m_deleteTarget,base=baseUrl().toString(),key=base+'/'+id;
     const auto generation=m_deleteGeneration;
     m_removing.insert(key); m_deleting=true; m_deleteError.clear();
     ++m_listGeneration; m_historyLoading=false;
@@ -596,7 +616,7 @@ void ConversationController::confirmDelete()
         m_removing.remove(key);
         const bool success=error.isEmpty() && body.value("deleted").toBool() && body.value("conversation_id").toString()==id;
         if(success) { m_deleted.insert(key); m_pending.remove(key); }
-        if(generation!=m_deleteGeneration || base!=m_tasks->baseUrl().toString()) return;
+        if(generation!=m_deleteGeneration || base!=baseUrl().toString()) return;
         m_deleting=false;
         if(success) {
             m_deleteTarget.clear(); m_deleteTitle.clear(); m_deleteError.clear();
@@ -620,7 +640,7 @@ void ConversationController::cancelDelete()
 void ConversationController::forgetConversation(const QString &identity)
 {
     const QString id=identity; // Caller may pass m_id, which selection reset mutates.
-    const auto key=m_tasks->baseUrl().toString()+'/'+id;
+    const auto key=baseUrl().toString()+'/'+id;
     m_deleted.insert(key); m_pending.remove(key); m_sending.remove(id); m_removing.remove(key);
     ++m_listGeneration; m_historyLoading=false;
     for(qsizetype i=m_history.size();i>0;--i) if(m_history[i-1].toMap().value("conversation_id").toString()==id) m_history.removeAt(i-1);

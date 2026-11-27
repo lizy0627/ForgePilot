@@ -1,4 +1,5 @@
 #pragma once
+#include "BackendConnection.h"
 #include "RecordListModel.h"
 #include "TaskController.h"
 #include "MemoryController.h"
@@ -11,6 +12,7 @@
 // Conversation text never carries TaskController permissions or execution state.
 class ConversationController : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QUrl baseUrl READ baseUrl NOTIFY backendChanged)
     Q_PROPERTY(QString conversationId READ conversationId NOTIFY changed)
     Q_PROPERTY(QString title READ title NOTIFY changed)
     Q_PROPERTY(QString repositoryPath READ repositoryPath NOTIFY changed)
@@ -45,9 +47,9 @@ class ConversationController : public QObject {
     Q_PROPERTY(QString mcpToolsError READ mcpToolsError NOTIFY mcpToolsChanged)
     Q_PROPERTY(QString mcpToolsRequest READ mcpToolsRequest NOTIFY mcpToolsChanged)
 public:
-    explicit ConversationController(TaskController *tasks, QObject *parent=nullptr);
+    explicit ConversationController(BackendConnection &connection, TaskController *tasks, QObject *parent=nullptr);
     ~ConversationController() override;
-    QUrl baseUrl() const { return m_tasks->baseUrl(); }
+    QUrl baseUrl() const { return m_connection.baseUrl(); }
     QString conversationId() const { return m_id; }
     QString title() const { return m_detail.value("title").toString("新对话"); }
     QString repositoryPath() const { return m_detail.value("repository_path").toString(); }
@@ -110,6 +112,7 @@ public:
     Q_INVOKABLE void clearError() { m_error.clear(); emit changed(); }
 signals:
     void changed();
+    void backendChanged();
     void historyChanged();
     void selectionChanged();
     void submitted(const QString &conversationId,const QString &prompt);
@@ -118,6 +121,8 @@ signals:
     void mcpToolsChanged();
 private:
     using Callback=std::function<void(const QJsonObject&,int,const QString&)>;
+    void abortRequests();
+    void resetSelection(const QString &id);
     void request(const QByteArray &method,const QString &path,const QJsonObject &body,Callback callback,qint64 limit=16*1024*1024);
     void applyDetail(const QJsonObject &body,bool older=false);
     void pollActiveRequest();
@@ -137,8 +142,9 @@ private:
     void create(const QString &prompt={},const QString &repositoryPath={});
     void postPending();
     void forgetConversation(const QString &id);
-    QString pendingKey() const { return m_tasks->baseUrl().toString()+'/'+m_id; }
+    QString pendingKey() const { return baseUrl().toString()+'/'+m_id; }
     QString path() const { return "/api/v1/conversations/"+m_id; }
+    BackendConnection &m_connection;
     TaskController *m_tasks;
     MemoryController *m_memory;
     QNetworkAccessManager m_network;

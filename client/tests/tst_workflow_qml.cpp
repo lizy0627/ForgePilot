@@ -293,10 +293,11 @@ struct Fixture {
 };
 
 struct Ui {
-    TaskController tasks;
-    ConversationController conversations{&tasks};
+    BackendConnection connection;
+    TaskController tasks{connection};
+    ConversationController conversations{connection,&tasks};
     MissionController missions;
-    McpController mcp{&tasks};
+    McpController mcp{connection};
     RagController rag;
     QQmlApplicationEngine engine;
     QQuickWindow *window = nullptr;
@@ -311,7 +312,7 @@ struct Ui {
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings.append(error.toString());
         });
-        engine.setInitialProperties({{"controller", QVariant::fromValue(&tasks)},
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller", QVariant::fromValue(&tasks)},
             {"conversations", QVariant::fromValue(&conversations)}, {"missions", QVariant::fromValue(&missions)},
             {"mcp", QVariant::fromValue(&mcp)}, {"rag", QVariant::fromValue(&rag)},
             {"runtimeConfig", QVariant::fromValue(runtime)},

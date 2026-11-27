@@ -1,4 +1,5 @@
 #include "TaskController.h"
+#include "BackendConnection.h"
 #include "ConversationController.h"
 #include "McpController.h"
 #include "RagController.h"
@@ -19,33 +20,43 @@ int main(int argc, char* argv[])
     QGuiApplication app(argc, argv);
     app.setApplicationName("ForgePilot");
     configureClientUi(app);
+    BackendConnection connection;
     QCommandLineParser parser;
     parser.addHelpOption();
-    parser.addOption({"server", "本机后端 HTTP 地址", "url", "http://127.0.0.1:8765"});
+    parser.addOption({"server", "本机后端 HTTP 地址", "url", connection.baseUrl().toString()});
     parser.addOption({"runtime-config", "本机启动器配置路径", "path"});
     parser.addOption({"configure", "打开运行配置向导"});
     parser.addOption({"self-test", "离线验证发布包中的 Qt/QML 客户端可加载"});
     parser.process(app);
-    TaskController controller;
-    controller.setBaseUrl(QUrl(parser.value("server")));
+    connection.configureBackend(parser.value("server"));
+    TaskController controller(connection);
     MissionController missions;
-    missions.setBaseUrl(controller.baseUrl());
-    QObject::connect(&controller, &TaskController::baseUrlChanged, &missions,
-                     [&] { missions.setBaseUrl(controller.baseUrl()); });
-    ConversationController conversations(&controller);
-    McpController mcp(&controller);
+    missions.setBaseUrl(connection.baseUrl());
+    QObject::connect(&connection, &BackendConnection::baseUrlChanged, &missions,
+                     [&] { missions.setBaseUrl(connection.baseUrl()); });
+    ConversationController conversations(connection, &controller);
+    McpController mcp(connection);
     RagController rag;
-    rag.setBaseUrl(controller.baseUrl());
+    rag.setBaseUrl(connection.baseUrl());
     conversations.setUseRag(rag.useForTasks());
-    QObject::connect(&controller, &TaskController::baseUrlChanged, &rag,
-                     [&] { rag.setBaseUrl(controller.baseUrl()); });
+    QObject::connect(&connection, &BackendConnection::baseUrlChanged, &rag,
+                     [&] { rag.setBaseUrl(connection.baseUrl()); });
     QObject::connect(&rag, &RagController::useForTasksChanged, &conversations,
                      [&] { conversations.setUseRag(rag.useForTasks()); });
     RuntimeConfigController runtimeConfig;
     QObject::connect(&runtimeConfig, &RuntimeConfigController::restartAccepted, &app, &QCoreApplication::quit);
     if (!parser.isSet("self-test")) runtimeConfig.configureHelper(parser.value("runtime-config"));
     QQmlApplicationEngine engine;
-    engine.setInitialProperties({{"runtimeConfig", parser.isSet("self-test") ? QVariant() : QVariant::fromValue(&runtimeConfig)}, {"showRuntimeConfiguration", parser.isSet("configure")}, {"controller", QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"mcp",QVariant::fromValue(&mcp)},{"rag",QVariant::fromValue(&rag)},{"missions",QVariant::fromValue(&missions)}});
+    engine.setInitialProperties({
+        {"backendConnection", QVariant::fromValue(&connection)},
+        {"controller", QVariant::fromValue(&controller)},
+        {"conversations", QVariant::fromValue(&conversations)},
+        {"mcp", QVariant::fromValue(&mcp)},
+        {"rag", QVariant::fromValue(&rag)},
+        {"missions", QVariant::fromValue(&missions)},
+        {"runtimeConfig", parser.isSet("self-test") ? QVariant() : QVariant::fromValue(&runtimeConfig)},
+        {"showRuntimeConfiguration", parser.isSet("configure")}
+    });
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("ForgePilot", "Main");
     if (parser.isSet("self-test")) {

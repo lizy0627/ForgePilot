@@ -12,6 +12,7 @@ find_package(Qt6 6.8 REQUIRED COMPONENTS Network Quick Qml QuickControls2 QuickD
 qt_standard_project_setup(REQUIRES 6.8)
 
 add_library(ForgePilotCommunication STATIC
+    src/BackendConnection.h src/BackendConnection.cpp
     src/Protocol.h src/Protocol.cpp
     src/JsonHttp.h src/JsonHttp.cpp
     src/AgentApiClient.h src/AgentApiClient.cpp
@@ -122,6 +123,9 @@ if(BUILD_TESTING)
         set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE FALSE)
     endfunction()
     forgepilot_backend_test(ForgePilotBackendTests tests/tst_backend.cpp)
+    add_test(NAME client_settings_qml COMMAND ForgePilotBackendTests settingsSwitchesBackendIndependently
+        codeIndexMinimalPanel codeIndexPanelDoesNotShowStaleReadyStatus mcpSettingsPanelDistinguishesUnreadFailureAndDisabled)
+    set_tests_properties(client_settings_qml PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     forgepilot_backend_test(ForgePilotConversationTests tests/tst_conversations_backend.cpp)
     forgepilot_backend_test(ForgePilotDeletionTests tests/tst_deletion_backend.cpp)
     forgepilot_backend_test(ForgePilotMemoryTests tests/tst_memory_backend.cpp)

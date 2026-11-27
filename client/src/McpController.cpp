@@ -1,5 +1,5 @@
 #include "McpController.h"
-#include "TaskController.h"
+#include "BackendConnection.h"
 #include "Protocol.h"
 #include <QDir>
 #include <QFileInfo>
@@ -64,16 +64,23 @@ const QMap<QString,QString> &errorMessages()
 }
 }
 
-McpController::McpController(TaskController *tasks) : QObject(tasks), m_tasks(tasks)
+McpController::McpController(BackendConnection &connection) : m_connection(connection)
 {
-    connect(tasks, &TaskController::baseUrlChanged, this, [this] {
+    connect(&connection, &BackendConnection::baseUrlChanged, this, [this] {
         ++m_missionGeneration;
         const auto replies = m_missionReplies; m_missionReplies.clear();
         for (auto *reply : replies) reply->abort();
-        m_missionChoices.clear(); m_missionLoading = false; m_missionError.clear(); emit missionChoicesChanged();
+        m_missionChoices.clear(); m_missionPending = 0; m_missionLoading = false; m_missionError.clear(); emit missionChoicesChanged();
         const bool reopen = m_open;
+        const bool pendingSave = m_pending.has_value();
+        const bool pendingAction = m_busy;
         m_pending.reset(); m_resolving=false; m_state="editing";
         close();
+        if (pendingSave || pendingAction) {
+            m_notice = pendingSave ? "旧后端的上次保存结果待确认，请切回原地址核对服务配置。"
+                                   : "旧后端的操作结果待确认，请切回原地址核对服务状态。";
+            emit changed();
+        }
         if (reopen) open();
     });
 }
@@ -96,7 +103,7 @@ void McpController::request(bool editor, const QByteArray &method, const QString
                             const QJsonObject &body, std::function<void(const Response &)> callback)
 {
     const auto generation=m_generation, editGeneration=m_editorGeneration;
-    const QUrl url(m_tasks->baseUrl().toString().remove(QRegularExpression("/$"))+"/api/v1/mcp"+path);
+    const auto url = m_connection.baseUrl().resolved(QUrl("/api/v1/mcp" + path));
     auto *reply=JsonHttp::send(m_network,this,method,url,body,512*1024,
         [=,this](QNetworkReply *reply,const Response &response) {
             m_pageReplies.remove(reply); m_editorReplies.remove(reply);
@@ -114,7 +121,7 @@ void McpController::abort(bool editor)
 void McpController::missionRequest(const QString &path, std::function<void(const Response &)> callback)
 {
     const auto generation = m_missionGeneration;
-    const QUrl url(m_tasks->baseUrl().toString().remove(QRegularExpression("/$")) + "/api/v1/mcp" + path);
+    const auto url = m_connection.baseUrl().resolved(QUrl("/api/v1/mcp" + path));
     auto *reply = JsonHttp::send(m_network, this, "GET", url, {}, 512 * 1024,
         [=, this](QNetworkReply *reply, const Response &response) {
             m_missionReplies.remove(reply);
@@ -422,7 +429,7 @@ void McpController::save()
 {
     if(!canSave()) return;
     auto body=m_draft; body["base_revision"]=m_revision; body["catalog_hash"]=m_hash; body["secret_updates"]=m_secrets;
-    m_pending=PendingSave{m_tasks->baseUrl(),m_id,m_revision};
+    m_pending=PendingSave{m_connection.baseUrl(),m_id,m_revision};
     m_state="saving"; m_editorError.clear(); emit editorChanged();
     request(true,"PUT","/servers/"+m_id,body,[this](const Response &r) {
         if(ok(r) && r.body.value("server_id")==m_id && r.body.value("revision").toInteger()>0) {
@@ -437,7 +444,7 @@ void McpController::save()
 }
 void McpController::resolveSave()
 {
-    if(editorBusy() || m_resolving || !m_pending || m_pending->backend!=m_tasks->baseUrl()) return;
+    if(editorBusy() || m_resolving || !m_pending || m_pending->backend!=m_connection.baseUrl()) return;
     const auto pending=*m_pending;
     m_resolving=true; m_editorError.clear(); emit editorChanged();
     request(false,"GET","/servers/"+pending.serverId,{},[this,pending](const Response &r) {

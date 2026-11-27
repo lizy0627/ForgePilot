@@ -2,6 +2,7 @@
 #include "ConversationController.h"
 #include "RagController.h"
 #include "McpController.h"
+#include "BackendConnection.h"
 #include "ClientUi.h"
 #include "Protocol.h"
 #include "ColorContrast.h"
@@ -75,11 +76,12 @@ class BackendTest : public QObject {
         const auto url=qEnvironmentVariable("FORGEPILOT_INTEGRATION_URL");
         const auto repository=qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");
         const auto output=qEnvironmentVariable("FORGEPILOT_INTEGRATION_OUTPUT");
-        TaskController controller; controller.setBaseUrl(QUrl(url));
-        ConversationController conversations(&controller);
+        BackendConnection connection; connection.setBaseUrl(QUrl(url));
+        TaskController controller(connection);
+        ConversationController conversations(connection,&controller);
         QQmlApplicationEngine engine; QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError> &errors) { for(const auto &e:errors) warnings.append(e.toString()); });
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"developmentTest",true}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"developmentTest",true}});
         engine.load(QUrl::fromLocalFile(qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML")));
         QVERIFY2(!engine.rootObjects().isEmpty(),qPrintable(warnings.join('\n')));
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window);
@@ -179,13 +181,41 @@ class BackendTest : public QObject {
     }
 private slots:
     void initTestCase() { configureClientUi(*qobject_cast<QGuiApplication*>(QCoreApplication::instance())); }
-    void codeIndexMinimalPanel() {
-        TaskController tasks; RagController rag; rag.setUseForTasks(false);
+    void settingsSwitchesBackendIndependently() {
+        Source backend;
+        BackendConnection connection;
         QQmlEngine engine;
         const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
         QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
         QScopedPointer<QObject> panel(component.createWithInitialProperties({
-            {"controller",QVariant::fromValue(&tasks)},{"rag",QVariant::fromValue(&rag)}}));
+            {"backendConnection",QVariant::fromValue(&connection)}}));
+        QVERIFY2(panel,qPrintable(component.errorString()));
+        auto *input=panel->findChild<QObject*>("serverInput");
+        auto *button=panel->findChild<QObject*>("connectButton");
+        auto *error=panel->findChild<QObject*>("connectionError");
+        QVERIFY(input && button && error);
+        QSignalSpy changed(&connection,&BackendConnection::baseUrlChanged);
+        const auto initial=connection.baseUrl();
+        QCOMPARE(input->property("text").toString(),initial.toString());
+        QVERIFY(input->setProperty("text","https://remote.example"));
+        QVERIFY(QMetaObject::invokeMethod(button,"clicked"));
+        QCOMPARE(connection.baseUrl(),initial);
+        QCOMPARE(changed.size(),0);
+        QVERIFY(error->property("text").toString().contains("HTTP"));
+        QVERIFY(input->setProperty("text",backend.url().toString()));
+        QVERIFY(QMetaObject::invokeMethod(button,"clicked"));
+        QCOMPARE(connection.baseUrl(),backend.url());
+        QCOMPARE(changed.size(),1);
+        QVERIFY(error->property("text").toString().isEmpty());
+    }
+
+    void codeIndexMinimalPanel() {
+        BackendConnection connection; RagController rag; rag.setUseForTasks(false);
+        QQmlEngine engine;
+        const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
+        QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
+        QScopedPointer<QObject> panel(component.createWithInitialProperties({
+            {"backendConnection",QVariant::fromValue(&connection)},{"rag",QVariant::fromValue(&rag)}}));
         QVERIFY2(panel,qPrintable(component.errorString()));
         auto *indexPanel=panel->findChild<QObject*>("codeIndexPanel");
         auto *build=panel->findChild<QObject*>("buildCodeIndexButton");
@@ -214,14 +244,14 @@ private slots:
             if(failRead) Source::json(r,{{"error",QJsonObject{{"code","api_internal"}}}},503);
             else Source::json(r,ready);
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); tasks.setRepositoryPath("C:/selected-repo");
+        BackendConnection connection; connection.setBaseUrl(source.url());
         RagController rag; rag.setBaseUrl(source.url()); rag.setRepositoryPath("C:/selected-repo");
         QTRY_COMPARE(rag.status(),QString("ready"));
         QQmlEngine engine;
         const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
         QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/SettingsPanel.qml"));
         QScopedPointer<QObject> panel(component.createWithInitialProperties({
-            {"controller",QVariant::fromValue(&tasks)},{"rag",QVariant::fromValue(&rag)}}));
+            {"backendConnection",QVariant::fromValue(&connection)},{"rag",QVariant::fromValue(&rag)}}));
         QVERIFY2(panel,qPrintable(component.errorString()));
         auto *indexPanel=panel->findChild<QObject*>("codeIndexPanel");
         auto *status=panel->findChild<QObject*>("codeIndexStatus");
@@ -250,7 +280,7 @@ private slots:
                 else Source::json(r,{{"items",QJsonArray{}},{"disabled",backendDisabled}});
             } else if(r.path.endsWith("/presets")) Source::json(r,{{"items",QJsonArray{}}});
         };
-        TaskController tasks; tasks.setBaseUrl(source.url()); McpController mcp(&tasks);
+        BackendConnection connection; connection.setBaseUrl(source.url()); McpController mcp(connection);
         QQmlEngine engine;
         const auto clientRoot=QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath()).absoluteFilePath("..");
         QQmlComponent component(&engine,QUrl::fromLocalFile(clientRoot+"/panels/McpSettingsPanel.qml"));
@@ -447,15 +477,15 @@ private slots:
         const auto repository = qEnvironmentVariable("FORGEPILOT_INTEGRATION_REPOSITORY");
         const auto qml = qEnvironmentVariable("FORGEPILOT_INTEGRATION_QML");
         QVERIFY2(!url.isEmpty() && !repository.isEmpty() && !qml.isEmpty(), "Run via Test-ClientIntegration.cmd");
-        TaskController controller;
-        controller.setBaseUrl(QUrl(url));
-        ConversationController conversations(&controller);
+        BackendConnection connection; connection.setBaseUrl(QUrl(url));
+        TaskController controller(connection);
+        ConversationController conversations(connection,&controller);
         QQmlApplicationEngine engine;
         QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const QList<QQmlError>&errors) {
             for(const auto &error:errors) warnings.append(error.toString());
         });
-        engine.setInitialProperties({{"controller",QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"developmentTest",true}});
+        engine.setInitialProperties({{"backendConnection",QVariant::fromValue(&connection)},{"controller",QVariant::fromValue(&controller)},{"conversations",QVariant::fromValue(&conversations)},{"developmentTest",true}});
         engine.load(QUrl::fromLocalFile(qml));
         QVERIFY2(!engine.rootObjects().isEmpty(),qPrintable(warnings.join('\n')));
         auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects()[0]); QVERIFY(window);
