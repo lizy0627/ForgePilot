@@ -442,9 +442,9 @@ def test_gui_saves_offline_and_check_reads_saved_key(tmp_path, existing_key):
     env = {k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'}
     env.update(LOCALAPPDATA=str(local), FORGEPILOT_API_KEY=KEY, FORGEPILOT_TEST_KEY_FILE=str(encrypted))
 
-    def powershell(command):
+    def powershell(command, **overrides):
         return subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
-                              env=env, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+                              env=env | overrides, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
 
     def entry(action):
         name = 'Configure-ForgePilot.cmd' if action == 'Configure' else 'Check-Model.cmd'
@@ -455,8 +455,9 @@ def test_gui_saves_offline_and_check_reads_saved_key(tmp_path, existing_key):
 
     try:
         if existing_key:
-            saved = powershell("$s=ConvertTo-SecureString 'previous-test-key' -AsPlainText -Force; "
-                               "$s | ConvertFrom-SecureString | Set-Content -Encoding ASCII -LiteralPath $env:FORGEPILOT_TEST_KEY_FILE; $s.Dispose()")
+            saved = powershell("$s=ConvertTo-SecureString $env:FORGEPILOT_API_KEY -AsPlainText -Force; "
+                               "$s | ConvertFrom-SecureString | Set-Content -Encoding ASCII -LiteralPath $env:FORGEPILOT_TEST_KEY_FILE; $s.Dispose()",
+                               FORGEPILOT_API_KEY=secrets.token_hex(24))
             assert saved.returncode == 0
         original_key = encrypted.read_bytes() if encrypted.exists() else None
         from forgepilot.desktop_configuration import handle_request

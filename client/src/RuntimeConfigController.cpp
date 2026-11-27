@@ -1,7 +1,6 @@
 #include "RuntimeConfigController.h"
 
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -11,13 +10,6 @@
 
 namespace {
 constexpr qsizetype MaxHelperBytes = 512 * 1024;
-QString configurationPath(const QString &root)
-{
-    const auto identity = QCryptographicHash::hash(QDir::toNativeSeparators(root).toLower().toUtf8(),
-                                                  QCryptographicHash::Sha256).toHex().left(16);
-    return QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(
-        "ForgePilot/launcher/" + QString::fromLatin1(identity) + "/config.json");
-}
 }
 
 RuntimeConfigController::RuntimeConfigController(QObject *parent) : QObject(parent)
@@ -70,17 +62,15 @@ void RuntimeConfigController::configureHelper(const QString &configPath)
 {
     QDir directory(QCoreApplication::applicationDirPath());
     for (int depth = 0; depth < 6; ++depth) {
-        const auto root = directory.absolutePath();
         const auto frozen = directory.filePath("bin/ForgePilotAgent.exe");
         if (QFileInfo::exists(frozen)) {
-            setHelperCommand(frozen, {}, configPath.isEmpty() ? configurationPath(root) : configPath);
+            setHelperCommand(frozen, {}, configPath);
             return;
         }
         const auto script = directory.filePath("agent/desktop.py");
         const auto python = directory.filePath("agent.venv/Scripts/python.exe");
         if (QFileInfo::exists(script) && QFileInfo::exists(python)) {
-            setHelperCommand(python, {"-X", "utf8", "-I", script},
-                             configPath.isEmpty() ? configurationPath(root) : configPath);
+            setHelperCommand(python, {"-X", "utf8", "-I", script}, configPath);
             return;
         }
         if (!directory.cdUp()) break;
@@ -121,7 +111,8 @@ void RuntimeConfigController::request(const QString &action, const QVariantMap &
     if (input.size() > MaxHelperBytes) { m_message = "配置内容超过上限，请缩短路径或模型名称。"; emit changed(); emit secretsConsumed(); return; }
     m_operation = action; m_output.clear(); m_message.clear(); m_errors.clear(); emit changed();
     auto arguments = m_arguments;
-    arguments << "config-helper" << "--config" << m_configPath;
+    arguments << "config-helper";
+    if (!m_configPath.isEmpty()) arguments << "--config" << m_configPath;
     m_process.setProgram(m_program); m_process.setArguments(arguments);
     // Passwords exist only in the private stdin pipe, never in the command line.
     m_process.start(QIODevice::ReadWrite);

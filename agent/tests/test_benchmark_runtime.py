@@ -29,6 +29,8 @@ def test_default_is_offline_and_paid_admission_fails_closed(monkeypatch, capsys)
     import forgepilot_eval.runner as runner
     monkeypatch.setattr(runner, "OpenAICompatibleClient", lambda *_args, **_kwargs:
                         pytest.fail("real model must not be constructed"))
+    assert main(["--mode", "real", "--allow-paid-real"], require_real=True) == 2
+    assert "--max-total-tokens" in capsys.readouterr().err
     assert main(["--mode", "real", "--allow-paid-real", "--max-total-tokens", "10000"]) == 2
     assert "isolation unavailable" in capsys.readouterr().err
     with pytest.raises(ValueError, match="not yet connected"):

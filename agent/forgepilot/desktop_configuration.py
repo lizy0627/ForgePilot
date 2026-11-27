@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from datetime import datetime, timezone
 import hashlib
 import inspect
@@ -9,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from uuid import uuid4
 
@@ -18,7 +20,7 @@ from .errors import ForgePilotError
 from .models.gateway import ModelGateway
 from .models.profiles import ModelConfiguration, ModelProfile, ModelRoute, SecretResolver
 from .security import Redactor
-from .settings import checked_model_id, resolve_models
+from .settings import checked_model_id, resolve_models, resolve_task_model
 from .windows_secrets import protect_launcher_key, unprotect_launcher_key
 
 def application_root() -> Path:
@@ -28,8 +30,24 @@ def application_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def default_config_path(root: Path | None = None) -> Path:
+    """Keep each installation's historical launcher directory, including its hash casing."""
+    installation = str(application_root() if root is None else root)
+    # Match the original PowerShell ToLowerInvariant for non-ASCII installation paths.
+    normalized = os.path.normcase(installation) if os.name == "nt" else installation.lower()
+    identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16].upper()
+    return Path(os.environ["LOCALAPPDATA"]) / "ForgePilot" / "launcher" / identity / "config.json"
+
+
 def read_config(path):
-    return validated_launcher_config(json.loads(path.read_text(encoding='utf-8-sig')))
+    return validated_launcher_config(json.loads(path.read_bytes()))
+
+
+def _saved_base_url(data):
+    endpoint = data.get("base_url")
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise ValueError("model_config")
+    return endpoint
 
 
 def validated_launcher_config(data):
@@ -40,8 +58,7 @@ def validated_launcher_config(data):
                     'credential_file', 'embedding_credential_file'}
     if not isinstance(data, dict) or not required <= set(data) or not set(data) <= required | model_fields:
         raise ValueError('config_fields')
-    if not isinstance(data['base_url'], str) or not data['base_url'].strip():
-        raise ValueError('model_config')
+    _saved_base_url(data)
     try:
         models = resolve_models(model=data.get('model'), chat_model=data.get('chat_model'),
                                 task_model=data.get('task_model'), summary_model=data.get('summary_model'))
@@ -250,6 +267,10 @@ class ConfigurationError(ValueError):
         super().__init__(code)
 
 
+class InvalidCredentialReference(ConfigurationError):
+    """The saved reference itself is malformed, before opening the credential."""
+
+
 def _raw_config(config):
     if not config.exists():
         return {}
@@ -257,7 +278,7 @@ def _raw_config(config):
     if len(raw) > MAX_CONFIG_BYTES:
         raise ConfigurationError("config_invalid", "配置文件过大，请重新填写。")
     try:
-        value = json.loads(raw.decode("utf-8-sig"))
+        value = json.loads(raw)
         if not isinstance(value, dict):
             raise ValueError()
         return value
@@ -266,33 +287,76 @@ def _raw_config(config):
 
 
 def _credential_path(config: Path, data: dict, *, embedding=False):
-    name = data.get("embedding_credential_file" if embedding else "credential_file")
-    if name is None:
+    field = "embedding_credential_file" if embedding else "credential_file"
+    if field not in data:
         return config.parent / ("embedding-key.dpapi" if embedding else "api-key.dpapi")
+    name = data[field]
     if (not isinstance(name, str) or not re.fullmatch(r"(?:api|embedding)-key-[a-f0-9]{32}\.dpapi", name)):
-        raise ConfigurationError("credential_invalid", "已保存的凭据引用无效，请重新填写密钥。")
+        raise InvalidCredentialReference("credential_invalid", "已保存的凭据引用无效，请重新填写密钥。")
     return config.parent / name
 
 
-def _read_key(config, data, *, embedding=False):
+def read_configured_key(config, data, *, embedding=False):
+    """Read the credential referenced by this configuration snapshot."""
     path = _credential_path(config, data, embedding=embedding)
-    if not path.exists():
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
         return ""
-    if path.is_symlink() or path.stat().st_nlink != 1 or path.stat().st_size > 1_048_576:
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > MAX_CONFIG_BYTES
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
         raise ConfigurationError("credential_invalid", "已保存的凭据文件不可用，请重新填写密钥。")
     try:
-        return unprotect_launcher_key(path.read_text(encoding="ascii"))
+        ciphertext = path.read_bytes()
+        # Windows PowerShell Out-File wraps the same hexadecimal DPAPI blob in UTF-16.
+        encoding = "utf-16" if ciphertext.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+        return unprotect_launcher_key(ciphertext.decode(encoding))
     except (ForgePilotError, ValueError, UnicodeError):
         raise ConfigurationError("credential_unavailable", "已保存的密钥无法解密，请重新填写。",
                                  "embedding" if embedding else "configuration") from None
 
 
 def load_saved_key(config: Path) -> str:
-    return _read_key(Path(config), _raw_config(Path(config)))
+    return read_configured_key(Path(config), _raw_config(Path(config)))
 
 
 def load_embedding_key(config: Path) -> str:
-    return _read_key(Path(config), _raw_config(Path(config)), embedding=True)
+    return read_configured_key(Path(config), _raw_config(Path(config)), embedding=True)
+
+
+def load_benchmark_settings(config: Path, *, review_model=None, task_model_family=None, review_model_family=None):
+    """Resolve the model-only launcher format and credentials for the benchmark child environment."""
+    if not config.is_file():
+        raise ConfigurationError("config_missing", "缺少已保存的模型配置。")
+    data = _raw_config(config)
+    endpoint = _saved_base_url(data)
+    try:
+        task = resolve_task_model(data.get("task_model"), data.get("model"))
+    except ForgePilotError:
+        raise ValueError("model_config_task") from None
+    if not task:
+        raise ValueError("model_config_task")
+    key = read_configured_key(config, data)
+    if not key:
+        raise ConfigurationError("credential_required", "已保存的密钥不存在，请重新配置。")
+
+    overrides = {"review_model": review_model, "task_model_family": task_model_family,
+                 "review_model_family": review_model_family}
+    routes = {name: value or os.environ.get("FORGEPILOT_" + name.upper()) or data.get(name)
+              for name, value in overrides.items()}
+    try:
+        review, task_family, review_family = _review_fields(routes, task)
+        # Formal benchmarks also reject two spellings of the same model ID.
+        valid = bool(review and review.casefold() != task.casefold())
+    except ValueError:
+        # CheckOnly reports presence separately from route validity.
+        review = routes["review_model"]
+        task_family = review_family = None
+        valid = False
+    return {"FORGEPILOT_BASE_URL": endpoint, "FORGEPILOT_TASK_MODEL": task,
+            "FORGEPILOT_API_KEY": key, "FORGEPILOT_REVIEW_MODEL": review or "",
+            "FORGEPILOT_TASK_MODEL_FAMILY": task_family or "",
+            "FORGEPILOT_REVIEW_MODEL_FAMILY": review_family or ""}, valid
 
 
 def _revision(config, data):
@@ -510,7 +574,7 @@ async def load_configuration(config: Path, *, status=None):
     flags = {}
     for embedding, name in ((False, "has_api_key"), (True, "has_embedding_key")):
         try:
-            flags[name] = bool(_read_key(config, data, embedding=embedding))
+            flags[name] = bool(read_configured_key(config, data, embedding=embedding))
         except ConfigurationError as exc:
             flags[name] = False
             errors.append(_error(exc))
@@ -641,7 +705,7 @@ def save_configuration(config, request):
         embedding_key = request.get("embedding_api_key", "")
         if not isinstance(key, str) or not isinstance(embedding_key, str):
             raise ConfigurationError("credential_invalid", "请输入有效密钥。")
-        if not key and not _read_key(config, old):
+        if not key and not read_configured_key(config, old):
             raise ConfigurationError("credential_required", "首次配置须填写 API Key。")
         created = []
         try:
@@ -671,7 +735,7 @@ async def check_configuration(config, request, *, transport=None):
     data = _raw_config(config)
     if request.get("config_revision") != _revision(config, data):
         raise ConfigurationError("config_conflict", "配置已改变，请重新读取后检测。")
-    key = request.get("api_key") or _read_key(config, data)
+    key = request.get("api_key") or read_configured_key(config, data)
     if not isinstance(key, str) or not key:
         raise ConfigurationError("credential_required", "请填写或保存 API Key。")
     errors, checks = [], []
@@ -687,7 +751,7 @@ async def check_configuration(config, request, *, transport=None):
                           for purpose in result["purposes"])
     if fields["embedding_enabled"]:
         from .rag.embedding import OpenAICompatibleEmbeddingProvider
-        embedding_key = request.get("embedding_api_key") or _read_key(config, data, embedding=True) or key
+        embedding_key = request.get("embedding_api_key") or read_configured_key(config, data, embedding=True) or key
         try:
             async with OpenAICompatibleEmbeddingProvider(fields["embedding_base_url"], embedding_key,
                     fields["embedding_model"], timeout=30, transport=transport) as provider:

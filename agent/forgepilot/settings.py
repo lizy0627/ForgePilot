@@ -33,11 +33,16 @@ def checked_model_id(value, purpose):
     return value
 
 
+def resolve_task_model(task_model, model):
+    """Select a purpose-specific task model, falling back to the legacy model."""
+    return checked_model_id(task_model, "task") or checked_model_id(model, "fallback")
+
+
 def resolve_models(*, model=None, chat_model=None, task_model=None, summary_model=None):
     """Resolve purpose-specific models while preserving FORGEPILOT_MODEL fallback."""
     fallback = checked_model_id(model, "fallback")
     chat = checked_model_id(chat_model, "chat") or fallback
-    task = checked_model_id(task_model, "task") or fallback
+    task = resolve_task_model(task_model, fallback)
     summary = checked_model_id(summary_model, "summary") or chat or fallback
     missing = [name for name, value in (("chat", chat), ("task", task), ("summary", summary)) if not value]
     if missing:
@@ -51,10 +56,10 @@ def models_from_args(args):
 
 
 def task_model_from_args(args):
-    model = checked_model_id(args.task_model, "task") or checked_model_id(args.model, "fallback")
-    if not model:
+    selected = resolve_task_model(args.task_model, args.model)
+    if not selected:
         raise ForgePilotError("llm_config", "Missing model configuration for: task")
-    return model
+    return selected
 
 
 def model_gateway_from_args(args, *, task_only=False, transport=None):

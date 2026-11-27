@@ -32,6 +32,7 @@ from forgepilot.security import Redactor
 from forgepilot.errors import ForgePilotError
 from forgepilot.models.gateway import ModelGateway
 from forgepilot import desktop_configuration
+from forgepilot.desktop_configuration import default_config_path
 
 PYTHON = Path(sys.executable) if FROZEN else ROOT / 'agent.venv/Scripts/python.exe'
 LEGACY_PYTHON_ENVIRONMENT = ROOT / 'agent/.venv'
@@ -257,10 +258,13 @@ def request_stop(kernel, event):
         raise OSError('stop_event_failed')
 
 
-def default_config_path() -> Path:
-    # Share the per-checkout settings and DPAPI credentials with the Windows GUI.
-    identity = hashlib.sha256(str(ROOT).lower().encode('utf-8')).hexdigest()[:16].upper()
-    return Path(os.environ['LOCALAPPDATA']) / 'ForgePilot' / 'launcher' / identity / 'config.json'
+def _config_from_command(override: Path | None) -> Path:
+    if override is not None:
+        return override.resolve()
+    # All three entry points live one directory below the installation (agent,
+    # scripts or bin). Keep the invoked path, including Windows directory aliases.
+    entry = Path(sys.executable if FROZEN else sys.argv[0])
+    return default_config_path(Path(os.path.abspath(entry)).parent.parent)
 
 
 def supervise(config, result=None):
@@ -307,8 +311,9 @@ def _supervise_once(config, result):
         with desktop_configuration.ConfigurationLock(config):
             data = read_config(config)
             running_revision = desktop_configuration.configuration_revision(config)
-            if data.get('credential_file') or config.with_name('api-key.dpapi').is_file():
-                os.environ['FORGEPILOT_API_KEY'] = desktop_configuration.load_saved_key(config)
+            saved_key = desktop_configuration.read_configured_key(config, data)
+            if saved_key or 'credential_file' in data:
+                os.environ['FORGEPILOT_API_KEY'] = saved_key
             embedding_key = os.environ.get('FORGEPILOT_EMBEDDING_API_KEY', '')
             optional_warning = None
             if '--enable-rag' in data['server_args']:
@@ -743,12 +748,15 @@ def configuration_helper(config):
 
 def run_project():
     """Run the desktop application from this file, including its local backend."""
-    return desktop(default_config_path(), foreground=True)
+    return desktop(_config_from_command(None), foreground=True)
 
 
 def main():
     if len(sys.argv) == 1:
         return run_project()
+    if sys.argv[1:] == ['benchmark-check']:
+        from forgepilot.benchmark_launcher import run_saved_benchmark
+        return run_saved_benchmark()
     if sys.argv[1] == 'database-copy':
         from forgepilot.database_copy import copy_database
         parser = argparse.ArgumentParser(description="Copy a database into a new rollback directory.")
@@ -759,9 +767,9 @@ def main():
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == 'config-helper':
         parser = argparse.ArgumentParser()
-        parser.add_argument('action'); parser.add_argument('--config', type=Path, required=True)
+        parser.add_argument('action'); parser.add_argument('--config', type=Path)
         args = parser.parse_args()
-        return configuration_helper(args.config.resolve())
+        return configuration_helper(_config_from_command(args.config))
     if len(sys.argv) > 1 and sys.argv[1] == 'stdio-worker':
         if len(sys.argv) < 4:
             return 125
@@ -796,9 +804,9 @@ def main():
         from forgepilot._build_worker import main as worker
         sys.argv = [sys.argv[0], args.job]
         return worker()
-    if args.config is None:
+    if args.config is None and args.action not in ('desktop', 'configure', 'stop', 'check-saved'):
         parser.error('--config is required')
-    config = args.config.resolve()
+    config = _config_from_command(args.config)
     if args.action == 'desktop':
         return desktop(config)
     if args.action == 'configure':

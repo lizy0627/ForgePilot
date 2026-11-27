@@ -674,9 +674,11 @@ def parser():
     return p
 
 
-def main(argv=None):
+def main(argv=None, *, require_real=False):
     args = parser().parse_args(argv)
     try:
+        if require_real and args.mode != "real":
+            raise ValueError("Use the saved configuration only with an explicit --mode real benchmark command.")
         if not 0 < args.task_timeout <= 7200 or not 0 < args.llm_timeout <= 600:
             raise ValueError("Timeouts must be finite and within supported limits")
         if not 0 < args.approval_timeout <= 7200:

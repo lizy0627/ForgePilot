@@ -16,6 +16,7 @@ int fixture()
     const auto request = QJsonDocument::fromJson(input.readAll()).object();
     const auto action = request.value("action").toString();
     const auto arguments = QCoreApplication::arguments();
+    if (arguments.contains("--expect-default-path") && arguments.last() != "config-helper") return 9;
     if (arguments.contains("pipe-only-secret") || arguments.join(' ').contains("embedding-private")) return 5;
     if (request.value("fields").toObject().value("fixture_mode") == "malformed") {
         QFile output; output.open(stdout, QIODevice::WriteOnly); output.write("not-json"); output.flush(); return 0;
@@ -50,6 +51,16 @@ void helper(RuntimeConfigController &controller, const QString &path)
 class RuntimeConfigTests : public QObject {
     Q_OBJECT
 private slots:
+    void omittedPathDelegatesToLauncher()
+    {
+        RuntimeConfigController controller;
+        controller.setHelperCommand(QCoreApplication::applicationFilePath(),
+                                    {"--config-helper-fixture", "--expect-default-path"}, {});
+        QSignalSpy finished(&controller, &RuntimeConfigController::operationFinished);
+        controller.load();
+        QTRY_COMPARE(finished.size(), 1);
+        QVERIFY(finished.first().at(1).toBool());
+    }
     void firstRunLoadsWithoutBackendAndSavesViaPrivatePipe()
     {
         QTemporaryDir directory; QVERIFY(directory.isValid());

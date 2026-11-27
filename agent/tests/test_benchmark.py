@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import select
 import socket
 import subprocess
@@ -127,25 +128,48 @@ def test_saved_analysis_has_a_runnable_validation_command(tmp_path, scenario):
     assert json.loads(result.stdout) == {"task": "analysis-01", "passed": scenario == "valid"}
 
 
+@pytest.fixture
+def benchmark_installation(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    identity = hashlib.sha256(os.path.normcase(root).encode()).hexdigest()[:16].upper()
+    settings = tmp_path / "ForgePilot/launcher" / identity
+    settings.mkdir(parents=True)
+    return root, settings
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows benchmark launcher reads current-user DPAPI credentials")
-@pytest.mark.parametrize("credential_case", ["legacy", "versioned", "missing-reference", "outside-reference"])
-def test_benchmark_check_only_reads_configured_credential_without_model_requests(tmp_path, credential_case):
+@pytest.mark.parametrize("credential_case,saved_reviewer,env_reviewer,cli_reviewer,review_family,exit_code", [
+    ("legacy", "reviewer", None, None, "reviewer", 0),
+    ("legacy", "vendor/reviewer", None, None, "reviewer", 0),
+    ("legacy", None, None, None, "reviewer", 2),
+    ("legacy", "WRITER", None, None, "reviewer", 2),
+    ("legacy", "vendor/reviewer", None, None, "writer", 2),
+    ("legacy", "writer", "vendor/reviewer", None, "reviewer", 0),
+    ("legacy", "writer", "writer", "vendor/reviewer", "reviewer", 0),
+    ("versioned", "vendor/reviewer", None, None, "reviewer", 0),
+    ("missing-reference", "reviewer", None, None, "reviewer", 1),
+    ("outside-reference", "reviewer", None, None, "reviewer", 1),
+])
+def test_benchmark_check_only_reads_configured_credential_without_model_requests(
+    tmp_path, benchmark_installation, credential_case, saved_reviewer, env_reviewer, cli_reviewer, review_family, exit_code,
+):
     from forgepilot.build_process import build_environment
     from forgepilot.windows_secrets import protect_launcher_key
 
-    root = Path(__file__).resolve().parents[2]
-    identity = hashlib.sha256(str(root).lower().encode()).hexdigest()[:16].upper()
-    settings = tmp_path / "ForgePilot/launcher" / identity
-    settings.mkdir(parents=True)
+    root, settings = benchmark_installation
     legacy = settings / "api-key.dpapi"
-    encrypted = protect_launcher_key("benchmark-fixture-key")
-    legacy.write_text("obsolete-key" if credential_case == "versioned" else encrypted, encoding="ascii")
+    canary = secrets.token_hex(24)
+    encrypted = protect_launcher_key(canary)
+    # Windows PowerShell Out-File defaults to a UTF-16 BOM and a trailing newline.
+    legacy.write_text(("obsolete-key" if credential_case == "versioned" else encrypted) + "\n", encoding="utf-16")
     with socket.socket() as endpoint:
         endpoint.bind(("127.0.0.1", 0))
         endpoint.listen()
-        config = {"model": "writer", "base_url": f"http://127.0.0.1:{endpoint.getsockname()[1]}/v1",
-                  "port": 8765, "server_args": [], "task_model_family": "writer", "review_model": "reviewer",
-                  "review_model_family": "reviewer"}
+        config = {"base_url": f"http://127.0.0.1:{endpoint.getsockname()[1]}/v1",
+                  "task_model_family": "writer", "review_model_family": review_family}
+        config["task_model" if credential_case == "versioned" else "model"] = "writer"
+        if saved_reviewer is not None:
+            config["review_model"] = saved_reviewer
         filename = "api-key-" + "a" * 32 + ".dpapi"
         if credential_case != "legacy":
             config["credential_file"] = filename
@@ -155,17 +179,91 @@ def test_benchmark_check_only_reads_configured_credential_without_model_requests
             (settings.parent / filename).write_text(encrypted, encoding="ascii")
             config["credential_file"] = "../" + filename
         (settings / "config.json").write_text(json.dumps(config), encoding="utf-8")
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                                 "-File", str(root / "scripts/Invoke-Benchmark.ps1"), "-CheckOnly"],
-                                env={**build_environment(), "LOCALAPPDATA": str(tmp_path)}, capture_output=True, timeout=20)
-        assert not select.select([endpoint], [], [], 0)[0]
-    if credential_case in ("legacy", "versioned"):
-        assert result.returncode == 0, result.stderr
-        assert b"encrypted_api_key=decryptable" in result.stdout
-        assert b"benchmark_model_tokens=0" in result.stdout
-    else:
-        assert result.returncode != 0
-    assert b"benchmark-fixture-key" not in result.stdout + result.stderr
+        command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                   "-File", str(root / "scripts/Invoke-Benchmark.ps1"), "-CheckOnly"]
+        env = {**build_environment(), "LOCALAPPDATA": str(tmp_path)}
+        if env_reviewer:
+            env["FORGEPILOT_REVIEW_MODEL"] = env_reviewer
+        if cli_reviewer:
+            command.extend(["-ReviewModel", cli_reviewer])
+        if any(canary in arg or encrypted in arg for arg in command):
+            pytest.fail("Credential appeared in the launcher arguments", pytrace=False)
+        try:
+            result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            pytest.fail("Benchmark check did not finish", pytrace=False)
+        # Check before any assertion can render captured output or pytest locals.
+        for credential in (canary, encrypted):
+            for encoding in ("ascii", "utf-16-le"):
+                if credential.encode(encoding) in result.stdout + result.stderr:
+                    pytest.fail("Credential appeared in benchmark check output", pytrace=False)
+        del canary, encrypted, credential
+        connected = bool(select.select([endpoint], [], [], 0)[0])
+    actual_exit = result.returncode
+    expected_error = {
+        "missing-reference": b"Saved encrypted API key is missing or invalid. Run Configure-ForgePilot.cmd.",
+        "outside-reference": b"Invalid saved credential reference. Run Configure-ForgePilot.cmd.",
+    }.get(credential_case)
+    error_matches = result.stderr.splitlines() == ([expected_error] if expected_error else [])
+    summary_matches = result.stdout.splitlines() == [
+        b"saved_model_config=present",
+        b"encrypted_api_key=decryptable",
+        b"review_model=configured" if cli_reviewer or env_reviewer or saved_reviewer else b"review_model=missing",
+        b"model_routes=configured_distinct" if exit_code == 0 else b"model_routes=missing_or_invalid",
+        b"api_connectivity=not_checked",
+        b"benchmark_model_tokens=0",
+    ]
+    output_matches = summary_matches if exit_code in (0, 2) else not result.stdout
+    del result
+    assert not connected
+    assert actual_exit == exit_code
+    assert error_matches
+    assert output_matches
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows benchmark launcher reads current-user DPAPI credentials")
+def test_saved_benchmark_hands_credential_to_runner_process(tmp_path, benchmark_installation):
+    from forgepilot.build_process import build_environment
+    from forgepilot.windows_secrets import protect_launcher_key
+
+    root, settings = benchmark_installation
+    config = {"base_url": "http://127.0.0.1:1/v1", "model": "writer", "review_model": "vendor/reviewer",
+              "task_model_family": "writer", "review_model_family": "reviewer"}
+    (settings / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    canary = secrets.token_hex(24)
+    (settings / "api-key.dpapi").write_text(protect_launcher_key(canary), encoding="ascii")
+    env = {**build_environment(), "LOCALAPPDATA": str(tmp_path),
+           "EXPECTED_CREDENTIAL_DIGEST": hashlib.sha256(canary.encode()).hexdigest(),
+           "FORGEPILOT_BENCHMARK_INVOCATION": json.dumps({
+               "root": str(root), "arguments": ["--mode", "real"], "review_model": None,
+               "task_model_family": None, "review_model_family": None,
+           })}
+    del canary
+    probe = """
+import hashlib, os, sys
+from forgepilot.benchmark_launcher import run_saved_benchmark
+
+def runner(args, *, require_real):
+    key = os.environ.get("FORGEPILOT_API_KEY", "")
+    matches = hashlib.sha256(key.encode()).hexdigest() == os.environ["EXPECTED_CREDENTIAL_DIGEST"]
+    if matches and require_real and args == ["--mode", "real"] and all(key not in arg for arg in sys.orig_argv):
+        return 42
+    return 1
+
+if "FORGEPILOT_API_KEY" in os.environ:
+    sys.exit(1)
+sys.exit(run_saved_benchmark(runner))
+"""
+    try:
+        result = subprocess.run([sys.executable, "-c", probe], cwd=root / "agent", env=env,
+                                capture_output=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("Benchmark runner probe did not finish", pytrace=False)
+    returncode = result.returncode
+    silent = not (result.stdout or result.stderr)
+    del result
+    assert returncode == 42
+    assert silent
 
 
 def test_protected_tests_and_extra_source_changes_cannot_score():

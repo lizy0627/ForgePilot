@@ -1,4 +1,5 @@
 """The configuration helper remains discoverable in source and frozen layouts."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -39,6 +40,30 @@ def test_real_source_helper_can_read_first_run_without_configuration_or_backend(
     assert smoke.configuration_helper_smoke(tmp_path, environment)
     assert not (tmp_path / "unconfigured/config.json").exists()
     assert not (tmp_path / "unconfigured/api-key.dpapi").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell installation identity")
+@pytest.mark.parametrize("entry", ["scripts/desktop_launcher.py", "agent/desktop.py", "bin/ForgePilotAgent.exe"])
+def test_config_helper_defaults_to_invoked_installation(tmp_path, monkeypatch, entry):
+    import desktop
+
+    # ToLowerInvariant uses simple casing for İ and for the final Greek sigma.
+    install = tmp_path / "ForgePilot-İΟΣ"
+    local = tmp_path / "local data"
+    identity = hashlib.sha256((os.path.normcase(str(tmp_path)) + "\\forgepilot-İοσ").encode()).hexdigest()[:16].upper()
+    expected = local / "ForgePilot" / "launcher" / identity / "config.json"
+    executable = install / entry
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(desktop, "FROZEN", entry.endswith(".exe"))
+    if desktop.FROZEN:
+        monkeypatch.setattr(sys, "executable", str(executable))
+    invoked = executable.name if desktop.FROZEN else os.path.relpath(executable)
+    monkeypatch.setattr(sys, "argv", [invoked, "config-helper"])
+    captured = []
+    monkeypatch.setattr(desktop, "configuration_helper", captured.append)
+    desktop.main()
+    assert captured == [expected]
 
 
 @pytest.mark.parametrize("output,returncode", [(b"not-json", 0), (b"[]", 0), (b"{}", 0), (b"{}", 1)])
