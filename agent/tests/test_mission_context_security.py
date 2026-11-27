@@ -57,15 +57,13 @@ def test_selected_mcp_snapshots_reach_custom_production_factory():
     host._services = {}
     host.factory = lambda events, *, mcp_snapshots=(): captured.append(mcp_snapshots) or SimpleNamespace()
 
-    workflow = host._workflow("new-task", mcp_server_ids=(selected,))
+    workflow = host._new_workflow((selected,))
     assert captured == [(snapshot,)]
     assert workflow.mission_mcp_revisions == (3,)
-    assert host._workflow("new-task") is workflow
-
-    host._services.clear()
+    assert not host._services
     host.factory = lambda events: SimpleNamespace()
     with pytest.raises(ForgePilotError, match="mcp_selection"):
-        host._workflow("new-task", mcp_server_ids=(selected,))
+        host._new_workflow((selected,))
     snapshot = _snapshot(selected, secret_error="mcp_secret_unavailable")
     with pytest.raises(ForgePilotError, match="mcp_selection"):
         host._selected_mcp_snapshots((selected,))

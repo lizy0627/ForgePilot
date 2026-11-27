@@ -23,6 +23,7 @@ from .agents.workflow_graphs import (LEGACY_DELIVERY_GRAPH_IDS, MULTI_AGENT_DELI
 from .artifacts.models import DataPolicy, RepositorySpec
 from .errors import ForgePilotError
 from .mission_events import safe_event_data
+from .mission_tools import MissionToolSelection, prepare_mission_tools
 from .orchestration.analysis_review import AnalysisReviewStore
 from .orchestration.graph import validate_graph
 from .orchestration.models import GraphDefinition, NodeStatus, NodeType, TERMINAL_NODE_STATUSES
@@ -127,80 +128,85 @@ class MissionHost:
             raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection changed; start a new mission")
         return snapshots
 
-    def _workflow(self, task_id, *, mcp_server_ids=None, single_agent=None):
-        restoring = mcp_server_ids is None
-        if task_id not in self._services:
-            metadata = None
-            if mcp_server_ids is None:
-                metadata = self._metadata(task_id)
-                snapshot = self.graphs.snapshot(task_id)
-                missing = _missing_frozen_config(metadata, snapshot)
-                if missing:
-                    raise ForgePilotError("mission_frozen_config_missing", missing)
-                mcp_server_ids = metadata.get("mcp_server_ids", ())
-                expected_revisions = metadata.get("mcp_server_revisions")
-                if mcp_server_ids and expected_revisions is None:
-                    raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection cannot be restored")
-            else:
-                expected_revisions = None
-            if single_agent is None:
-                single_agent = (metadata or {}).get("orchestration_mode") == "single_agent"
-            snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
-            if self.factory is None:
-                from .mission_factory import build_mission_workflow
-                if self.dependencies is None:
-                    raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
-                workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots,
-                                                  single_agent=single_agent)
-                workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
-            else:
-                kwargs = {}
-                if mcp_server_ids:
-                    kwargs["mcp_snapshots"] = snapshots
-                if single_agent:
-                    kwargs["single_agent"] = True
-                if kwargs:
-                    try:
-                        signature(self.factory).bind(self.store, **kwargs)
-                    except (TypeError, ValueError):
-                        if mcp_server_ids:
-                            raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
-                        raise ForgePilotError("mission_unavailable", "Mission factory does not support the requested topology") from None
-                    workflow = self.factory(self.store, **kwargs)
-                    if mcp_server_ids:
-                        workflow.mission_mcp_revisions = tuple(item.revision for item in kwargs["mcp_snapshots"])
-                else:
-                    workflow = self.factory(self.store)
-            workflow.mission_mcp_snapshots = snapshots
-            if bool(getattr(workflow, "single_agent", False)) != bool(single_agent):
-                raise ForgePilotError("mission_unavailable", "Mission workflow topology differs from the locked request")
-            if restoring and metadata.get("source_baseline") is not None:
-                from .presets import MissionBuildSelection
-                config = self._build_config(metadata)
-                if not isinstance(metadata.get("build_selection"), dict):
-                    raise ForgePilotError("build_selection_changed", "Frozen build selection is missing; recreate this task")
-                selection = MissionBuildSelection.from_dict(metadata["build_selection"])
-                current, frozen = asdict(config), metadata.get("frozen_build_config")
-                # Earlier hosts froze an implicit Debug as an explicit value.
-                # Presets can resolve an unspecified configuration differently.
-                if (selection.configuration == "Debug" and current["configuration"] in (None, "Debug")
-                        and isinstance(frozen, dict) and frozen.get("configuration") in (None, "Debug")):
-                    current["configuration"] = frozen.get("configuration")
-                if current != frozen:
-                    raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; recreate this task")
-                workflow.mission_source_baseline = metadata["source_baseline"]
-                workflow.mission_build_selection = metadata["build_selection"]
-                if hasattr(workflow.validator, "bind_build_selection"):
-                    workflow.validator.bind_build_selection(task_id, selection)
-            if restoring and metadata.get("tool_selection") is not None:
-                from .mission_tools import MissionToolSelection, bind_mission_tools
-                selection = MissionToolSelection.from_dict(metadata["tool_selection"])
-                if ([s["server_id"] for s in selection.mcp_servers] != list(mcp_server_ids)
-                        or selection.use_rag != metadata.get("use_rag", False)):
-                    raise ForgePilotError("mission_frozen_config_missing", "Mission tool selection changed")
-                bind_mission_tools(workflow, task_id, selection)
-            self._services[task_id] = workflow
-        return self._services[task_id]
+    def _new_workflow(self, mcp_server_ids, *, single_agent=False, expected_revisions=None):
+        snapshots = self._selected_mcp_snapshots(mcp_server_ids, expected_revisions)
+        if self.factory is None:
+            from .mission_factory import build_mission_workflow
+            if self.dependencies is None:
+                raise ForgePilotError("mission_unavailable", "Missions require the configured shared ModelGateway")
+            workflow = build_mission_workflow(self.dependencies, mcp_snapshots=snapshots,
+                                               single_agent=single_agent)
+        else:
+            kwargs = {}
+            if snapshots:
+                kwargs["mcp_snapshots"] = snapshots
+            if single_agent:
+                kwargs["single_agent"] = True
+            if kwargs:
+                try:
+                    signature(self.factory).bind(self.store, **kwargs)
+                except (TypeError, ValueError):
+                    if snapshots:
+                        raise ForgePilotError("mcp_selection", "Mission factory does not support selected MCP servers") from None
+                    raise ForgePilotError("mission_unavailable", "Mission factory does not support the requested topology") from None
+            workflow = self.factory(self.store, **kwargs)
+        workflow.mission_mcp_snapshots = snapshots
+        workflow.mission_mcp_revisions = tuple(item.revision for item in snapshots)
+        if bool(getattr(workflow, "single_agent", False)) != bool(single_agent):
+            raise ForgePilotError("mission_unavailable", "Mission workflow topology differs from the locked request")
+        return workflow
+
+    @staticmethod
+    def _configure_mission_tools(workflow, task_id: str, selection: MissionToolSelection) -> dict:
+        from .agents.implementation import ImplementationService
+        implementation = workflow if isinstance(workflow, ImplementationService) else None
+        tools = prepare_mission_tools(implementation, task_id, selection)
+        if implementation is not None:
+            implementation.configure_mission_tools(tools)
+        else:
+            # Offline workflows can use the frozen choice in their own graph.
+            workflow.mission_tool_selection = selection.to_dict()
+        return tools.context
+
+    def _workflow(self, task_id):
+        if task_id in self._services:
+            return self._services[task_id]
+        metadata = self._metadata(task_id)
+        missing = _missing_frozen_config(metadata, self.graphs.snapshot(task_id))
+        if missing:
+            raise ForgePilotError("mission_frozen_config_missing", missing)
+        server_ids = metadata.get("mcp_server_ids", ())
+        revisions = metadata.get("mcp_server_revisions")
+        if server_ids and revisions is None:
+            raise ForgePilotError("mcp_catalog_changed", "Mission MCP selection cannot be restored")
+        workflow = self._new_workflow(server_ids, expected_revisions=revisions,
+            single_agent=metadata.get("orchestration_mode") == "single_agent")
+        if metadata.get("source_baseline") is not None:
+            from .presets import MissionBuildSelection
+            config = self._build_config(metadata)
+            if not isinstance(metadata.get("build_selection"), dict):
+                raise ForgePilotError("build_selection_changed", "Frozen build selection is missing; recreate this task")
+            selection = MissionBuildSelection.from_dict(metadata["build_selection"])
+            current, frozen = asdict(config), metadata.get("frozen_build_config")
+            # Earlier hosts froze an implicit Debug as an explicit value.
+            # Presets can resolve an unspecified configuration differently.
+            if (selection.configuration == "Debug" and current["configuration"] in (None, "Debug")
+                    and isinstance(frozen, dict) and frozen.get("configuration") in (None, "Debug")):
+                current["configuration"] = frozen.get("configuration")
+            if current != frozen:
+                raise ForgePilotError("build_selection_changed", "Trusted build configuration changed; recreate this task")
+            workflow.mission_source_baseline = metadata["source_baseline"]
+            workflow.mission_build_selection = metadata["build_selection"]
+            if hasattr(workflow.validator, "bind_build_selection"):
+                workflow.validator.bind_build_selection(task_id, selection)
+        if metadata.get("tool_selection") is not None:
+            tool_selection = MissionToolSelection.from_dict(metadata["tool_selection"])
+            if ([s["server_id"] for s in tool_selection.mcp_servers] != list(server_ids)
+                    or tool_selection.use_rag != metadata.get("use_rag", False)):
+                raise ForgePilotError("mission_frozen_config_missing", "Mission tool selection changed")
+            self._configure_mission_tools(workflow, task_id, tool_selection)
+        self._services[task_id] = workflow
+        return workflow
 
     def _metadata(self, task_id):
         return self.store.missions.metadata(task_id)
@@ -557,8 +563,8 @@ class MissionHost:
             if source["source_head"] != preview.source_head or source["file_hashes"] != preview.file_hashes:
                 raise ForgePilotError("baseline_changed", "Source HEAD or selected files changed; preview and confirm again")
         task_id = preview.task_id if preview else str(uuid4())
-        workflow = self._workflow(task_id, mcp_server_ids=fields.get("mcp_server_ids", ()),
-                                  single_agent=fields["orchestration_mode"] == "single_agent")
+        workflow = self._new_workflow(fields.get("mcp_server_ids", ()),
+                                      single_agent=fields["orchestration_mode"] == "single_agent")
         workspace_claimed = False
         try:
             # Trusted profile selection never accepts executable paths or shell text.
@@ -606,13 +612,12 @@ class MissionHost:
                     workflow.validator.bind_build_selection(task_id, selection)
                 fields = {**fields, "source_baseline": workflow.mission_source_baseline,
                           "build_selection": selection.to_dict(), "frozen_build_config": asdict(config)}
-            from .mission_tools import MissionToolSelection, bind_mission_tools
             selected_servers = tuple({"server_id": item.server_id, "name": item.config.name,
                 "tools": list(item.config.selected_tools)} for item in workflow.mission_mcp_snapshots)
-            tools = MissionToolSelection(fields.get("use_rag", False),
+            tool_selection = MissionToolSelection(fields.get("use_rag", False),
                 getattr(workflow, "mission_data_policy", DataPolicy()), selected_servers)
-            tool_context = bind_mission_tools(workflow, task_id, tools)
-            fields = {**fields, "use_rag": tools.use_rag, "tool_selection": tools.to_dict(),
+            tool_context = self._configure_mission_tools(workflow, task_id, tool_selection)
+            fields = {**fields, "use_rag": tool_selection.use_rag, "tool_selection": tool_selection.to_dict(),
                       "tool_context": tool_context}
             request_text = self.store.redactor.text(fields["request"])
             if fields["task_type"] != "auto" and locked_task_spec is None:
@@ -621,7 +626,7 @@ class MissionHost:
                 request_text = self.store.redactor.text(fields["request"])
             request = AnalysisRequest(request=request_text, repository=RepositorySpec(
                 base_ref=record["base_ref"] if locked_task_spec is None else fields["base_ref"], toolchain_profile=profile),
-                data_policy=getattr(workflow, "mission_data_policy", DataPolicy()),
+                data_policy=tool_selection.data_policy,
                 language=fields.get("language", "zh-CN"))
             if locked_task_spec is None:
                 definition = await asyncio.to_thread(workflow._analysis_graph, task_id, request)
@@ -636,8 +641,9 @@ class MissionHost:
             record = workflow.workspace.record(task_id)
             self.store.missions.admit_mission(task_id, record,
                 {**fields, "locked_authorization_ref": locked_authorization_ref,
-                 "mcp_server_revisions": list(getattr(workflow, "mission_mcp_revisions", ()))},
+                 "mcp_server_revisions": list(workflow.mission_mcp_revisions)},
                 selected_skills=selected_skills)
+            self._services[task_id] = workflow
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
         except BaseException:
@@ -646,7 +652,6 @@ class MissionHost:
             except ForgePilotError:
                 # Only a newly allocated, app-owned worktree is eligible. The
                 # manager proves identity and refuses unknown user bytes.
-                self._services.pop(task_id, None)
                 candidate = getattr(workflow, "mission_candidate_runner", None)
                 if candidate is not None:
                     try:

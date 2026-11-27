@@ -259,7 +259,7 @@ def test_mission_host_without_dependencies_never_uses_legacy_factory(tmp_path):
     try:
         missions = MissionHost(TaskHost(unavailable, store=store))
         with pytest.raises(ForgePilotError) as caught:
-            missions._workflow("unconfigured", mcp_server_ids=())
+            missions._new_workflow(())
         assert caught.value.code == "mission_unavailable"
         assert caught.value.message == "Missions require the configured shared ModelGateway"
         assert not missions._services
@@ -299,8 +299,8 @@ def test_custom_workflow_factory_takes_precedence_over_default_dependencies(
     try:
         deps = resources.mission_dependencies(store, mcp_connection_factory=unavailable)
         missions = MissionHost(TaskHost(unavailable, store=store), factory, dependencies=deps)
-        assert missions._workflow("custom", mcp_server_ids=()) is workflow
-        assert missions._workflow("custom") is workflow
+        assert missions._new_workflow(()) is workflow
+        assert not missions._services
         assert calls == [store]
         assert not gateway._providers
     finally:

@@ -2,10 +2,13 @@
 import asyncio
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
 
+from forgepilot.errors import ForgePilotError
+from forgepilot.mission_tools import MissionToolSelection, prepare_mission_tools
 from mission_tools_support import MissionToolsCase, SOURCE
 
 
@@ -18,6 +21,42 @@ async def settled(client, path):
                 await asyncio.sleep(0.03)
                 return (await client.get(path)).json()
             await asyncio.sleep(0.02)
+
+
+def test_shared_workflow_freezes_analysis_dependencies_per_task(tmp_path, git_exe, rg_exe):
+    case = MissionToolsCase(tmp_path, git_exe=git_exe, rg_exe=rg_exe)
+    try:
+        workflow = case.app.state.mission_host._new_workflow(())
+        def prepare(use_rag):
+            task_id = str(uuid4())
+            workflow.workspace.create(case.source, task_id)
+            return prepare_mission_tools(workflow, task_id,
+                MissionToolSelection(use_rag, workflow.mission_data_policy))
+
+        with_rag = prepare(True)
+        workflow.configure_mission_tools(with_rag)
+        first_graph = workflow.graph()
+        without_rag = prepare(False)
+        workflow.configure_mission_tools(without_rag)
+
+        for tools in (without_rag, with_rag):
+            analysis = workflow._analysis_for(tools.task_id)
+            assert analysis.repository is tools.repository
+            assert analysis.intelligence is tools.intelligence
+            assert analysis.retrieval is tools.retrieval
+            workflow.configure_mission_tools(tools)
+            assert workflow._analysis_for(tools.task_id) is analysis
+        assert with_rag.repository.root != without_rag.repository.root
+        assert with_rag.retrieval is not None and without_rag.retrieval is None
+        assert workflow.graph(with_rag.task_id) == first_graph
+        assert workflow.graph(without_rag.task_id).definition_hash != first_graph.definition_hash
+        with pytest.raises(ForgePilotError, match="graph_definition"):
+            workflow.graph()
+        with pytest.raises(ForgePilotError, match="graph_definition"):
+            workflow.configure_mission_tools(prepare_mission_tools(workflow, with_rag.task_id, without_rag.selection))
+        assert workflow._analysis_for(with_rag.task_id).retrieval is with_rag.retrieval
+    finally:
+        case.store.close()
 
 
 @pytest.mark.asyncio
@@ -59,16 +98,26 @@ async def test_production_http_model_tools_fallback_and_frozen_restore(tmp_path,
                 assert (case.source / "src/value.cpp").read_text(encoding="utf-8") == SOURCE
                 graph = (await client.get(path + "/graph")).json()
                 assert graph["graph_id"] == "task-analysis-delivery.v4"
-                workflow = case.app.state.mission_host._services[result["task_id"]]
+                task_id = result["task_id"]
+                workflow = case.app.state.mission_host._services[task_id]
                 assert workflow.validator._monitors == {}
-                definition = workflow._stored_graph(result["task_id"])
+                prepared = workflow.mission_tools_for(task_id)
+                analysis = workflow._analysis_for(task_id)
+                definition = workflow._stored_graph(task_id)
+                assert workflow._analysis_for(task_id) is analysis
+                assert prepared.repository is analysis.repository
+                assert prepared.intelligence is analysis.intelligence
+                assert prepared.retrieval is analysis.retrieval
+                writer_repository = workflow._repository(task_id)
+                writer_retrieval = prepared.retrieval_factory(writer_repository)
+                assert writer_retrieval.repository is writer_repository
+                assert writer_retrieval.data_policy == prepared.selection.data_policy
                 # Reconstruct from persisted selection, without model/tool calls.
                 model_count = len(case.provider.seen)
                 case.app.state.mission_host._services.clear()
-                restored = case.app.state.mission_host._workflow(result["task_id"])
-                assert restored._stored_graph(result["task_id"]) == definition
-                assert restored.mission_tool_selection["use_rag"] is True
-                assert restored.mission_tool_selection["mcp_servers"][0]["server_id"] == sid
+                restored = case.app.state.mission_host._workflow(task_id)
+                assert restored._stored_graph(task_id) == definition
+                assert restored.mission_tools_for(task_id).selection == prepared.selection
                 assert len(case.provider.seen) == model_count
                 reread = (await client.get(path)).json()
                 assert reread["tool_context"] == context
@@ -141,8 +190,9 @@ async def test_unselected_tools_remain_absent_after_rag_configuration_changes(tm
                 case.rag.config = case.rag.config.model_copy(update={"enabled": False})
                 case.app.state.mission_host._services.clear()
                 restored = case.app.state.mission_host._workflow(result["task_id"])
-                assert restored.mission_tool_selection["use_rag"] is False
-                assert restored.mission_tool_selection["mcp_servers"] == []
+                prepared = restored.mission_tools_for(result["task_id"])
+                assert prepared.selection.use_rag is False and prepared.selection.mcp_servers == ()
+                assert prepared.retrieval_factory is None
                 assert (await client.get(path)).json()["tool_context"] == before
     finally:
         case.store.close()

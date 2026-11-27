@@ -23,6 +23,12 @@ from test_repair import reflection, script
 @contextmanager
 def serving(factory, *, heartbeat=0.05, **app_options):
     app = create_app(factory, heartbeat_seconds=heartbeat, **app_options)
+    with serving_app(app) as url:
+        yield url, app
+
+
+@contextmanager
+def serving_app(app):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -35,7 +41,7 @@ def serving(factory, *, heartbeat=0.05, **app_options):
         assert thread.is_alive() and time.monotonic() < deadline, "HTTP server failed to start"
         time.sleep(0.01)
     try:
-        yield f"http://127.0.0.1:{port}", app
+        yield f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
         thread.join(timeout=15)

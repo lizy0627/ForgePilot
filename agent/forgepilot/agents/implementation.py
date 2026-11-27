@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import urlsplit
 from uuid import uuid4
 import json
@@ -23,6 +24,7 @@ from ..artifacts.validation import create_artifact, validate_plan_coverage
 from ..delivery_store import DeliveryRepository
 from ..errors import ForgePilotError
 from ..mission_observability import model_call, tool_call, validate_tool
+from ..mission_tools import MissionToolDependencies
 from ..models.accounting import ModelBudget
 from ..orchestration.analysis_review import AnalysisReviewStore, scope_content
 from ..orchestration.graph import validate_graph
@@ -88,7 +90,7 @@ class ImplementationService:
         self.rg_executable, self.retrieval_factory = rg_executable, retrieval_factory
         # Immutable, host-selected analysis grants. Neither a model nor an
         # Artifact may supply these arguments.
-        self.analysis_kwargs = dict(analysis_kwargs or {})
+        self.analysis_kwargs = MappingProxyType(dict(analysis_kwargs or {}))
         self.reviews = AnalysisReviewStore(events)
         self.scope_expansions = ScopeExpansionStore(events)
         self.runner = GraphRunner(events, HandlerRegistry({
@@ -104,6 +106,7 @@ class ImplementationService:
             self.runner.handlers.register(stage, self._analysis_handler)
         self.runner.handlers.register("locked_task_spec", self._locked_analysis_spec)
         self.runner.handlers.register("join_evidence", self._analysis_join)
+        self._mission_tools = {}
         self._analysis_services = {}
         self._loop = None
         self._active = set()
@@ -117,16 +120,36 @@ class ImplementationService:
                               agent_definition_hash=self.definition.definition_hash,
                               settings={"limits": self.limits.model_dump(mode="json")})
 
-    def graph(self):
+    def graph(self, task_id=None):
         return GraphDefinition("controlled-implementation.v1", 1, (execution_approval(), self._implementer_node()))
+
+    def configure_mission_tools(self, tools: MissionToolDependencies) -> None:
+        """Freeze the worktree-bound tools before the task's first analysis."""
+        task_id = tools.task_id
+        with self.events.missions.consistent_view():
+            existing = self._mission_tools.get(task_id)
+            if existing is tools:
+                return
+            if existing is not None or task_id in self._analysis_services:
+                raise ForgePilotError("graph_definition", "Task analysis tools are already bound")
+            self._mission_tools[task_id] = tools
+
+    def mission_tools_for(self, task_id: str) -> MissionToolDependencies | None:
+        return self._mission_tools.get(task_id)
 
     def _analysis_for(self, task_id):
         with self.events.missions.consistent_view():
             if task_id not in self._analysis_services:
                 from .analysis import AnalysisService
+                tools = self.mission_tools_for(task_id)
+                kwargs = self.analysis_kwargs
+                if tools is None:
+                    repository = self._repository(task_id)
+                else:
+                    repository = tools.repository
+                    kwargs = {**kwargs, "intelligence": tools.intelligence, "retrieval": tools.retrieval}
                 self._analysis_services[task_id] = AnalysisService(
-                    self.events, self._repository(task_id), self.gateway,
-                    single_agent=self.single_agent, **self.analysis_kwargs)
+                    self.events, repository, self.gateway, single_agent=self.single_agent, **kwargs)
             analysis = self._analysis_services[task_id]
         analysis._loop = self._loop
         return analysis
@@ -144,7 +167,7 @@ class ImplementationService:
         run = self.events.missions.get_graph_run(task_id)
         graph = GraphDefinition.from_dict(json.loads(run["definition_json"]))
         if graph.graph_id == "controlled-implementation.v1":
-            expected = self.graph()
+            expected = self.graph(task_id)
         elif graph.graph_id in {"task-analysis-implementation.v1", "task-analysis-implementation-locked.v1"}:
             from .analysis import AnalysisRequest
             draft = graph.node("draft_task_spec")
@@ -271,7 +294,7 @@ class ImplementationService:
         if len(ids) != len(set(ids)):
             raise ForgePilotError("artifact_scope", "Duplicate implementation inputs")
         self._package(task_id, ids)
-        graph = self.graph()
+        graph = self.graph(task_id)
         self._create_run(task_id, graph, ids)
         # GraphRunner rejects a different graph, input set or budget on repeat.
         return await self._run_worker(task_id, self.runner.run, task_id, graph, input_artifact_ids=ids)
@@ -462,9 +485,10 @@ class ImplementationService:
         # The factory is host-owned and receives the task Worktree, never a main
         # checkout. Cloud-disabled tasks do not invoke an unknown RAG adapter.
         retrieval = None
-        if self.retrieval_factory and (spec.content.data_policy.cloud_model_allowed
-                                     or getattr(self, "mission_tool_selection", None) is not None):
-            retrieval = self.retrieval_factory(repository)
+        mission_tools = self.mission_tools_for(context.task_id)
+        retrieval_factory = self.retrieval_factory if mission_tools is None else mission_tools.retrieval_factory
+        if retrieval_factory and (spec.content.data_policy.cloud_model_allowed or mission_tools is not None):
+            retrieval = retrieval_factory(repository)
             if not spec.content.data_policy.cloud_model_allowed:
                 from ..rag.mission import MissionRetrievalService
                 if not isinstance(retrieval, MissionRetrievalService) or retrieval.data_policy != spec.content.data_policy:

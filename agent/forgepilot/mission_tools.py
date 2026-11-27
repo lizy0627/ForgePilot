@@ -1,11 +1,19 @@
-"""Frozen Mission tool choices and task-worktree service binding."""
+"""Frozen Mission tool choices and task-worktree dependencies."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .artifacts.models import DataPolicy
 from .errors import ForgePilotError
+
+if TYPE_CHECKING:
+    from .code_intelligence import CodeIntelligence
+    from .rag.mission import MissionRetrievalService
+    from .repository import Repository
 
 
 @dataclass(frozen=True)
@@ -39,27 +47,37 @@ class MissionToolSelection:
             raise ForgePilotError("mission_frozen_config_missing", "Frozen Mission tool selection is invalid") from None
 
 
+@dataclass(frozen=True)
+class MissionToolDependencies:
+    """Worktree services and observations for one frozen tool selection."""
 
-def bind_mission_tools(workflow, task_id, selection: MissionToolSelection):
-    """Bind borrowed resources after the confirmed source baseline exists."""
-    from .agents.implementation import ImplementationService
-    from .code_intelligence import CodeIntelligence
-    from .validation import ValidationService
-    from .rag.mission import build_mission_retrieval
+    task_id: str
+    selection: MissionToolSelection
+    context: dict
+    repository: Repository | None = None
+    intelligence: CodeIntelligence | None = None
+    retrieval: MissionRetrievalService | None = None
+    retrieval_factory: Callable[[Repository], MissionRetrievalService] | None = None
 
-    workflow.mission_tool_selection = selection.to_dict()
+
+def prepare_mission_tools(workflow, task_id: str, selection: MissionToolSelection) -> MissionToolDependencies:
+    """Prepare borrowed resources after the confirmed source baseline exists."""
     context = {
         "rag": {"requested": selection.use_rag, "enabled": False, "used": False, "fallback_reasons": []},
         "clangd": {"enabled": True, "used": False, "fallback_reasons": []},
         "mcp": {"server_ids": [s["server_id"] for s in selection.mcp_servers],
                 "servers": list(selection.mcp_servers), "used": False, "fallback_reasons": []},
     }
-    if not isinstance(workflow, ImplementationService):
-        return context  # Explicit offline/custom workflows need no repository tools.
-    record = workflow.workspace.record(task_id)
-    if workflow.events.missions.is_admitted(task_id):
-        for component, previous in workflow.events.missions.tool_context(task_id,
-                workflow.events.missions.metadata(task_id)).items():
+    if workflow is None:
+        return MissionToolDependencies(task_id, selection, context)
+
+    from .code_intelligence import CodeIntelligence
+    from .rag.mission import build_mission_retrieval
+    from .validation import ValidationService
+
+    missions = workflow.events.missions
+    if missions.is_admitted(task_id):
+        for component, previous in missions.tool_context(task_id, missions.metadata(task_id)).items():
             context.setdefault(component, {}).update(previous)
 
     def observe(component):
@@ -68,24 +86,24 @@ def bind_mission_tools(workflow, task_id, selection: MissionToolSelection):
             safe = {key: status[key] for key in ("requested", "enabled", "used", "fallback_reasons") if key in status}
             safe["used"] = context[component].get("used", False) or safe.get("used", False)
             context[component].update(safe)
-            workflow.events.missions.record_observation(task_id, "task.tools_updated",
+            missions.record_observation(task_id, "task.tools_updated",
                 {"component": component, "status": safe}, node_id=None, actor="mission-tools")
         return publish
 
     repository = workflow._repository(task_id)
+    validator = getattr(workflow, "validator", None)
     intelligence = CodeIntelligence(repository, getattr(workflow, "mission_intelligence_config", None),
-        selected_directory=lambda: (workflow.validator.compilation_directory(task_id)
-                                   if isinstance(workflow.validator, ValidationService) else None),
+        selected_directory=lambda: (validator.compilation_directory(task_id)
+                                    if isinstance(validator, ValidationService) else None),
         on_status=observe("clangd"))
     context["clangd"].update({key: value for key, value in intelligence.availability().items() if key != "used"})
-    workflow.analysis_kwargs["intelligence"] = intelligence
+    retrieval = None
+    retrieval_factory = None
     if selection.use_rag:
-        def retrieval_factory(task_repository):
-            return build_mission_retrieval(getattr(workflow, "mission_rag_manager", None),
-                Path(record["repository_path"]), task_repository, data_policy=selection.data_policy,
-                code_intelligence=intelligence, on_status=observe("rag"))
+        source_root = Path(workflow.workspace.record(task_id)["repository_path"])
+        retrieval_factory = partial(build_mission_retrieval, getattr(workflow, "mission_rag_manager", None),
+            source_root, data_policy=selection.data_policy, code_intelligence=intelligence, on_status=observe("rag"))
         retrieval = retrieval_factory(repository)
-        workflow.analysis_kwargs["retrieval"] = retrieval
-        workflow.retrieval_factory = retrieval_factory
         context["rag"].update({key: value for key, value in retrieval.status().items() if key not in {"trace", "used"}})
-    return context
+    return MissionToolDependencies(task_id, selection, context, repository=repository,
+        intelligence=intelligence, retrieval=retrieval, retrieval_factory=retrieval_factory)

@@ -57,16 +57,25 @@ class DeliveryWorkflow(ImplementationService):
         self.runner.handlers.register("repair.v1", self._handler)
         self.runner.handlers.register("delivery_bundle.v1", self._delivery_handler)
 
-    def graph(self):
+    def graph(self, task_id=None):
+        if task_id is None:
+            if len(self._mission_tools) > 1:
+                raise ForgePilotError("graph_definition", "Select a task to build its delivery graph")
+            tools = next(iter(self._mission_tools.values()), None)
+        else:
+            tools = self.mission_tools_for(task_id)
+        return self._execution_graph(tools)
+
+    def _execution_graph(self, tools):
         version = 2
         settings = {"model_configuration_hash": content_sha256(self.gateway.router.configuration)}
         if getattr(self, "mission_source_baseline", None) is not None:
             version = 3
             settings["source_baseline_hash"] = content_sha256(self.mission_source_baseline)
             settings["build_selection_hash"] = content_sha256(self.mission_build_selection)
-        if getattr(self, "mission_tool_selection", None) is not None:
+        if tools is not None:
             version = 4
-            settings["tool_selection_hash"] = content_sha256(self.mission_tool_selection)
+            settings["tool_selection_hash"] = content_sha256(tools.selection.to_dict())
         baseline = NodeDefinition("baseline_capture", NodeType.DETERMINISTIC, "baseline_capture.v1",
             dependencies=("execution_approval",), settings={"recovery_role": "deterministic"})
         nodes = [execution_approval(**settings), baseline, self._implementer_node("baseline_capture")]
@@ -104,7 +113,7 @@ class DeliveryWorkflow(ImplementationService):
             skills = getattr(self, "mission_skills", ())
         analysis = self._analysis_for(task_id).graph(request, locked_task_spec=locked_task_spec,
             allow_locked_test_scope=allow_locked_test_scope, skills=skills)
-        execution = self.graph()
+        execution = self.graph(task_id)
         gate = execution.node("execution_approval")
         graph_id = f"task-analysis-delivery.v{execution.version}"
         if locked_task_spec is not None:
@@ -122,7 +131,7 @@ class DeliveryWorkflow(ImplementationService):
                 "This task uses the previous delivery graph; recreate the mission and approve its execution plan "
                 "(请重新创建任务并审批执行方案)")
         if graph.graph_id in MULTI_AGENT_DELIVERY_IDS | SINGLE_AGENT_DELIVERY_IDS:
-            expected = self.graph()
+            expected = self.graph(task_id)
         elif graph.graph_id in ORDINARY_ANALYSIS_DELIVERY_IDS | LOCKED_ANALYSIS_DELIVERY_IDS:
             from .analysis import AnalysisRequest, stored_graph_skills, validate_skill_routes
             draft = graph.node("draft_task_spec")

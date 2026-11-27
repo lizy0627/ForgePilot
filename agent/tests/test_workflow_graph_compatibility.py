@@ -11,6 +11,7 @@ from forgepilot.artifacts.canonical import content_sha256
 from forgepilot.errors import ForgePilotError
 from forgepilot.mission_events import append_mission_event
 from forgepilot.mission_host import MissionHost
+from forgepilot.mission_tools import MissionToolDependencies
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.orchestration.graph import validate_graph
 from forgepilot.sqlite_store import SqliteEventStore
@@ -30,9 +31,12 @@ def graph_workflow_factory(tmp_path):
     manager = WorkspaceManager(tmp_path / "workspace")
     gateway = ModelGateway(configuration(), secret_resolver=lambda _: "offline")
 
-    def make(workflow_type, *, single_agent=False):
+    def make(workflow_type, *, single_agent=False, frozen_selection=None):
         kwargs = {"validator": SimpleNamespace(workspace=manager)} if workflow_type is DeliveryWorkflow else {}
         service = workflow_type(events, manager, gateway, single_agent=single_agent, **kwargs)
+        if frozen_selection is not None:
+            selection = SimpleNamespace(to_dict=lambda: frozen_selection)
+            service.configure_mission_tools(MissionToolDependencies("frozen", selection, {}))
         service._analysis_services["frozen"] = AnalysisService(events, None, gateway, single_agent=single_agent)
         return service
 
@@ -134,13 +138,11 @@ def test_paused_single_agent_projects_actions_from_frozen_roles(graph_workflow_f
 def test_workflow_rebuilds_frozen_graph(
         graph_workflow_factory, version, single_agent, mode, frozen_hash, json_sha256):
     workflow_type = ImplementationService if version == 1 else DeliveryWorkflow
-    service = graph_workflow_factory(workflow_type, single_agent=single_agent)
+    service = graph_workflow_factory(workflow_type, single_agent=single_agent,
+        frozen_selection={"servers": []} if version >= 4 else None)
     if version >= 3:
         service.mission_source_baseline = {"commit": "a" * 40}
         service.mission_build_selection = {"configuration": "Release"}
-    if version >= 4:
-        service.mission_tool_selection = {"servers": []}
-
     if mode == "plain":
         graph = service.graph()
     else:
@@ -169,7 +171,7 @@ def test_composition_identifies_approval_in_reordered_fragments(
     analysis_graph = move_approval_to_second(analysis.graph(analysis_request))
     execution_graph = move_approval_to_second(workflow.graph())
     monkeypatch.setattr(analysis, "graph", lambda *args, **kwargs: analysis_graph)
-    monkeypatch.setattr(workflow, "graph", lambda: execution_graph)
+    monkeypatch.setattr(workflow, "graph", lambda task_id: execution_graph)
 
     combined = workflow._analysis_graph("frozen", analysis_request)
     assert combined.definition_hash == frozen_hash
