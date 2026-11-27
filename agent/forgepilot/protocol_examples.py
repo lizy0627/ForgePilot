@@ -142,6 +142,66 @@ def _skill_generation_examples(manual):
     }
 
 
+def _mission_create_contract_cases(create, selected):
+    minimal = {key: create[key] for key in ("repository_path", "request")}
+    server_ids = [f"11111111-1111-4111-8111-{index:012d}" for index in range(1, 6)]
+
+    def case(name, valid, **fields):
+        return {"name": name, "request": minimal | fields, "valid": valid}
+
+    return [
+        case("omitted_optional_fields", True),
+        {"name": "missing_repository", "request": {"request": minimal["request"]}, "valid": False},
+        {"name": "missing_request", "request": {"repository_path": minimal["repository_path"]}, "valid": False},
+        case("all_fields", True, **create, language="en-US", mcp_server_ids=server_ids[:4],
+             use_rag=True, selected_skills=selected, baseline_paths=["src/main.cpp"],
+             preview_token="a" * 64, baseline_confirmed=True, configure_preset="debug",
+             build_preset="debug-build", test_preset="debug-test"),
+        case("english_locale", True, language="en-US"),
+        case("three_letter_language", True, language="eng"),
+        case("invalid_language", False, language="en-us"),
+        case("language_trailing_newline", False, language="en-US\n"),
+        case("null_language", False, language=None),
+        case("unknown_field", False, lang="en-US"),
+        case("empty_selections", True, selected_skills=[], mcp_server_ids=[], baseline_paths=[]),
+        case("one_skill", True, selected_skills=selected[:1]),
+        case("skill_version_maximum", True, selected_skills=[selected[0] | {"version": 2**63 - 2}]),
+        case("skill_version_over_limit", False, selected_skills=[selected[0] | {"version": 2**63 - 1}]),
+        case("duplicate_skill_id", False, selected_skills=[selected[0], selected[0] | {"version": 2}]),
+        case("too_many_skills", False, selected_skills=[*selected, selected[0] | {"skill_id": "third"}]),
+        case("unknown_skill_field", False, selected_skills=[selected[0] | {"name": "extra"}]),
+        case("duplicate_mcp_id", False, mcp_server_ids=[server_ids[0], server_ids[0]]),
+        case("too_many_mcp_servers", False, mcp_server_ids=server_ids),
+        case("null_presets_and_token", True, configure_preset=None, build_preset=None,
+             test_preset=None, preview_token=None),
+        case("nonboolean_rag", False, use_rag=1),
+        case("invalid_toolchain_profile", False, toolchain_profile="gcc--debug"),
+        case("blank_request", False, request=" \t\n"),
+        case("nul_request", False, request="fix\x00issue"),
+        case("posix_absolute_path", True, repository_path="/work/My Project"),
+        case("repository_path_over_limit", False, repository_path="/" + "x" * 4096),
+        case("windows_absolute_path", True, repository_path=r"C:\work\My Project"),
+        case("relative_path", False, repository_path="work/project"),
+        case("drive_relative_path", False, repository_path="C:project"),
+        case("unc_path", False, repository_path=r"\\server\share\project"),
+        case("double_slash_path", False, repository_path="//server/share"),
+        case("dot_segment", False, repository_path="C:/work/./project"),
+        case("parent_segment", False, repository_path=r"C:\work\..\project"),
+        case("colon_in_path", False, repository_path="C:/work:alt"),
+        case("control_in_path", False, repository_path="/work/\x7fproject"),
+        case("duplicate_baseline_path", False, baseline_paths=["main.cpp", "main.cpp"]),
+        case("nul_baseline_path", False, baseline_paths=["src/\x00.cpp"]),
+        case("git_revision_expression", True, base_ref="refs/heads/main~1"),
+        case("git_ref_option", False, base_ref="--help"),
+        case("git_ref_whitespace", False, base_ref="feature\u00a0branch"),
+        case("git_ref_control", False, base_ref="main\x7f"),
+        case("git_ref_colon", False, base_ref="HEAD:file"),
+        case("git_ref_backslash", False, base_ref=r"feature\branch"),
+        case("git_ref_max_length", True, base_ref="x" * 255 + "🚀"),
+        case("git_ref_over_limit", False, base_ref="x" * 257),
+    ]
+
+
 def examples():
     result = json.loads(Path(__file__).with_name("protocol_examples.v1.json").read_text(encoding="utf-8"))
     manual = _manual_skill_examples()
@@ -254,6 +314,7 @@ def examples():
     result["mission_create_with_skills_request"] = {
         **result["mission_create_request"], "request": "保存成功但列表仍显示旧值", "selected_skills": selected,
     }
+    result["mission_create_contract_cases"] = _mission_create_contract_cases(result["mission_create_request"], selected)
     result["mission_skills_response"] = {
         "task_id": TASK_ID, "selected_skills": selected,
         "injections": [{**selected[0], "node_id": "root_cause_analysis", "attempt": 1}],

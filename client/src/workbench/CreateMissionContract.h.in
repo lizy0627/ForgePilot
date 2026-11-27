@@ -1,0 +1,13 @@
+#pragma once
+#include <QJsonDocument>
+#include <QJsonObject>
+
+namespace CreateMissionContract {
+inline constexpr int MaxSelectedSkills = @max_selected_skills@;
+
+inline const QJsonObject &schema() {
+    static const auto requestSchema = QJsonDocument::fromJson(
+        R"schema(@create_mission_schema@)schema").object();
+    return requestSchema;
+}
+}

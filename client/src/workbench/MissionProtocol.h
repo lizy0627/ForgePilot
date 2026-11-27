@@ -1,4 +1,5 @@
 #pragma once
+#include "CreateMissionContract.h"
 #include <QJsonObject>
 #include <QStringList>
 #include <QUrl>
@@ -6,7 +7,7 @@
 // V2 transport validation is independent of the legacy Task protocol. Unknown
 // additive response fields are tolerated; required and consumed fields are typed.
 namespace MissionProtocol {
-inline constexpr int MaxSelectedSkills = 2;
+inline constexpr int MaxSelectedSkills = CreateMissionContract::MaxSelectedSkills;
 const QStringList &selectableSkillStages();
 bool validId(const QString &id);
 bool validHash(const QJsonValue &value);

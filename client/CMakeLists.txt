@@ -28,6 +28,7 @@ add_library(ForgePilotCommunication STATIC
     src/RepositoryModel.h src/RepositoryModel.cpp)
 target_sources(ForgePilotCommunication PRIVATE
     src/workbench/MissionProtocol.h src/workbench/MissionProtocol.cpp
+    src/workbench/CreateMissionRequest.h src/workbench/CreateMissionRequest.cpp
     src/workbench/SkillDraftClient.h src/workbench/SkillDraftClient.cpp
     src/workbench/WorkbenchListModel.h src/workbench/WorkbenchListModel.cpp
     src/workbench/MissionListModel.h src/workbench/MissionListModel.cpp
@@ -40,7 +41,20 @@ target_sources(ForgePilotCommunication PRIVATE
     src/workbench/DeliveryController.h src/workbench/DeliveryController.cpp
     src/workbench/MissionSnapshotLoader.h src/workbench/MissionSnapshotLoader.cpp
     src/workbench/MissionController.h src/workbench/MissionController.cpp)
-target_include_directories(ForgePilotCommunication PUBLIC src)
+# Embed the exported request schema so installed clients need no protocol files.
+set(openapi_path "${CMAKE_CURRENT_SOURCE_DIR}/../protocol/openapi.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${openapi_path}")
+file(READ "${openapi_path}" openapi)
+string(JSON mission_ref GET "${openapi}" paths /api/v2/missions post requestBody content application/json schema "$ref")
+get_filename_component(mission_model "${mission_ref}" NAME)
+string(JSON create_mission_schema GET "${openapi}" components schemas "${mission_model}")
+string(JSON max_selected_skills GET "${create_mission_schema}" properties selected_skills maxItems)
+string(JSON skill_ref GET "${create_mission_schema}" properties selected_skills items "$ref")
+get_filename_component(skill_model "${skill_ref}" NAME)
+string(JSON selected_skill_schema GET "${openapi}" components schemas "${skill_model}")
+string(JSON create_mission_schema SET "${create_mission_schema}" properties selected_skills items "${selected_skill_schema}")
+configure_file(src/workbench/CreateMissionContract.h.in generated/CreateMissionContract.h @ONLY)
+target_include_directories(ForgePilotCommunication PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(ForgePilotCommunication PUBLIC Qt6::Network Qt6::Concurrent Qt6::Gui)
 target_compile_features(ForgePilotCommunication PUBLIC cxx_std_20)
 target_compile_options(ForgePilotCommunication PUBLIC /utf-8)

@@ -9,11 +9,12 @@
 #include "HttpFixture.h"
 
 namespace {
-QJsonObject example(const QString &name) {
+QJsonObject protocolExamples() {
     QFile file(QFINDTESTDATA("../../protocol/examples.json"));
     if (!file.open(QIODevice::ReadOnly)) qFatal("Missing canonical protocol examples");
-    return QJsonDocument::fromJson(file.readAll()).object().value(name).toObject();
+    return QJsonDocument::fromJson(file.readAll()).object();
 }
+QJsonObject example(const QString &name) { return protocolExamples().value(name).toObject(); }
 QJsonObject mission() { return example("mission_query_response"); }
 QJsonObject artifact() {
     const QJsonObject item{{"evidence_id", "EV-1"}, {"claim", "Worker is still active"}, {"path", QJsonValue::Null},
@@ -53,6 +54,51 @@ void raw(const Request &r, const QByteArray &bytes, int status = 200) {
 class MissionApiTests : public QObject {
     Q_OBJECT
 private slots:
+    void createMissionContract_data() {
+        QTest::addColumn<QJsonObject>("body");
+        QTest::addColumn<bool>("valid");
+        const auto cases = protocolExamples().value("mission_create_contract_cases").toArray();
+        QVERIFY(!cases.isEmpty());
+        for (const auto &value : cases) {
+            const auto row = value.toObject();
+            QVERIFY(row.value("request").isObject());
+            QVERIFY(row.value("valid").isBool());
+            QTest::newRow(qPrintable(row.value("name").toString()))
+                << row.value("request").toObject() << row.value("valid").toBool();
+        }
+    }
+    void createMissionContract() {
+        QFETCH(QJsonObject, body);
+        QFETCH(bool, valid);
+        Source source;
+        const auto reply = mission();
+        source.handle = [&reply](const Request &r) { Source::json(r, reply, 202); };
+        AgentApiClient api;
+        QVERIFY(api.setBaseUrl(source.url()));
+        QSignalSpy responses(&api, &AgentApiClient::responseReceived), errors(&api, &AgentApiClient::requestError);
+        const auto serial = api.createMission(body);
+        QTRY_COMPARE(responses.size() + errors.size(), 1);
+        if (!valid) {
+            QCOMPARE(errors.size(), 1);
+            QCOMPARE(errors.first()[0].toULongLong(), serial);
+            QCOMPARE(errors.first()[1].toString(), "mission.create");
+            QCOMPARE(errors.first()[3].toInt(), 0);
+            QCOMPARE(errors.first()[4].toString(), "invalid_request");
+            QVERIFY(source.requests.isEmpty());
+            return;
+        }
+        QCOMPARE(responses.size(), 1);
+        QCOMPARE(responses.first()[0].toULongLong(), serial);
+        QCOMPARE(responses.first()[1].toString(), "mission.create");
+        QCOMPARE(responses.first()[3].toJsonObject(), reply);
+        QCOMPARE(source.requests.size(), 1);
+        const auto &request = source.requests.first();
+        QCOMPARE(request.method, "POST");
+        QCOMPARE(request.path, "/api/v2/missions");
+        // An explicit empty selection also uses the legacy no-skills wire form.
+        if (body.value("selected_skills") == QJsonValue(QJsonArray{})) body.remove("selected_skills");
+        QCOMPARE(request.body, body);
+    }
     void skillDraftEditingContract() {
         Source source;
         SkillDraftClient api;

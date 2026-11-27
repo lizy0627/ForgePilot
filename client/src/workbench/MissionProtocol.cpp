@@ -1,4 +1,5 @@
 #include "MissionProtocol.h"
+#include "CreateMissionRequest.h"
 #include "../Protocol.h"
 #include <QDateTime>
 #include <QJsonArray>
@@ -535,21 +536,7 @@ bool MissionProtocol::validRequest(const QString &op, const QJsonObject &o) {
         && (!o.contains("configure_preset") || text(o.value("configure_preset")))
         && (!o.contains("build_preset") || text(o.value("build_preset")))
         && (!o.contains("test_preset") || text(o.value("test_preset")));
-    if (op == "mission.create") return only(o, {"repository_path", "request", "task_type", "orchestration_mode", "base_ref", "toolchain_profile",
-            "baseline_paths", "configure_preset", "build_preset", "test_preset", "preview_token", "baseline_confirmed", "mcp_server_ids", "use_rag", "selected_skills"})
-        && text(o.value("repository_path")) && text(o.value("request"))
-        && (!o.contains("selected_skills") || selectedSkills(o.value("selected_skills"), MaxSelectedSkills))
-        && (!o.contains("mcp_server_ids") || serverIds(o.value("mcp_server_ids")))
-        && (!o.contains("use_rag") || o.value("use_rag").isBool())
-        && (!o.contains("task_type") || oneOf(o.value("task_type"), {"auto", "bug_fix", "feature"}))
-        && (!o.contains("orchestration_mode") || o.value("orchestration_mode").toString() == "multi_agent")
-        && (!o.contains("base_ref") || text(o.value("base_ref"))) && (!o.contains("toolchain_profile") || text(o.value("toolchain_profile")))
-        && (!o.contains("baseline_paths") || strings(o.value("baseline_paths")))
-        && (!o.contains("preview_token") || validHash(o.value("preview_token")))
-        && (!o.contains("baseline_confirmed") || o.value("baseline_confirmed").isBool())
-        && (!o.contains("configure_preset") || text(o.value("configure_preset")))
-        && (!o.contains("build_preset") || text(o.value("build_preset")))
-        && (!o.contains("test_preset") || text(o.value("test_preset")));
+    if (op == "mission.create") return validCreateMissionRequest(o);
     if (op == "mission.get" || op == "mission.graph" || op == "mission.skills" || op == "mission.scope-expansion"
         || op == "mission.artifacts" || op == "mission.diff" || op == "mission.validation") return o.isEmpty();
     if (op == "mission.artifact") return only(o, {"artifact_id"}) && validId(o.value("artifact_id").toString());

@@ -135,6 +135,29 @@ def test_v2_request_examples_match_strict_transport_schemas():
         Draft202012Validator(model.model_json_schema()).validate(samples[name])
 
 
+def _mission_create_contract_cases():
+    path = ROOT / "protocol" / "examples.json"
+    return json.loads(path.read_text(encoding="utf-8"))["mission_create_contract_cases"]
+
+
+@pytest.mark.parametrize("case", _mission_create_contract_cases(), ids=lambda case: case["name"])
+def test_mission_create_contract(case):
+    body = case["request"]
+    if case["valid"]:
+        parsed = CreateMission.model_validate(body)
+        assert parsed.model_dump(exclude_unset=True) == body
+    else:
+        with pytest.raises(ValidationError):
+            CreateMission.model_validate(body)
+
+
+def test_mission_create_contract_covers_every_exported_field():
+    schema = json.loads((ROOT / "protocol" / "openapi.json").read_text(encoding="utf-8"))
+    properties = schema["components"]["schemas"]["CreateMission"]["properties"]
+    covered = {field for case in _mission_create_contract_cases() if case["valid"] for field in case["request"]}
+    assert covered == set(properties)
+
+
 def test_node_retry_actions_distinguish_legacy_omission_from_no_action():
     current = examples()["mission_missing_current_evidence_node"]
     assert MissionNode.model_validate(current).model_dump()["retry_actions"] == []
