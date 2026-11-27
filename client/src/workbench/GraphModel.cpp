@@ -4,6 +4,24 @@
 #include <QSet>
 #include <QPointer>
 
+namespace {
+QStringList legacyRetryActions(const QJsonObject &definition, const QString &status,
+                               const QString &graphStatus, bool recoveryRequired)
+{
+    if (graphStatus != "retryable" && graphStatus != "interrupted") return {};
+    if (status == "interrupted") return {"resume"};
+    if (status != "retryable") return {};
+    if (graphStatus == "interrupted" || recoveryRequired) return {"resume"};
+    const auto role = definition.value("settings").toObject().value("recovery_role").toString();
+    if (!role.isEmpty()) return {role == "writer" || role == "delivery" ? "resume" : "retry"};
+    const auto handler = definition.value("handler").toString();
+    const auto name = definition.value("agent_id").toString(handler).toLower();
+    const bool writer = name.contains("implementer") || name.contains("repair")
+        || (name == "generalist.v1" && (definition.value("node_id") == "implementer" || handler == "repair.v1"));
+    return {writer || definition.value("node_type") == "delivery" ? "resume" : "retry"};
+}
+}
+
 GraphModel::GraphModel(QObject *parent)
     : WorkbenchListModel({{NodeIdRole,"nodeId"},{NodeTypeRole,"nodeType"},{StatusRole,"status"},
         {AttemptRole,"attempt"},{DependenciesRole,"dependencies"},{AgentIdRole,"agentId"},
@@ -26,6 +44,7 @@ bool GraphModel::setSnapshotNow(const QJsonObject &graph)
     }
     QList<QVariantMap> next;
     QStringList currentAgents;
+    bool hasResumeAction = false;
     QSet<QString> ids;
     const QString graphStatus = graph.value("status").toString();
     for (const auto &entry : graph.value("nodes").toArray()) {
@@ -55,27 +74,36 @@ bool GraphModel::setSnapshotNow(const QJsonObject &graph)
         const auto handler = definition.value("handler").toString();
         const auto pendingAction = MissionProtocol::pendingAction(node, handler);
         row.insert("pendingAction", pendingAction);
-        const auto role = definition.value("settings").toObject().value("recovery_role").toString();
-        const auto executionName = (agent.isEmpty() ? handler : agent).toLower();
-        const bool writer = role == "writer" || type == "delivery" || role == "delivery"
-            || (role.isEmpty() && (executionName.contains("implementer") || executionName.contains("repair")));
         if (pendingAction == "execution" && !m_recoveryRequired) actions << "approve" << "reject";
-        if (graphStatus != "running" && status == "retryable" && !writer && !m_recoveryRequired) actions << "retry";
-        if (graphStatus != "running" && (status == "interrupted" || (status == "retryable" && (writer || m_recoveryRequired))))
-            actions << "resume";
+        const auto advertised = node.value("retry_actions");
+        actions += advertised.isUndefined() ? legacyRetryActions(definition, status, graphStatus, m_recoveryRequired)
+                                            : advertised.toVariant().toStringList();
+        hasResumeAction |= actions.contains("resume");
         row.insert("actions", actions);
         next.append(row);
     }
-    const bool metadataChanged = task != m_taskId || revision != m_revision || graphStatus != m_status || currentAgents != m_currentAgents;
+    const bool metadataChanged = task != m_taskId || revision != m_revision || graphStatus != m_status
+        || currentAgents != m_currentAgents || hasResumeAction != m_hasResumeAction;
     m_snapshot = graph;
     m_taskId = task;
     m_revision = revision;
     m_status = graphStatus;
     m_currentAgents = currentAgents;
+    m_hasResumeAction = hasResumeAction;
     QPointer<GraphModel> guard(this);
     if (!replaceRows(next, "nodeId")) return false;
     if (metadataChanged) emit snapshotChanged();
     return !guard.isNull();
+}
+
+bool GraphModel::allowsRetry(const QString &nodeId) const
+{
+    for (const auto &row : rows()) {
+        if (row.value("nodeId") == nodeId && row.contains("retry_actions"))
+            return row.value("actions").toStringList().contains("retry");
+    }
+    // Older backends resolve the optional node ID and check its state on POST.
+    return !m_recoveryRequired;
 }
 
 void GraphModel::setRecoveryRequired(bool required)
@@ -96,7 +124,7 @@ void GraphModel::clear()
     if (m_taskId.isEmpty() && count() == 0 && !m_recoveryRequired) return;
     m_snapshot = {};
     m_taskId.clear(); m_status.clear(); m_currentAgents.clear();
-    m_revision = 0; m_recoveryRequired = false;
+    m_revision = 0; m_recoveryRequired = false; m_hasResumeAction = false;
     if (!replaceRows({}, {})) return;
     emit snapshotChanged();
     });

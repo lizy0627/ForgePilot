@@ -15,7 +15,7 @@ from ..artifacts.models import ChangeSet, ExecutionPlan
 from ..errors import ForgePilotError
 from .checkpoint import CheckpointStore
 from .execution import ExecutionCoordinator, coordinator_for_storage
-from .models import GraphDefinition, NodeDefinition, NodeResult, NodeStatus, NodeType, idempotency_key
+from .models import GraphDefinition, NodeDefinition, NodeResult, NodeState, NodeStatus, NodeType, idempotency_key
 from .store import GraphStore
 from .workspace import UnavailableWorkspaceBackend, WorkspaceSnapshot
 
@@ -41,6 +41,17 @@ def recovery_role(node: NodeDefinition) -> str:
         if role in name:
             return role
     return "deterministic"
+
+
+def node_retry_action(state: NodeState, node: NodeDefinition, *,
+                      graph_status: NodeStatus, recovery_required: bool) -> str | None:
+    if graph_status not in {NodeStatus.RETRYABLE, NodeStatus.INTERRUPTED}:
+        return None
+    if state.status not in {NodeStatus.RETRYABLE, NodeStatus.INTERRUPTED}:
+        return None
+    if graph_status is NodeStatus.INTERRUPTED or state.status is NodeStatus.INTERRUPTED or recovery_required:
+        return "resume"
+    return "resume" if recovery_role(node) in {"writer", "delivery"} else "retry"
 
 
 def checkpoint_type(node, artifacts, *, approved=False):
@@ -555,4 +566,4 @@ class RecoveryManager:
                                          changes=tuple(changes))
 
 
-__all__ = ["RecoveryManager", "RecoveryPlan", "checkpoint_type", "recovery_role"]
+__all__ = ["RecoveryManager", "RecoveryPlan", "checkpoint_type", "node_retry_action", "recovery_role"]

@@ -2903,6 +2903,19 @@
             ],
             "title": "Result"
           },
+          "retry_actions": {
+            "description": "Retry or recovery actions offered for this node at the graph's current_revision. An empty array means no action is available. Older services may omit this field.",
+            "items": {
+              "enum": [
+                "retry",
+                "resume"
+              ],
+              "type": "string"
+            },
+            "title": "Retry Actions",
+            "type": "array",
+            "uniqueItems": true
+          },
           "status": {
             "title": "Status",
             "type": "string"

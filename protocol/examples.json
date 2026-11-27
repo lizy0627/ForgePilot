@@ -753,7 +753,33 @@
       "retryable": false,
       "status": "awaiting_human"
     },
+    "retry_actions": [],
     "status": "awaiting_human"
+  },
+  "mission_interrupted_node": {
+    "attempt": 1,
+    "node_id": "implementer",
+    "node_type": "agent",
+    "pending_action": null,
+    "result": {
+      "decision_summary": "",
+      "error_summary": "Execution interrupted",
+      "failure_kind": "application_interrupted",
+      "metrics": {
+        "duration_ms": 0,
+        "model_calls": 0,
+        "tool_calls": 0,
+        "total_tokens": 0
+      },
+      "next_route": null,
+      "output_artifact_ids": [],
+      "retryable": false,
+      "status": "interrupted"
+    },
+    "retry_actions": [
+      "resume"
+    ],
+    "status": "interrupted"
   },
   "mission_missing_current_evidence_node": {
     "attempt": 1,
@@ -775,6 +801,7 @@
       "retryable": false,
       "status": "failed"
     },
+    "retry_actions": [],
     "status": "failed"
   },
   "mission_query_response": {
@@ -820,6 +847,31 @@
   "mission_retry_request": {
     "expected_revision": 8,
     "node_id": "root_cause_analysis"
+  },
+  "mission_retryable_node": {
+    "attempt": 1,
+    "node_id": "root_cause_analysis",
+    "node_type": "agent",
+    "pending_action": null,
+    "result": {
+      "decision_summary": "",
+      "error_summary": "Model temporarily unavailable",
+      "failure_kind": "model_transient",
+      "metrics": {
+        "duration_ms": 0,
+        "model_calls": 0,
+        "tool_calls": 0,
+        "total_tokens": 0
+      },
+      "next_route": null,
+      "output_artifact_ids": [],
+      "retryable": true,
+      "status": "retryable"
+    },
+    "retry_actions": [
+      "retry"
+    ],
+    "status": "retryable"
   },
   "mission_revision_conflict_error": {
     "error": {
@@ -885,6 +937,7 @@
       "retryable": false,
       "status": "awaiting_human"
     },
+    "retry_actions": [],
     "status": "awaiting_human"
   },
   "mission_skill_selection_changed_error": {

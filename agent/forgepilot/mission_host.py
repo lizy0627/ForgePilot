@@ -25,8 +25,8 @@ from .errors import ForgePilotError
 from .mission_events import safe_event_data
 from .orchestration.analysis_review import AnalysisReviewStore
 from .orchestration.graph import validate_graph
-from .orchestration.models import NodeStatus, NodeType, TERMINAL_NODE_STATUSES
-from .orchestration.recovery import recovery_role
+from .orchestration.models import GraphDefinition, NodeStatus, NodeType, TERMINAL_NODE_STATUSES
+from .orchestration.recovery import node_retry_action
 from .orchestration.scope_expansion import ScopeExpansionStore
 from .orchestration.store import GraphStore
 
@@ -290,9 +290,8 @@ class MissionHost:
                 return
             self.store.missions.record_delivery_outcome(task_id, intent["mode"], result=result, recovered=True)
 
-    def _pending_actions(self, snapshot, run, metadata):
-        if (snapshot.status is not NodeStatus.AWAITING_HUMAN or snapshot.graph_id in LEGACY_DELIVERY_GRAPH_IDS
-                or _missing_frozen_config(metadata, snapshot)):
+    def _pending_actions(self, snapshot, run):
+        if snapshot.status is not NodeStatus.AWAITING_HUMAN:
             return {}
         # A published expansion can be decided after restart. Execution approval
         # requires recovery confirmation first.
@@ -311,13 +310,24 @@ class MissionHost:
 
     def graph(self, task_id):
         with self.store.missions.graph_view(task_id) as (metadata, run, snapshot):
-            actions = self._pending_actions(snapshot, run, metadata)
+            actionable = (snapshot.graph_id not in LEGACY_DELIVERY_GRAPH_IDS
+                          and not _missing_frozen_config(metadata, snapshot))
+            approvals = self._pending_actions(snapshot, run) if actionable else {}
+        definition = json.loads(run["definition_json"])
+        retries = {}
+        if actionable:
+            states = {state.node_id: state for state in snapshot.nodes}
+            for node in GraphDefinition.from_dict(definition).nodes:
+                action = node_retry_action(states[node.node_id], node, graph_status=snapshot.status,
+                                           recovery_required=bool(run["recovery_required"]))
+                if action:
+                    retries[node.node_id] = [action]
         result = dict(task_id=task_id, graph_id=snapshot.graph_id, graph_version=snapshot.graph_version,
             definition_hash=snapshot.definition_hash, status=snapshot.status.value,
-            current_revision=snapshot.revision, definition=json.loads(run["definition_json"]), nodes=[{
+            current_revision=snapshot.revision, definition=definition, nodes=[{
                 "node_id": n.node_id, "node_type": n.node_type.value, "status": n.status.value,
                 "attempt": n.attempt, "result": n.result.to_dict() if n.result else None,
-                "pending_action": actions.get(n.node_id),
+                "pending_action": approvals.get(n.node_id), "retry_actions": retries.get(n.node_id, []),
             } for n in snapshot.nodes])
         return safe_event_data(self.store.redactor, result)
 
@@ -841,22 +851,19 @@ class MissionHost:
             self._idle(task_id)
             workflow = self._workflow(task_id)
             definition = workflow._stored_graph(task_id)
-            candidates = [n for n in snapshot.nodes if n.status is NodeStatus.RETRYABLE]
-            if node_id is None and len(candidates) == 1:
-                node_id = candidates[0].node_id
-            if not any(n.node_id == node_id for n in candidates):
-                raise ForgePilotError("invalid_state", "Select a retryable mission node")
-            workflow.runner.assert_definition(snapshot, validate_graph(definition))
-            selected = next(node for node in definition.nodes if node.node_id == node_id)
-            if recovery_role(selected) in {"writer", "delivery"}:
-                raise ForgePilotError("recovery_required", "Writer and delivery nodes require recovery confirmation")
-            if self.store.missions.get_graph_run(task_id)["recovery_required"]:
-                raise ForgePilotError("recovery_required", "Inspect and confirm mission recovery first")
-            # Commit the retry admission before returning 202. Worker execution
-            # may then proceed without keeping the HTTP request alive.
-            self.graphs.transition(task_id, node_id, expected_revision=revision,
-                source=NodeStatus.RETRYABLE, target=NodeStatus.READY,
-                event_type="node_retry_started", payload={"reason": "explicit_retry"})
+            if node_id is None:
+                candidates = [n.node_id for n in snapshot.nodes if n.status is NodeStatus.RETRYABLE]
+                if len(candidates) != 1:
+                    raise ForgePilotError("invalid_state", "Select a retryable mission node")
+                node_id = candidates[0]
+            try:
+                workflow.runner.admit_retry(task_id, definition, node_id, expected_revision=revision)
+            except ForgePilotError as exc:
+                if exc.code == "recovery_confirmation_required":
+                    raise ForgePilotError("recovery_required", exc.message) from None
+                if exc.code == "unknown_node":
+                    raise ForgePilotError("invalid_state", "Select a retryable mission node") from None
+                raise
             self._launch(task_id, workflow.run(task_id))
             return self.get(task_id)
 

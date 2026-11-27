@@ -70,6 +70,8 @@ private slots:
     void graphRolesAndUpdates();
     void parallelAnalystsAndJoinExposeOnlyActiveAgents();
     void graphRecoveryActions();
+    void advertisedAndLegacyRetryActions_data();
+    void advertisedAndLegacyRetryActions();
     void graphApprovalActions();
     void malformedAndLateSnapshotsAreAtomic();
     void evidenceKeepsBundleIdentity();
@@ -185,14 +187,64 @@ void WorkbenchModelTests::graphRecoveryActions()
     QAbstractItemModelTester tester(&model, QAbstractItemModelTester::FailureReportingMode::QtTest);
     model.setSnapshot(graph(5, "retryable"));
     QCOMPARE(model.get(0).value("actions").toStringList(), QStringList{"retry"});
+    QVERIFY(model.allowsRetry({}));
     model.setRecoveryRequired(true);
     QCOMPARE(model.get(0).value("actions").toStringList(), QStringList{"resume"});
+    QVERIFY(!model.allowsRetry({}));
     model.setRecoveryRequired(false);
     QCOMPARE(model.get(0).value("actions").toStringList(), QStringList{"retry"});
     model.setSnapshot(graph(6, "retryable", "writer"));
     QCOMPARE(model.get(0).value("actions").toStringList(), QStringList{"resume"});
     model.setSnapshot(graph(7, "failed"));
     QVERIFY(model.get(0).value("actions").toStringList().isEmpty());
+    auto interrupted = graph(8, "retryable");
+    interrupted["status"] = "interrupted";
+    model.setSnapshot(interrupted);
+    QVERIFY(!model.recoveryRequired());
+    QCOMPARE(model.get(0).value("actions").toStringList(), QStringList{"resume"});
+}
+
+void WorkbenchModelTests::advertisedAndLegacyRetryActions_data()
+{
+    QTest::addColumn<QString>("id");
+    QTest::addColumn<QString>("handler");
+    QTest::addColumn<QString>("type");
+    QTest::addColumn<QString>("role");
+    QTest::addColumn<QJsonValue>("advertised");
+    QTest::addColumn<QStringList>("expected");
+    const QJsonValue missing(QJsonValue::Undefined);
+    QTest::newRow("legacy-generalist-implementer") << QString("implementer") << QString("implement")
+        << QString("agent") << QString{} << missing << QStringList{"resume"};
+    QTest::newRow("legacy-generalist-repair") << QString("repair_1") << QString("repair.v1")
+        << QString("agent") << QString{} << missing << QStringList{"resume"};
+    QTest::newRow("legacy-deterministic-delivery") << QString("delivery_bundle") << QString("delivery")
+        << QString("delivery") << QString("deterministic") << missing << QStringList{"retry"};
+    QTest::newRow("explicitly-no-actions") << QString("investigate") << QString("analysis")
+        << QString("agent") << QString{} << QJsonValue(QJsonArray{}) << QStringList{};
+    QTest::newRow("advertised-resume") << QString("investigate") << QString("analysis")
+        << QString("agent") << QString{} << QJsonValue(QJsonArray{"resume"}) << QStringList{"resume"};
+}
+
+void WorkbenchModelTests::advertisedAndLegacyRetryActions()
+{
+    QFETCH(QString, id); QFETCH(QString, handler); QFETCH(QString, type); QFETCH(QString, role);
+    QFETCH(QJsonValue, advertised); QFETCH(QStringList, expected);
+    auto snapshot = graph(5, "retryable");
+    auto definition = snapshot["definition"].toObject();
+    auto declared = definition["nodes"].toArray().first().toObject();
+    declared["node_id"] = id; declared["node_type"] = type; declared["handler"] = handler;
+    declared["agent_id"] = type == "agent" ? QJsonValue("generalist.v1") : QJsonValue(QJsonValue::Null);
+    declared["settings"] = role.isEmpty() ? QJsonObject{} : QJsonObject{{"recovery_role", role}};
+    definition["nodes"] = QJsonArray{declared};
+    snapshot["definition"] = definition;
+    auto node = snapshot["nodes"].toArray().first().toObject();
+    node["node_id"] = id; node["node_type"] = type; node.insert("retry_actions", advertised);
+    snapshot["nodes"] = QJsonArray{node};
+    GraphModel model;
+    model.setSnapshot(snapshot);
+    QCOMPARE(model.get(0).value("actions").toStringList(), expected);
+    QCOMPARE(model.hasResumeAction(), expected.contains("resume"));
+    QCOMPARE(model.allowsRetry(id), advertised.isUndefined() || expected.contains("retry"));
 }
 
 void WorkbenchModelTests::graphApprovalActions()

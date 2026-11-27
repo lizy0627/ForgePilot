@@ -592,7 +592,7 @@ void MissionController::cancel()
 }
 void MissionController::retry(const QString &nodeId)
 {
-    if (!canControl() || m_snapshot.value("recovery_required").toBool()) return;
+    if (!canControl() || !m_graph.allowsRetry(nodeId)) return;
     track(m_api.retryMission(m_task, revision(), nodeId), RequestKind::Mutation);
 }
 void MissionController::prepareRecovery()

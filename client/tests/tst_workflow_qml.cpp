@@ -2297,10 +2297,71 @@ print(json.dumps(result))
         QCOMPARE(ui.missions.taskId(), task);
         QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
     }
+    void retryClickUsesCurrentRevisionAndRefreshesActionsAfterConflict()
+    {
+        Fixture fixture;
+        const QString selected = "root_cause_analysis";
+        const auto setActions = [&](qint64 revision, const QJsonArray &actions) {
+            fixture.setPhase("retryable", selected, revision);
+            for (auto entry : fixture.nodes) {
+                auto node = entry.toObject();
+                node["retry_actions"] = QJsonArray{};
+                if (node["node_id"] == selected) {
+                    node["status"] = "retryable";
+                    node["retry_actions"] = actions;
+                }
+                entry = node;
+            }
+        };
+        setActions(8, {"retry"});
+        QList<Request> retries;
+        fixture.intercept = [&](const Request &r) {
+            if (r.path.endsWith("/retry")) { retries.append(r); return true; }
+            return false;
+        };
+        Ui ui(fixture);
+        QVERIFY2(ui.load(), qPrintable(ui.warnings.join('\n')));
+        QVERIFY(ui.click("agentWorkbenchModeButton"));
+        ui.missions.selectMission(MissionId);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QVERIFY(ui.click("workflowAttentionButton"));
+        auto *retry = ui.find("workflowRetryNode");
+        auto *resume = ui.find("workflowRecoveryPreview");
+        QVERIFY(retry && resume);
+        QTRY_VERIFY(retry->isVisible());
+        QVERIFY(!resume->isVisible());
+        QVERIFY(ui.click(retry));
+        QTRY_VERIFY(!retry->isEnabled());
+        const auto center = retry->mapToScene(QPointF(retry->width() / 2, retry->height() / 2)).toPoint();
+        QTest::mouseClick(ui.window, Qt::LeftButton, Qt::NoModifier, center);
+        QTRY_COMPARE(retries.size(), 1);
+        QCOMPARE(retries.first().body, (QJsonObject{{"node_id", selected}, {"expected_revision", 8}}));
+
+        setActions(9, {});
+        Source::json(retries.first(), {{"error", QJsonObject{{"code", "mission_revision_conflict"},
+            {"message", "Changed"}, {"details", QJsonArray{}}, {"task_id", MissionId}}}}, 409);
+        QTRY_COMPARE(ui.missions.revision(), 9);
+        QTRY_VERIFY(ui.missions.synchronized());
+        QTRY_VERIFY(!retry->isVisible());
+        QVERIFY(!resume->isVisible());
+        ui.missions.retry(selected);
+        QVERIFY(!ui.missions.busy());
+        setActions(10, {"resume"});
+        ui.missions.refresh();
+        QTRY_VERIFY(resume->isVisible() && resume->isEnabled());
+        QVERIFY(!retry->isVisible());
+        QCOMPARE(retries.size(), 1);
+        QVERIFY2(ui.warnings.isEmpty(), qPrintable(ui.warnings.join('\n')));
+    }
     void interruptedApprovalCanPreviewAndConfirmRecoveryWithoutResumeAction()
     {
         Fixture fixture; fixture.setPhase("awaiting_human", "execution_approval");
         fixture.mission["recovery_required"] = true;
+        for (auto entry : fixture.nodes) {
+            auto node = entry.toObject();
+            node["retry_actions"] = QJsonArray{};
+            entry = node;
+        }
         QList<QJsonObject> resumePosts;
         fixture.intercept = [&](const Request &request) {
             if (!request.path.endsWith("/resume")) return false;

@@ -59,6 +59,15 @@ bool objects(const QJsonValue &v) {
 }
 bool stamp(const QJsonValue &v) { return text(v) && QDateTime::fromString(v.toString(), Qt::ISODateWithMs).isValid(); }
 bool oneOf(const QJsonValue &v, const QSet<QString> &choices) { return v.isString() && choices.contains(v.toString()); }
+bool retryActions(const QJsonValue &value) {
+    if (!value.isArray()) return false;
+    QSet<QString> seen;
+    for (const auto &entry : value.toArray()) {
+        if (!oneOf(entry, {"retry", "resume"}) || seen.contains(entry.toString())) return false;
+        seen.insert(entry.toString());
+    }
+    return true;
+}
 bool only(const QJsonObject &o, const QSet<QString> &fields) {
     for (auto it = o.begin(); it != o.end(); ++it) if (!fields.contains(it.key())) return false;
     return true;
@@ -433,7 +442,7 @@ bool MissionProtocol::validGraph(const QJsonObject &o) {
     for (const auto &v : o.value("nodes").toArray()) {
         const auto n = v.toObject(); const auto id = n.value("node_id").toString();
         if (id.isEmpty() || ids.contains(id) || !nodeType(n.value("node_type")) || !validState(n.value("status").toString())
-            || !integer(n.value("attempt")) || !result(n.value("result"))) return false;
+            || !integer(n.value("attempt")) || !result(n.value("result")) || !optional(n, "retry_actions", retryActions)) return false;
         const auto action = n.value("pending_action");
         if (!action.isUndefined() && !action.isNull() && !oneOf(action, {"execution", "scope_expansion"}))
             return false;

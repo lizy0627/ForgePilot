@@ -105,9 +105,9 @@ Item {
                 TaskGraphView { mission: root.mission; Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg }
                 ActivityTimeline { mission: root.mission; events: root.activityEvents; Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg }
                 Controls.Panel {
-                    title: "恢复任务"; visible: !!root.mission.taskId && (root.mission.status === "interrupted" || root.mission.snapshot.recovery_required || !!root.mission.recovery.token)
+                    title: "恢复任务"; visible: !!root.mission.taskId && (root.mission.graph.hasResumeAction || root.mission.snapshot.recovery_required || !!root.mission.recovery.token)
                     Layout.fillWidth: true; Layout.leftMargin: Theme.spaceLg; Layout.rightMargin: Theme.spaceLg
-                    Label { text: "任务已中断。先生成恢复预览，核对检查和动作后再确认。"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Theme.warning }
+                    Label { text: "先生成恢复预览，核对检查和动作后再确认。"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Theme.warning }
                     Controls.ActionButton { objectName: "missionRecoveryButton"; text: "检查恢复方案"; enabled: root.mission.synchronized && !root.mission.busy; onClicked: root.mission.prepareRecovery() }
                     Label { visible: !!root.mission.recovery.revision; text: "修订 " + (root.mission.recovery.revision || "") + " · 检查：" + W.lines(root.mission.recovery.checks) + "\n阻塞原因：" + (root.mission.recovery.blocked_reason || "无")
                         + "\n动作：" + (root.mission.recovery.actions || []).map(function(a) { return a.action || a.kind || a.type || "检查" }).join("、"); Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }

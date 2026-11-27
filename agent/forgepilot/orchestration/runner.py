@@ -21,7 +21,7 @@ from .models import (
 from .node_handlers import HandlerRegistry, NodeContext, NodeExecutionError
 from .policies import DefaultFailurePolicy, FailurePolicy
 from .store import GraphStore
-from .recovery import RecoveryManager, recovery_role
+from .recovery import RecoveryManager, node_retry_action, recovery_role
 from .workspace import WorkspaceSnapshot
 
 
@@ -193,22 +193,30 @@ class GraphRunner:
         # run() takes the same non-reentrant execution lock for its next batch.
         return self.run(task_id, graph)
 
-    def retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
-              expected_revision: int, input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
+    def admit_retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
+                    expected_revision: int) -> GraphSnapshot:
+        """Commit the explicit retry before the caller schedules or runs the graph."""
         validated = validate_graph(graph)
         snapshot = self.store.snapshot(task_id)
         self.assert_definition(snapshot, validated)
+        if snapshot.revision != expected_revision:
+            raise ForgePilotError("graph_conflict", "Graph revision changed concurrently")
         current = self._node(snapshot, node_id)
-        if (self.store.recovery_required(task_id) or current.status in {NodeStatus.INTERRUPTED, NodeStatus.RUNNING}
-                or recovery_role(validated.nodes[node_id]) in {"writer", "delivery"}):
+        action = node_retry_action(current, validated.nodes[node_id], graph_status=snapshot.status,
+                                   recovery_required=self.store.recovery_required(task_id))
+        if action == "resume" or current.status is NodeStatus.RUNNING:
             raise ForgePilotError("recovery_confirmation_required", "Inspect and confirm the recovery plan before retrying")
-        if current.status is not NodeStatus.RETRYABLE:
-            raise ForgePilotError("invalid_state", "Only retryable or interrupted nodes can retry")
-        self.store.transition(
+        if action != "retry":
+            raise ForgePilotError("invalid_state", "Select a retryable node")
+        return self.store.transition(
             task_id, node_id, expected_revision=expected_revision,
             source=NodeStatus.RETRYABLE, target=NodeStatus.READY,
             event_type="node_retry_started", payload={"reason": "explicit_retry"},
         )
+
+    def retry(self, task_id: str, graph: GraphDefinition, node_id: str, *,
+              expected_revision: int, input_artifact_ids: Iterable[str] = ()) -> GraphSnapshot:
+        self.admit_retry(task_id, graph, node_id, expected_revision=expected_revision)
         return self.run(task_id, graph, input_artifact_ids=input_artifact_ids)
 
     def cancel(self, task_id: str, *, expected_revision: int) -> GraphSnapshot:

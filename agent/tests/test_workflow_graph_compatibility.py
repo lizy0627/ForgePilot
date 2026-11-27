@@ -8,9 +8,13 @@ from forgepilot.agents.analysis import AnalysisService
 from forgepilot.agents.delivery import DeliveryWorkflow
 from forgepilot.agents.implementation import ImplementationService
 from forgepilot.artifacts.canonical import content_sha256
+from forgepilot.errors import ForgePilotError
+from forgepilot.mission_events import append_mission_event
+from forgepilot.mission_host import MissionHost
 from forgepilot.models.gateway import ModelGateway
 from forgepilot.orchestration.graph import validate_graph
 from forgepilot.sqlite_store import SqliteEventStore
+from forgepilot.task_host import TaskHost
 from forgepilot.workspace_manager import WorkspaceManager
 from test_analysis_workflow import request, spec_data
 from test_mission_factory import configuration
@@ -36,6 +40,32 @@ def graph_workflow_factory(tmp_path):
         yield make
     finally:
         events.close()
+
+
+@pytest.mark.parametrize("paused,action", [
+    ("implementer", "resume"), ("repair_1", "resume"), ("delivery_bundle", "retry"),
+])
+def test_paused_single_agent_projects_actions_from_frozen_roles(graph_workflow_factory, paused, action):
+    workflow = graph_workflow_factory(DeliveryWorkflow, single_agent=True)
+    graph = workflow.graph()
+    workflow.runner.store.create_run("frozen", validate_graph(graph))
+    events = workflow.events
+    with events._transaction():
+        append_mission_event(events, "frozen", "task.created", {"orchestration_mode": "single_agent"})
+        events._db.execute("UPDATE task_graph_runs SET status='retryable' WHERE task_id='frozen'")
+        events._db.execute("UPDATE graph_node_states SET status='retryable' WHERE task_id='frozen' AND node_id=?", (paused,))
+
+    host = MissionHost(TaskHost(lambda _: None, store=events))
+    projected = host.graph("frozen")
+    assert {n["node_id"]: n["retry_actions"] for n in projected["nodes"] if n["retry_actions"]} == {paused: [action]}
+    assert projected["definition"] == graph.to_dict()
+    assert projected["definition_hash"] == graph.definition_hash
+    if action == "resume":
+        with pytest.raises(ForgePilotError, match="recovery_confirmation_required"):
+            workflow.runner.admit_retry("frozen", graph, paused, expected_revision=projected["current_revision"])
+    else:
+        admitted = workflow.runner.admit_retry("frozen", graph, paused, expected_revision=projected["current_revision"])
+        assert admitted.revision == projected["current_revision"] + 1
 
 
 # A locked delivery graph keeps its historical .v2 ID even at graph versions 3 and 4.

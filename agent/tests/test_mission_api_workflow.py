@@ -250,6 +250,9 @@ async def test_http_recovery_and_delivery_require_fresh_explicit_confirmation(tm
             assert accepted.status_code == 202, accepted.text
             paused = await poll(client, path, {"retryable"})
             assert paused["recovery_required"] is False
+            paused_graph = (await client.get(path + "/graph")).json()
+            assert {n["node_id"]: n["retry_actions"] for n in paused_graph["nodes"]} == {
+                "draft": [], "execution_approval": [], "finish": ["retry"]}
             assert (await client.get(path + "/validation")).json()["latest"] is None
             assert (await client.get(path + "/diff")).json()["patch"] == ""
 
@@ -259,6 +262,15 @@ async def test_http_recovery_and_delivery_require_fresh_explicit_confirmation(tm
             assert preview["mission"]["recovery_required"] is True
             assert preview["recovery"]["blocked_reason"] is None
             assert preview["recovery"]["token"]
+            recovering_graph = (await client.get(path + "/graph")).json()
+            assert recovering_graph["current_revision"] == preview["mission"]["current_revision"]
+            assert next(n for n in recovering_graph["nodes"] if n["node_id"] == "finish")["retry_actions"] == ["resume"]
+            assert recovering_graph["definition"] == paused_graph["definition"]
+            assert recovering_graph["definition_hash"] == paused_graph["definition_hash"]
+            assert all("retry_actions" not in n for n in recovering_graph["definition"]["nodes"])
+            denied = await client.post(path + "/retry", json={
+                "expected_revision": recovering_graph["current_revision"], "node_id": "finish"})
+            assert denied.status_code == 409 and denied.json()["error"]["code"] == "recovery_required"
             wrong = await client.post(path + "/resume", json={
                 "expected_revision": preview["mission"]["current_revision"], "recovery_token": "0" * 64})
             assert wrong.status_code == 409 and wrong.json()["error"]["code"] == "graph_conflict"

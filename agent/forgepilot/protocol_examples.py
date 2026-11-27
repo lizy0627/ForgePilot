@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from .artifacts.canonical import content_sha256
-from .orchestration.models import NodeResult, NodeStatus
+from .orchestration.models import FailureKind, NodeResult, NodeStatus
 from .skill_models import SkillContent, SkillDraftContent
 
 
@@ -187,15 +187,27 @@ def examples():
         },
         "mission_execution_pending_node": {
             "node_id": "execution_approval", "node_type": "human_gate", "status": "awaiting_human",
-            "attempt": 1, "pending_action": "execution",
+            "attempt": 1, "pending_action": "execution", "retry_actions": [],
             "result": NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary="Approve the frozen execution plan",
                                  output_artifact_ids=("22222222-2222-4222-8222-222222222222",
                                                       "33333333-3333-4333-8333-333333333333")).to_dict(),
         },
         "mission_scope_pending_node": {
             "node_id": "repair_1", "node_type": "agent", "status": "awaiting_human",
-            "attempt": 1, "pending_action": "scope_expansion",
+            "attempt": 1, "pending_action": "scope_expansion", "retry_actions": [],
             "result": NodeResult(NodeStatus.AWAITING_HUMAN, decision_summary="Review the requested files").to_dict(),
+        },
+        "mission_retryable_node": {
+            "node_id": "root_cause_analysis", "node_type": "agent", "status": "retryable",
+            "attempt": 1, "pending_action": None, "retry_actions": ["retry"],
+            "result": NodeResult(NodeStatus.RETRYABLE, retryable=True, failure_kind=FailureKind.MODEL_TRANSIENT,
+                                 error_summary="Model temporarily unavailable").to_dict(),
+        },
+        "mission_interrupted_node": {
+            "node_id": "implementer", "node_type": "agent", "status": "interrupted",
+            "attempt": 1, "pending_action": None, "retry_actions": ["resume"],
+            "result": NodeResult(NodeStatus.INTERRUPTED, failure_kind=FailureKind.APPLICATION_INTERRUPTED,
+                                 error_summary="Execution interrupted").to_dict(),
         },
         "mission_scope_expansion_preview": {
             "task_id": TASK_ID, "revision": 42, "node_id": "repair_1",
@@ -249,7 +261,7 @@ def examples():
     result["mission_skills_empty_response"] = {"task_id": TASK_ID, "selected_skills": [], "injections": []}
     result["mission_missing_current_evidence_node"] = {
         "node_id": "root_cause_analysis", "node_type": "agent", "status": "failed", "attempt": 1,
-        "pending_action": None,
+        "pending_action": None, "retry_actions": [],
         "result": {"status": "failed", "output_artifact_ids": [], "decision_summary": "",
                    "next_route": None, "retryable": False, "failure_kind": "model_contract_violation",
                    "error_summary": "evidence_location",

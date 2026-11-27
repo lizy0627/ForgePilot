@@ -261,11 +261,35 @@ async def test_retry_and_confirmed_recovery_continue_paused_missions(tmp_path, g
         paused = await settled(missions, tid)
         assert paused["status"] == "retryable", missions.graph(tid)
         if control == "retry":
-            await missions.retry(tid, expected_revision=paused["current_revision"], node_id="finish")
+            # Hold the next execution to observe the committed admission returned to HTTP.
+            release = Event()
+            workflow = missions._services[tid]
+            run = workflow.run
+
+            async def held_run(task_id):
+                assert await asyncio.to_thread(release.wait, 10)
+                return await run(task_id)
+
+            workflow.run = held_run
+            try:
+                clicks = await asyncio.gather(*(
+                    missions.retry(tid, expected_revision=paused["current_revision"]) for _ in range(2)
+                ), return_exceptions=True)
+                accepted, = (result for result in clicks if isinstance(result, dict))
+                assert accepted["current_revision"] == paused["current_revision"] + 1
+                assert next(n.status for n in missions.graphs.snapshot(tid).nodes if n.node_id == "finish") is NodeStatus.READY
+            finally:
+                release.set()
+            assert [exc.code for exc in clicks if isinstance(exc, ForgePilotError)] == ["mission_revision_conflict"]
+            assert [event.node_id for event in missions.graphs.graph_events(tid)
+                    if event.event_type == "node_retry_started"] == ["finish"]
         else:
             preview = await missions.resume(tid, expected_revision=paused["current_revision"])
             assert preview["recovery"]["blocked_reason"] is None, preview
             assert preview["mission"]["recovery_required"]
+            with pytest.raises(ForgePilotError, match="recovery_required"):
+                await missions.retry(tid, expected_revision=preview["mission"]["current_revision"], node_id="finish")
+            assert not any(event.event_type == "node_retry_started" for event in missions.graphs.graph_events(tid))
             await missions.resume(tid, expected_revision=preview["mission"]["current_revision"],
                                   recovery_token=preview["recovery"]["token"])
         assert (await settled(missions, tid))["status"] == "succeeded"

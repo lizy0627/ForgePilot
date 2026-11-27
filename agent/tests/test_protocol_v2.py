@@ -2,8 +2,9 @@
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from forgepilot.api import create_app
 from forgepilot.api_models import ConversationEvent, EventPayload
@@ -116,6 +117,8 @@ def test_v2_request_examples_match_strict_transport_schemas():
         ("mission_missing_current_evidence_node", MissionNode),
         ("mission_execution_pending_node", MissionNode),
         ("mission_scope_pending_node", MissionNode),
+        ("mission_retryable_node", MissionNode),
+        ("mission_interrupted_node", MissionNode),
         ("mission_approve_request", MissionApproval),
         ("mission_reject_request", MissionApproval),
         ("mission_scope_approval_request", MissionApproval),
@@ -130,6 +133,22 @@ def test_v2_request_examples_match_strict_transport_schemas():
     ):
         model.model_validate(samples[name], strict=True)
         Draft202012Validator(model.model_json_schema()).validate(samples[name])
+
+
+def test_node_retry_actions_distinguish_legacy_omission_from_no_action():
+    current = examples()["mission_missing_current_evidence_node"]
+    assert MissionNode.model_validate(current).model_dump()["retry_actions"] == []
+    legacy = dict(current)
+    del legacy["retry_actions"]
+    assert MissionNode.model_validate(legacy).model_dump() == legacy
+
+
+@pytest.mark.parametrize("actions", [None, "retry", ["recover"], ["retry", "retry"]])
+def test_node_retry_actions_require_distinct_supported_actions(actions):
+    node = examples()["mission_retryable_node"] | {"retry_actions": actions}
+    with pytest.raises(ValidationError):
+        MissionNode.model_validate(node)
+    assert not Draft202012Validator(MissionNode.model_json_schema()).is_valid(node)
 
 
 def test_v2_event_examples_cover_every_public_event_category():

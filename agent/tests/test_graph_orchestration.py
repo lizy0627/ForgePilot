@@ -180,7 +180,11 @@ def test_human_gate_pauses_then_approval_resumes_with_revision_check():
         store.close()
 
 
-def test_retry_is_explicit_and_attempt_changes_idempotency_key():
+@pytest.mark.parametrize("definition", [
+    node("flaky", "flaky", node_type=NodeType.AGENT),
+    NodeDefinition("flaky", NodeType.DELIVERY, "flaky", settings={"recovery_role": "deterministic"}),
+], ids=["ordinary-agent", "explicitly-deterministic-delivery"])
+def test_retry_is_explicit_and_attempt_changes_idempotency_key(definition):
     attempts = []
 
     def flaky(context):
@@ -189,7 +193,7 @@ def test_retry_is_explicit_and_attempt_changes_idempotency_key():
             raise NodeExecutionError(FailureKind.MODEL_TRANSIENT, "temporary")
         return success()
 
-    graph = GraphDefinition("retry", 1, (node("flaky", "flaky", node_type=NodeType.AGENT),))
+    graph = GraphDefinition("retry", 1, (definition,))
     store = SqliteEventStore()
     runner = GraphRunner(store, HandlerRegistry({"flaky": flaky}))
     try:
@@ -198,7 +202,17 @@ def test_retry_is_explicit_and_attempt_changes_idempotency_key():
         assert paused.status is NodeStatus.RETRYABLE
         assert current.status is NodeStatus.RETRYABLE and current.attempt == 1
         assert current.result.status is NodeStatus.RETRYABLE and current.result.retryable
+        changed = GraphDefinition("retry", 2, graph.nodes)
+        with pytest.raises(ForgePilotError, match="graph_definition_changed"):
+            runner.retry("task-retry", changed, "flaky", expected_revision=paused.revision)
+        with pytest.raises(ForgePilotError, match="graph_conflict"):
+            runner.retry("task-retry", graph, "flaky", expected_revision=paused.revision - 1)
+        assert runner.store.snapshot("task-retry") == paused
         done = runner.retry("task-retry", graph, "flaky", expected_revision=paused.revision)
+        with pytest.raises(ForgePilotError, match="graph_conflict"):
+            runner.retry("task-retry", graph, "flaky", expected_revision=paused.revision)
+        assert [event.node_id for event in runner.events("task-retry")
+                if event.event_type == "node_retry_started"] == ["flaky"]
         assert done.status is NodeStatus.SUCCEEDED and done.nodes[0].attempt == 2
         assert attempts == [1, 2]
         rows = store._db.execute(
@@ -206,6 +220,30 @@ def test_retry_is_explicit_and_attempt_changes_idempotency_key():
         ).fetchall()
         assert [row["status"] for row in rows] == ["retryable", "succeeded"]
         assert rows[0]["idempotency_key"] != rows[1]["idempotency_key"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(("other_status", "failure", "error"), [
+    (NodeStatus.FAILED, FailureKind.TOOL_POLICY_VIOLATION, "invalid_state"),
+    (NodeStatus.INTERRUPTED, FailureKind.APPLICATION_INTERRUPTED, "recovery_confirmation_required"),
+])
+def test_retryable_node_cannot_restart_graph_with_stopped_sibling(other_status, failure, error):
+    graph = GraphDefinition("mixed", 1, (node("a", "pause"), node("b", "stop")))
+    store = SqliteEventStore()
+    runner = GraphRunner(store, HandlerRegistry({
+        "pause": lambda _: NodeResult(NodeStatus.RETRYABLE, failure_kind=FailureKind.MODEL_TRANSIENT),
+        "stop": lambda _: NodeResult(other_status, failure_kind=failure),
+    }))
+    try:
+        stopped = runner.run("mixed-task", graph)
+        assert stopped.status is other_status
+        assert not runner.store.recovery_required("mixed-task")
+        assert {n.node_id: n.status for n in stopped.nodes} == {"a": NodeStatus.RETRYABLE, "b": other_status}
+        with pytest.raises(ForgePilotError, match=error):
+            runner.retry("mixed-task", graph, "a", expected_revision=stopped.revision)
+        assert runner.store.snapshot("mixed-task") == stopped
+        assert not any(e.event_type == "node_retry_started" for e in runner.events("mixed-task"))
     finally:
         store.close()
 

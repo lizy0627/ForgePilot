@@ -3,6 +3,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.experimental.missing_sentinel import MISSING
 
 from .skill_models import (
     FROZEN_SKILL_SELECTION_LIMIT, MISSION_SKILL_SELECTION_LIMIT, SelectedSkill, SkillDraft,
@@ -351,6 +352,17 @@ class MissionNode(BaseModel):
     pending_action: Literal["execution", "scope_expansion"] | None = Field(
         default=None, description="Approval available for this node attempt at the graph response's current_revision. "
                                   "Null means no pending approval. Older services may omit this field.")
+    retry_actions: list[Literal["retry", "resume"]] | MISSING = Field(
+        default=MISSING, json_schema_extra={"uniqueItems": True},
+        description="Retry or recovery actions offered for this node at the graph's current_revision. "
+                    "An empty array means no action is available. Older services may omit this field.")
+
+    @field_validator("retry_actions")
+    @classmethod
+    def distinct_retry_actions(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("Retry actions must be distinct")
+        return value
 
 
 class MissionSummary(BaseModel):

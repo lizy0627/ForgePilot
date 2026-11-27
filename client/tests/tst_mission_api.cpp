@@ -305,7 +305,7 @@ private slots:
         QCOMPARE(source.requests.first().path, "/api/v2/missions/" + A.toUtf8() + "/skills");
         QCOMPARE(source.requests.first().method, "GET");
     }
-    void graphPendingActionWireValues() {
+    void graphActionWireValues() {
         auto validNode = [](const QJsonObject &node) {
             auto body = graph();
             auto definition = body.value("definition").toObject();
@@ -319,7 +319,7 @@ private slots:
             return MissionProtocol::validGraph(body);
         };
         for (const auto name : {"mission_execution_pending_node", "mission_scope_pending_node",
-                                "mission_missing_current_evidence_node"})
+                                "mission_missing_current_evidence_node", "mission_retryable_node", "mission_interrupted_node"})
             QVERIFY2(validNode(example(name)), name);
 
         auto node = example("mission_scope_pending_node");
@@ -327,6 +327,14 @@ private slots:
         QVERIFY(validNode(node));
         node["pending_action"] = "retry";
         QVERIFY(!validNode(node));
+        node = example("mission_retryable_node");
+        node.remove("retry_actions");
+        QVERIFY(validNode(node));
+        for (const QJsonValue value : {QJsonValue(QJsonValue::Null), QJsonValue("retry"),
+                QJsonValue(QJsonArray{"approve"}), QJsonValue(QJsonArray{"retry", "retry"})}) {
+            node["retry_actions"] = value;
+            QVERIFY(!validNode(node));
+        }
     }
     void scopeExpansionPreviewAndDecision() {
         const auto preview = example("mission_scope_expansion_preview");
